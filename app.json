@@ -1,11 +1,11 @@
 {
   "expo": {
-    "name": "frontend",
-    "slug": "frontend",
+    "name": "AI-Builder-Sprint",
+    "slug": "AI-Builder-Sprint",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
-    "scheme": "frontend",
+    "scheme": "aibuildersprint",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "ios": {
