@@ -4,7 +4,7 @@ export default function HomeScreen() {
   return (
     <View style={styles.container}>
       <Text style={styles.title}>앱 연결 성공!</Text>
-      <Text>우리 서비스 만들기 시작 🚀</Text>
+      <Text>시작이 반 !!</Text>
     </View>
   );
 }
