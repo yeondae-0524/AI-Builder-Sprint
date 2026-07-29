@@ -349,7 +349,7 @@ export default function HomeScreen() {
         <View style={styles.sheetHeader}>
           <View>
             <Text style={styles.sheetTitle}>
-              오늘의 추천 미션
+              추천 미션
             </Text>
 
             <Text style={styles.sheetSub}>
@@ -454,19 +454,26 @@ export default function HomeScreen() {
                       onPress={() => setSelectedMission(mission)}
                       style={({ pressed }) => [
                         styles.selectBtn,
-                        selectedMission?.id === mission.id &&
+
+                        // 선택되지 않았을 때 파란색
+                        selectedMission?.id !== mission.id &&
                           styles.selectedButton,
+
                         pressed && styles.pressed,
                       ]}
                     >
                       <Text
                         style={[
                           styles.selectButtonText,
-                          selectedMission?.id === mission.id &&
+
+                          // 선택되지 않았을 때 흰색 글씨
+                          selectedMission?.id !== mission.id &&
                             styles.selectedButtonText,
                         ]}
                       >
-                        이 미션 선택
+                        {selectedMission?.id === mission.id
+                          ? "선택됨"
+                          : "이 미션 선택"}
                       </Text>
                     </Pressable>
 

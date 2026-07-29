@@ -1104,6 +1104,75 @@ const styles = StyleSheet.create({
     color: COLORS.primary,
   },
 
+  aiRecommendationCard: {
+    marginTop: 4,
+    marginBottom: 24,
+    padding: 18,
+
+    backgroundColor: COLORS.primaryLight,
+
+    borderWidth: 1,
+    borderColor: "rgba(61, 90, 254, 0.15)",
+    borderRadius: 16,
+  },
+
+  aiRecommendationTitle: {
+    marginBottom: 6,
+
+    fontSize: 16,
+    fontWeight: "800",
+    color: COLORS.textMain,
+  },
+
+  aiRecommendationDescription: {
+    marginBottom: 14,
+
+    fontSize: 12,
+    lineHeight: 19,
+    color: COLORS.textSub,
+  },
+
+  aiRecommendationButton: {
+    height: 44,
+
+    alignItems: "center",
+    justifyContent: "center",
+
+    backgroundColor: COLORS.primary,
+    borderRadius: 11,
+  },
+
+  aiRecommendationButtonDisabled: {
+    opacity: 0.55,
+  },
+
+  aiRecommendationButtonText: {
+    fontSize: 13,
+    fontWeight: "700",
+    color: COLORS.white,
+  },
+
+  aiRecommendationResult: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+
+    marginTop: 14,
+    padding: 13,
+
+    backgroundColor: COLORS.white,
+    borderRadius: 11,
+  },
+
+  aiRecommendationResultText: {
+    flex: 1,
+
+    marginLeft: 8,
+
+    fontSize: 12,
+    lineHeight: 19,
+    color: COLORS.textSub,
+  },
+
   detailBottomSpace: {
     height: 20,
   },
