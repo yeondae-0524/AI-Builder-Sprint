@@ -1,11 +1,13 @@
 import Ionicons from "@expo/vector-icons/Ionicons";
 import { Tabs } from "expo-router";
+import { MissionProvider } from "../_mission-context";
 
 const ACTIVE_COLOR = "#171719";
 const INACTIVE_COLOR = "#A0A0A6";
 
 export default function TabLayout() {
   return (
+    <MissionProvider>
     <Tabs
       initialRouteName="index"
       screenOptions={{
@@ -116,5 +118,6 @@ export default function TabLayout() {
         }}
       />
     </Tabs>
+    </MissionProvider>
   );
 }
