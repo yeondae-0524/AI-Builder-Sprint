@@ -1,14 +1,17 @@
 import Ionicons from "@expo/vector-icons/Ionicons";
 import { useRouter } from "expo-router";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
-    Alert,
-    Image,
-    Pressable,
-    ScrollView,
-    StyleSheet,
-    Text,
-    View,
+  Alert,
+  Animated,
+  Dimensions,
+  Image,
+  PanResponder,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
@@ -62,6 +65,8 @@ const CALENDAR_PHOTOS = [
 ];
 
 const WEEK_DAYS = ["일", "월", "화", "수", "목", "금", "토"];
+const SCREEN_HEIGHT = Dimensions.get("window").height;
+const SHEET_CLOSED_POSITION = SCREEN_HEIGHT;
 
 type CalendarCell = number | null;
 
@@ -69,6 +74,100 @@ export default function CalendarScreen() {
   const router = useRouter();
 
   const [selectedDay, setSelectedDay] = useState<number | null>(null);
+
+  const sheetTranslateY = useRef(
+    new Animated.Value(SHEET_CLOSED_POSITION),
+  ).current;
+
+  const dragStartPosition = useRef(0);
+
+  const isSheetOpen = selectedDay !== null;
+
+  useEffect(() => {
+    if (!isSheetOpen) {
+      return;
+    }
+
+    Animated.spring(sheetTranslateY, {
+      toValue: 0,
+      damping: 22,
+      stiffness: 180,
+      mass: 0.8,
+      useNativeDriver: true,
+    }).start();
+  }, [isSheetOpen, sheetTranslateY]);
+
+  const closeSheet = () => {
+    Animated.timing(sheetTranslateY, {
+      toValue: SHEET_CLOSED_POSITION,
+      duration: 220,
+      useNativeDriver: true,
+    }).start(({ finished }) => {
+      if (finished) {
+        setSelectedDay(null);
+      }
+    });
+  };
+
+  const restoreSheet = () => {
+    Animated.spring(sheetTranslateY, {
+      toValue: 0,
+      damping: 22,
+      stiffness: 180,
+      mass: 0.8,
+      useNativeDriver: true,
+    }).start();
+  };
+
+  const panResponder = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+
+      onMoveShouldSetPanResponder: (_event, gestureState) =>
+        Math.abs(gestureState.dy) > 3,
+
+      onPanResponderGrant: () => {
+        sheetTranslateY.stopAnimation((currentPosition) => {
+          dragStartPosition.current = currentPosition;
+        });
+      },
+
+      onPanResponderMove: (_event, gestureState) => {
+        const nextPosition =
+          dragStartPosition.current + gestureState.dy;
+
+        // 위쪽으로는 더 올라가지 않고 아래쪽으로만 움직이게 제한
+        const limitedPosition = Math.max(
+          0,
+          Math.min(nextPosition, SHEET_CLOSED_POSITION),
+        );
+
+        sheetTranslateY.setValue(limitedPosition);
+      },
+
+      onPanResponderRelease: (_event, gestureState) => {
+        const currentPosition = Math.max(
+          0,
+          dragStartPosition.current + gestureState.dy,
+        );
+
+        const shouldClose =
+          currentPosition > 110 || gestureState.vy > 0.7;
+
+        if (shouldClose) {
+          closeSheet();
+        } else {
+          restoreSheet();
+        }
+      },
+
+      onPanResponderTerminate: () => {
+        restoreSheet();
+      },
+
+      onPanResponderTerminationRequest: () => false,
+    }),
+  ).current;
 
   // 시작 요일 앞에 빈칸을 넣고, 그 뒤에 1~31일을 배치
   const calendarCells: CalendarCell[] = [
@@ -95,10 +194,18 @@ export default function CalendarScreen() {
       return;
     }
 
-    // 같은 날짜를 다시 누르면 하단 시트 닫기
-    setSelectedDay((previousDay) =>
-      previousDay === day ? null : day,
-    );
+    // 현재 선택된 날짜를 다시 누르면 시트를 아래로 내려 닫기
+    if (selectedDay === day) {
+      closeSheet();
+      return;
+    }
+
+    // 닫혀 있던 시트를 다시 아래쪽에서 시작하게 설정
+    if (selectedDay === null) {
+      sheetTranslateY.setValue(SHEET_CLOSED_POSITION);
+    }
+
+    setSelectedDay(day);
   };
 
   const handleRecordDetail = () => {
@@ -338,13 +445,24 @@ export default function CalendarScreen() {
 
         {/* 날짜 선택 시 나타나는 하단 시트 */}
         {selectedDay !== null && (
-          <View style={styles.bottomSheet}>
-            <Pressable
-              onPress={() => setSelectedDay(null)}
-              style={styles.sheetHandleArea}
-            >
-              <View style={styles.sheetHandle} />
-            </Pressable>
+          <Animated.View
+            style={[
+              styles.bottomSheet,
+              {
+                transform: [
+                  {
+                    translateY: sheetTranslateY,
+                  },
+                ],
+              },
+            ]}
+          >
+          <View
+            style={styles.sheetHandleArea}
+            {...panResponder.panHandlers}
+          >
+            <View style={styles.sheetHandle} />
+          </View>
 
             {selectedDayIsCompleted ? (
               <View style={styles.recordContent}>
@@ -431,8 +549,8 @@ export default function CalendarScreen() {
                 </Pressable>
               </View>
             )}
-          </View>
-        )}
+          </Animated.View>
+        )}  
       </View>
     </SafeAreaView>
   );
@@ -746,6 +864,8 @@ const styles = StyleSheet.create({
     bottom: 0,
     left: 0,
 
+    overflow: "hidden",
+
     paddingBottom: 104,
 
     backgroundColor: COLORS.white,
@@ -766,7 +886,6 @@ const styles = StyleSheet.create({
 
   sheetHandleArea: {
     height: 28,
-
     alignItems: "center",
     justifyContent: "center",
   },
@@ -774,7 +893,6 @@ const styles = StyleSheet.create({
   sheetHandle: {
     width: 38,
     height: 4,
-
     backgroundColor: "#D7D9DE",
     borderRadius: 2,
   },
