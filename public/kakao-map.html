@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1"
+    />
+
+    <title>카카오 지도 테스트</title>
+
+    <style>
+      html,
+      body,
+      #map {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+      }
+
+      #error {
+        position: fixed;
+        top: 10px;
+        left: 10px;
+        z-index: 10;
+        padding: 10px;
+        background: white;
+        color: red;
+      }
+    </style>
+  </head>
+
+  <body>
+    <div id="error">카카오 지도 불러오는 중...</div>
+    <div id="map"></div>
+
+    <script
+      type="text/javascript"
+      src="https://dapi.kakao.com/v2/maps/sdk.js?appkey=f937d15a94db64ab114b3495f8b6ad3c&autoload=false"
+    ></script>
+
+    <script>
+      const errorElement = document.getElementById('error');
+
+      if (typeof kakao === 'undefined') {
+        errorElement.textContent =
+          '카카오 SDK 로드 실패: 키, 도메인, 카카오맵 활성화를 확인하세요.';
+      } else {
+        kakao.maps.load(function () {
+          const position = new kakao.maps.LatLng(
+            35.1795543,
+            129.0756416,
+          );
+
+          const map = new kakao.maps.Map(
+            document.getElementById('map'),
+            {
+              center: position,
+              level: 5,
+            },
+          );
+
+          new kakao.maps.Marker({
+            map,
+            position,
+          });
+
+          errorElement.style.display = 'none';
+        });
+      }
+    </script>
+  </body>
+</html>
