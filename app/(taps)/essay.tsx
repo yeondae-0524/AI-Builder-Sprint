@@ -1,16 +1,19 @@
 import Ionicons from "@expo/vector-icons/Ionicons";
 import { useState } from "react";
 import {
-    Alert,
-    Image,
-    Pressable,
-    ScrollView,
-    Share,
-    StyleSheet,
-    Text,
-    View,
+  ActivityIndicator,
+  Alert,
+  Image,
+  Pressable,
+  ScrollView,
+  Share,
+  StyleSheet,
+  Text,
+  View,
 } from "react-native";
+
 import { SafeAreaView } from "react-native-safe-area-context";
+import { getChallengeRecommendation } from "../../services/upstage";
 
 const COLORS = {
   primary: "#3D5AFE",
@@ -164,6 +167,9 @@ function getEssayEntries(essay: Essay): EssayEntry[] {
 export default function EssayScreen() {
   const [selectedEssay, setSelectedEssay] =
     useState<Essay | null>(null);
+  const [aiRecommendation, setAiRecommendation] =
+    useState("");
+  const [aiLoading, setAiLoading] = useState(false);
 
   const handleShare = async () => {
     if (!selectedEssay) {
@@ -195,6 +201,40 @@ export default function EssayScreen() {
       "PDF 저장",
       "PDF 저장 기능은 추후 연결할 예정입니다.",
     );
+  };
+
+  const handleAiRecommendation = async () => {
+    if (!selectedEssay) {
+      return;
+    }
+
+    try {
+      setAiLoading(true);
+      setAiRecommendation("");
+
+      const entries = getEssayEntries(selectedEssay);
+
+      const message = entries
+        .map(
+          (entry) =>
+            `경험: ${entry.mission}\n사용자 기록: ${entry.userText}`,
+        )
+        .join("\n\n");
+
+      const result =
+        await getChallengeRecommendation(message);
+
+      setAiRecommendation(result);
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error
+          ? error.message
+          : "AI 추천을 불러오지 못했습니다.";
+
+      Alert.alert("AI 추천 실패", errorMessage);
+    } finally {
+      setAiLoading(false);
+    }
   };
 
   if (selectedEssay) {
@@ -252,6 +292,68 @@ export default function EssayScreen() {
                   </View>
                 </View>
               ))}
+
+              <View style={styles.aiRecommendationCard}>
+                <Text style={styles.aiRecommendationTitle}>
+                  다음 작은 경험
+                </Text>
+
+                <Text
+                  style={
+                    styles.aiRecommendationDescription
+                  }
+                >
+                  지금까지의 기록을 바탕으로 AI가 다음
+                  챌린지를 추천해드려요.
+                </Text>
+
+                <Pressable
+                  onPress={handleAiRecommendation}
+                  disabled={aiLoading}
+                  style={({ pressed }) => [
+                    styles.aiRecommendationButton,
+                    pressed && styles.buttonPressed,
+                    aiLoading &&
+                      styles.aiRecommendationButtonDisabled,
+                  ]}
+                >
+                  {aiLoading ? (
+                    <ActivityIndicator
+                      color={COLORS.white}
+                    />
+                  ) : (
+                    <Text
+                      style={
+                        styles.aiRecommendationButtonText
+                      }
+                    >
+                      AI 추천받기
+                    </Text>
+                  )}
+                </Pressable>
+
+                {aiRecommendation ? (
+                  <View
+                    style={
+                      styles.aiRecommendationResult
+                    }
+                  >
+                    <Ionicons
+                      name="sparkles"
+                      size={17}
+                      color={COLORS.primary}
+                    />
+
+                    <Text
+                      style={
+                        styles.aiRecommendationResultText
+                      }
+                    >
+                      {aiRecommendation}
+                    </Text>
+                  </View>
+                ) : null}
+              </View>
 
               <View style={styles.detailBottomSpace} />
             </View>
