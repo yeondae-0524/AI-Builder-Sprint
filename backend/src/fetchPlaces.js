@@ -1,8 +1,15 @@
-import fetch from 'node-fetch';
-import { supabase } from './supabase.js';
+import "dotenv/config";
 
-// 🔑 2단계에서 복사한 카카오 REST API 키를 여기에 넣으세요!
-const KAKAO_REST_API_KEY = 'c10a1b62f7bbf1d90e0ff60bb94bdadd';
+import { supabase } from "./supabase.js";
+
+const KAKAO_REST_API_KEY =
+  process.env.KAKAO_REST_API_KEY;
+
+if (!KAKAO_REST_API_KEY) {
+  throw new Error(
+    "KAKAO_REST_API_KEY 환경변수가 설정되지 않았습니다.",
+  );
+}
 
 // 수집하고 싶은 키워드 목록 (부산 지역 특화)
 const keywords = ['부산 독립서점', '부산 공방', '부산 소품샵', '부산 문화공간'];
