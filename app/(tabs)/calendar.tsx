@@ -967,6 +967,36 @@ export default function CalendarScreen() {
               const isFuture = date.getTime() > todayStart.getTime();
               const isSelected = selectedDay === day;
 
+              const isJourneyDay =
+                journey !== null &&
+                dateKey >= journey.start_date &&
+                dateKey <= journey.end_date;
+
+              const isJourneyStart =
+                journey !== null &&
+                dateKey === journey.start_date;
+
+              const isJourneyEnd =
+                journey !== null &&
+                dateKey === journey.end_date;
+
+              // 한 주가 바뀌면 여정 띠를 둥글게 끊어서 표시
+              const isJourneySegmentStart =
+                isJourneyDay &&
+                (
+                  isJourneyStart ||
+                  index % 7 === 0 ||
+                  day === 1
+                );
+
+              const isJourneySegmentEnd =
+                isJourneyDay &&
+                (
+                  isJourneyEnd ||
+                  index % 7 === 6 ||
+                  day === totalDays
+                );
+
               return (
                 <Pressable
                   key={day}
@@ -974,9 +1004,26 @@ export default function CalendarScreen() {
                   onPress={() => handleDayPress(day)}
                   style={[
                     styles.calendarCell,
-                    isFuture && styles.futureCell,
+                    isFuture &&
+                      !isJourneyDay &&
+                      styles.futureCell,
                   ]}
                 >
+                  {isJourneyDay && (
+                    <View
+                      pointerEvents="none"
+                      style={[
+                        styles.journeyTrack,
+
+                        isJourneySegmentStart &&
+                          styles.journeyTrackStart,
+
+                        isJourneySegmentEnd &&
+                          styles.journeyTrackEnd,
+                      ]}
+                    />
+                  )}
+                  
                   {isCompleted ? (
                     <View
                       style={[
@@ -1439,6 +1486,8 @@ const styles = StyleSheet.create({
   },
 
   calendarCell: {
+    position: "relative",
+
     width: "14.285714%",
     minHeight: 50,
 
@@ -1447,11 +1496,35 @@ const styles = StyleSheet.create({
     paddingVertical: 3,
   },
 
+  journeyTrack: {
+    position: "absolute",
+
+    top: 3,
+    right: 0,
+    left: 0,
+
+    height: 34,
+
+    backgroundColor: "#C7D2FE",
+  },
+
+  journeyTrackStart: {
+    borderTopLeftRadius: 17,
+    borderBottomLeftRadius: 17,
+  },
+
+  journeyTrackEnd: {
+    borderTopRightRadius: 17,
+    borderBottomRightRadius: 17,
+  },
+
   futureCell: {
     opacity: 0.28,
   },
 
   normalDayCircle: {
+    zIndex: 1,
+
     width: 34,
     height: 34,
 
@@ -1482,6 +1555,9 @@ const styles = StyleSheet.create({
   },
 
   startedDayCircle: {
+    position: "relative",
+    zIndex: 1,
+  
     width: 34,
     height: 34,
 
@@ -1500,6 +1576,8 @@ const styles = StyleSheet.create({
   },
 
   completedImageWrapper: {
+    position: "relative",
+    zIndex: 1,
     width: 34,
     height: 34,
 
@@ -1522,6 +1600,9 @@ const styles = StyleSheet.create({
   },
 
   completedDot: {
+    position: "relative",
+    zIndex: 1,
+    
     width: 4,
     height: 4,
 
