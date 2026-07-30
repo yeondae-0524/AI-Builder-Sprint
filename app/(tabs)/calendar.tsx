@@ -64,6 +64,38 @@ type StartedMission = {
   missionTitle: string;
 };
 
+type JourneyOption = {
+  label: string;
+  title: string;
+  durationDays: number;
+  targetRecordCount: number;
+  description: string;
+};
+
+const JOURNEY_OPTIONS: JourneyOption[] = [
+  {
+    label: "1주",
+    title: "1주의 여정",
+    durationDays: 7,
+    targetRecordCount: 4,
+    description: "7일 동안 4번 기록",
+  },
+  {
+    label: "2주",
+    title: "2주의 여정",
+    durationDays: 14,
+    targetRecordCount: 7,
+    description: "14일 동안 7번 기록",
+  },
+  {
+    label: "한 달",
+    title: "한 달의 여정",
+    durationDays: 30,
+    targetRecordCount: 15,
+    description: "30일 동안 15번 기록",
+  },
+];
+
 function toDateKey(date: Date) {
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, "0");
@@ -101,6 +133,8 @@ export default function CalendarScreen() {
   const [journey, setJourney] = useState<Journey | null>(null);
   const [journeyRecordCount, setJourneyRecordCount] = useState(0);
   const [isLoading, setIsLoading] = useState(true);
+  const [isCreatingJourney, setIsCreatingJourney] = useState(false);
+  const [isStoppingJourney, setIsStoppingJourney] = useState(false);
 
   const sheetTranslateY = useRef(
     new Animated.Value(SHEET_CLOSED_POSITION),
@@ -158,6 +192,7 @@ export default function CalendarScreen() {
               "id, title, duration_days, target_record_count, start_date, end_date, status",
             )
             .eq("user_id", user.id)
+            .eq("status", "active")
             .lte("start_date", todayKey)
             .gte("end_date", todayKey)
             .order("start_date", { ascending: false })
@@ -541,6 +576,134 @@ export default function CalendarScreen() {
       )
     : null;
 
+  const handleStartJourney = (option: JourneyOption) => {
+    Alert.alert(
+      `${option.label} 여정 시작`,
+      `오늘부터 ${option.durationDays}일 동안 ${option.targetRecordCount}번의 경험을 기록하면 완주해요. 시작할까요?`,
+      [
+        {
+          text: "취소",
+          style: "cancel",
+        },
+        {
+          text: "시작하기",
+          onPress: async () => {
+            if (isCreatingJourney) {
+              return;
+            }
+
+            setIsCreatingJourney(true);
+
+            try {
+              const {
+                data: { user },
+                error: userError,
+              } = await supabase.auth.getUser();
+
+              if (userError || !user) {
+                Alert.alert(
+                  "여정 시작 실패",
+                  userError?.message ?? "로그인 정보를 확인해 주세요.",
+                );
+                return;
+              }
+
+              // 시작일을 1일 차로 계산하므로 7일 여정은 오늘부터 6일 뒤에 끝납니다.
+              const endDate = new Date(
+                todayStart.getFullYear(),
+                todayStart.getMonth(),
+                todayStart.getDate() + option.durationDays - 1,
+              );
+
+              const { data, error } = await supabase
+                .from("journeys")
+                .insert({
+                  user_id: user.id,
+                  title: option.title,
+                  duration_days: option.durationDays,
+                  target_record_count: option.targetRecordCount,
+                  start_date: todayKey,
+                  end_date: toDateKey(endDate),
+                  status: "active",
+                })
+                .select(
+                  "id, title, duration_days, target_record_count, start_date, end_date, status",
+                )
+                .single();
+
+              if (error || !data) {
+                Alert.alert(
+                  "여정 시작 실패",
+                  error?.message ?? "여정 정보를 저장하지 못했습니다.",
+                );
+                return;
+              }
+
+              setJourney(data as Journey);
+              setJourneyRecordCount(0);
+
+              Alert.alert(
+                "여정 시작",
+                `${option.title}이 오늘부터 시작됐어요.`,
+              );
+            } finally {
+              setIsCreatingJourney(false);
+            }
+          },
+        },
+      ],
+    );
+  };
+
+  const handleStopJourney = () => {
+    if (!journey || isStoppingJourney) {
+      return;
+    }
+
+    Alert.alert(
+      "여정 중단하기",
+      "여정을 중단하면 이 여정으로 에세이를 만드는 과정만 멈춰요. 지금까지 남긴 기록과 사진은 그대로 보관돼요.",
+      [
+        {
+          text: "계속하기",
+          style: "cancel",
+        },
+        {
+          text: "여정 중단",
+          style: "destructive",
+          onPress: async () => {
+            setIsStoppingJourney(true);
+
+            try {
+              const { error } = await supabase
+                .from("journeys")
+                .update({ status: "cancelled" })
+                .eq("id", journey.id)
+                .eq("status", "active");
+
+              if (error) {
+                Alert.alert("여정 중단 실패", error.message);
+                return;
+              }
+
+              // journeys만 중단 상태로 변경합니다.
+              // records와 record_photos는 삭제하거나 수정하지 않습니다.
+              setJourney(null);
+              setJourneyRecordCount(0);
+
+              Alert.alert(
+                "여정이 중단됐어요",
+                "기존 기록은 캘린더에 그대로 남아 있어요. 새 여정은 바로 다시 시작할 수 있어요.",
+              );
+            } finally {
+              setIsStoppingJourney(false);
+            }
+          },
+        },
+      ],
+    );
+  };
+
   const handleDayPress = (day: number) => {
     const date = new Date(visibleYear, visibleMonthIndex, day);
 
@@ -595,65 +758,132 @@ export default function CalendarScreen() {
           contentContainerStyle={styles.scrollContent}
         >
           <View style={styles.progressCard}>
-            <View style={styles.progressHeader}>
-              <View>
-                <Text style={styles.progressCaption}>
-                  진행 중인 여정
-                </Text>
-
-                <Text style={styles.journeyTitle}>
-                  {isLoading
-                    ? "불러오는 중..."
-                    : journey?.title ?? "진행 중인 여정이 없어요"}
+            {isLoading ? (
+              <View style={styles.journeyLoadingArea}>
+                <Text style={styles.journeyLoadingText}>
+                  여정 정보를 불러오는 중...
                 </Text>
               </View>
+            ) : journey ? (
+              <>
+                <View style={styles.progressHeader}>
+                  <View>
+                    <Text style={styles.progressCaption}>
+                      진행 중인 여정
+                    </Text>
 
-              <View style={styles.dDayBox}>
-                <Text style={styles.dDayCaption}>종료까지</Text>
-                <Text style={styles.dDayText}>
-                  {dDay === null ? "--" : `D-${dDay}`}
-                </Text>
-              </View>
-            </View>
+                    <Text style={styles.journeyTitle}>
+                      {journey.title}
+                    </Text>
+                  </View>
 
-            <View style={styles.progressInfoRow}>
-              <Text style={styles.progressDescription}>
-                {journey
-                  ? `${journeyTarget}번 중 ${journeyRecordCount}번의 경험을 기록했어요`
-                  : "새 여정을 시작하면 진행 상황이 표시돼요"}
-              </Text>
+                  <View style={styles.dDayBox}>
+                    <Text style={styles.dDayCaption}>종료까지</Text>
+                    <Text style={styles.dDayText}>
+                      {dDay === null ? "--" : `D-${dDay}`}
+                    </Text>
+                  </View>
+                </View>
 
-              <Text style={styles.progressCount}>
-                {journey
-                  ? `${journeyRecordCount}/${journeyTarget}`
-                  : "0/0"}
-              </Text>
-            </View>
+                <View style={styles.progressInfoRow}>
+                  <Text style={styles.progressDescription}>
+                    {journeyTarget}번 중 {journeyRecordCount}번의 경험을
+                    기록했어요
+                  </Text>
 
-            <View style={styles.progressBarBackground}>
-              <View
-                style={[
-                  styles.progressBarFill,
-                  { width: progressPercentage },
-                ]}
-              />
-            </View>
+                  <Text style={styles.progressCount}>
+                    {journeyRecordCount}/{journeyTarget}
+                  </Text>
+                </View>
 
-            <View style={styles.essayNotice}>
-              <Text style={styles.essayNoticeText}>
-                {journey ? (
-                  <>
+                <View style={styles.progressBarBackground}>
+                  <View
+                    style={[
+                      styles.progressBarFill,
+                      { width: progressPercentage },
+                    ]}
+                  />
+                </View>
+
+                <View style={styles.essayNotice}>
+                  <Text style={styles.essayNoticeText}>
                     에세이 완성까지{" "}
                     <Text style={styles.essayNoticeStrong}>
                       {remainingRecords}번
                     </Text>{" "}
                     더 남았어요
-                  </>
-                ) : (
-                  "진행할 여정을 먼저 선택해 주세요"
+                  </Text>
+                </View>
+
+                <Pressable
+                  disabled={isStoppingJourney}
+                  onPress={handleStopJourney}
+                  style={({ pressed }) => [
+                    styles.stopJourneyButton,
+                    pressed && styles.buttonPressed,
+                    isStoppingJourney && styles.disabledButton,
+                  ]}
+                >
+                  <Text style={styles.stopJourneyButtonText}>
+                    {isStoppingJourney
+                      ? "여정을 중단하는 중..."
+                      : "여정 중단하기"}
+                  </Text>
+                </Pressable>
+              </>
+            ) : (
+              <View>
+                <Text style={styles.journeyPickerCaption}>
+                  새 여정 시작하기
+                </Text>
+
+                <Text style={styles.journeyPickerTitle}>
+                  어느 속도로 시작해볼까요?
+                </Text>
+
+                <Text style={styles.journeyPickerDescription}>
+                  고른 날부터 여정이 시작돼요. 기간의 절반만 기록해도
+                  완주할 수 있어요.
+                </Text>
+
+                <View style={styles.journeyOptionList}>
+                  {JOURNEY_OPTIONS.map((option) => (
+                    <Pressable
+                      key={option.label}
+                      disabled={isCreatingJourney}
+                      onPress={() => handleStartJourney(option)}
+                      style={({ pressed }) => [
+                        styles.journeyOptionButton,
+                        pressed && styles.buttonPressed,
+                        isCreatingJourney && styles.disabledButton,
+                      ]}
+                    >
+                      <View>
+                        <Text style={styles.journeyOptionLabel}>
+                          {option.label}
+                        </Text>
+
+                        <Text style={styles.journeyOptionDescription}>
+                          {option.description}
+                        </Text>
+                      </View>
+
+                      <Ionicons
+                        name="arrow-forward-circle"
+                        size={25}
+                        color={COLORS.primary}
+                      />
+                    </Pressable>
+                  ))}
+                </View>
+
+                {isCreatingJourney && (
+                  <Text style={styles.journeyCreatingText}>
+                    여정을 시작하는 중...
+                  </Text>
                 )}
-              </Text>
-            </View>
+              </View>
+            )}
           </View>
 
           <View style={styles.monthHeader}>
@@ -954,6 +1184,90 @@ const styles = StyleSheet.create({
 
     borderWidth: 1,
     borderColor: "rgba(0, 0, 0, 0.06)",
+  },
+
+  journeyLoadingArea: {
+    minHeight: 100,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  journeyLoadingText: {
+    fontSize: 13,
+    color: COLORS.textMuted,
+  },
+
+  journeyPickerCaption: {
+    marginBottom: 4,
+    fontSize: 12,
+    color: COLORS.textMuted,
+  },
+
+  journeyPickerTitle: {
+    marginBottom: 6,
+    fontSize: 18,
+    fontWeight: "700",
+    color: COLORS.textMain,
+  },
+
+  journeyPickerDescription: {
+    marginBottom: 14,
+    fontSize: 12,
+    lineHeight: 18,
+    color: COLORS.textSub,
+  },
+
+  journeyOptionList: {
+    gap: 8,
+  },
+
+  journeyOptionButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    backgroundColor: COLORS.primaryLight,
+    borderWidth: 1,
+    borderColor: "#DCE3FF",
+    borderRadius: 12,
+  },
+
+  journeyOptionLabel: {
+    marginBottom: 2,
+    fontSize: 14,
+    fontWeight: "700",
+    color: COLORS.primary,
+  },
+
+  journeyOptionDescription: {
+    fontSize: 11,
+    color: COLORS.textSub,
+  },
+
+  journeyCreatingText: {
+    marginTop: 10,
+    fontSize: 11,
+    textAlign: "center",
+    color: COLORS.textMuted,
+  },
+
+  disabledButton: {
+    opacity: 0.55,
+  },
+
+  stopJourneyButton: {
+    alignSelf: "center",
+    marginTop: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+  },
+
+  stopJourneyButtonText: {
+    fontSize: 11,
+    fontWeight: "600",
+    color: COLORS.textMuted,
+    textDecorationLine: "underline",
   },
 
   progressHeader: {
