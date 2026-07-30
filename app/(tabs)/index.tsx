@@ -80,10 +80,12 @@ export default function HomeScreen() {
         let longitude: number | undefined;
 
         const { status } = await Location.requestForegroundPermissionsAsync();
+        console.log("📍 위치 권한 상태:", status);
         if (status === "granted") {
           const loc = await Location.getCurrentPositionAsync({});
           latitude = loc.coords.latitude;
           longitude = loc.coords.longitude;
+          console.log("📍 받아온 좌표:", latitude, longitude);
           setUserLocation({ lat: latitude, lng: longitude });
         }
 
@@ -197,6 +199,7 @@ export default function HomeScreen() {
             lat: m.placeLat!,
             lng: m.placeLng!,
             label: m.title,
+            category: m.cat,
           }))}
       />
 
