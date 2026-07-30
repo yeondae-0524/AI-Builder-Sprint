@@ -13,6 +13,9 @@ import {
   TextInput,
   View,
 } from "react-native";
+import { getRecommendedMissions } from "../../services/challenge.service";
+import { createJourney, getActiveJourney } from "../../services/journey.service";
+import { selectMission, startMission } from "../../services/mission-attempt.service";
 import { useMission } from "../_mission-context";
 import { KakaoMapView } from "./_kakao-map";
 
@@ -95,13 +98,13 @@ export default function DiscoverScreen() {
   const [liked, setLiked] = useState([]);
   const [searchQuery, setSearchQuery] = useState("");
   const [mapCenter, setMapCenter] = useState(DEFAULT_CENTER);
+  const [startingMission, setStartingMission] = useState(false);
 
-  const { mainMission, setMainMission } = useMission();
+  const { mainMission, setMainMission, activeAttempt, setActiveAttempt } = useMission();
 
   const sheetTranslateY = useRef(new Animated.Value(SHEET_CLOSE_POSITION)).current;
   const dragStart = useRef(0);
 
-  // 검색어와 장소 이름이 일치하는 것들
   const searchResults = useMemo(() => {
     if (!searchQuery.trim()) return [];
     return BUBBLES.filter((b) => b.place.includes(searchQuery.trim()));
@@ -167,19 +170,47 @@ export default function DiscoverScreen() {
   const webDragStyle =
     Platform.OS === "web" ? { touchAction: "none", cursor: "grab" } : undefined;
 
-  const handleTryMission = () => {
+  const handleTryMission = async () => {
     if (!sheetBubble) return;
-    setMainMission({
-      id: `bubble-${sheetBubble.id}`,
-      title: sheetBubble.mission,
-      desc: sheetBubble.note,
-      time: "20분",
-      dist: "-",
-      cost: "-",
-      cat: sheetBubble.emotion,
-    });
-    Alert.alert("메인 미션으로 설정했어요", "홈 탭에서 확인할 수 있어요.");
-    closeSheet();
+    setStartingMission(true);
+    try {
+      let journey = await getActiveJourney();
+      if (!journey) {
+        journey = await createJourney({ durationDays: 14 });
+      }
+
+      // 발견 탭 기록은 아직 실제 missions 테이블과 연결되지 않아,
+      // 실제 DB 미션 하나를 골라 여기에 시도를 연결함
+      const candidates = await getRecommendedMissions(1, 0);
+      if (candidates.length === 0) {
+        throw new Error("연결할 수 있는 미션이 없어요. 잠시 후 다시 시도해주세요.");
+      }
+      const realMission = candidates[0];
+
+      const attemptId = await selectMission({
+        journeyId: journey.id,
+        missionId: realMission.id,
+      });
+      await startMission(attemptId);
+
+      setActiveAttempt({ attemptId, journeyId: journey.id, missionId: realMission.id });
+      setMainMission({
+        id: `bubble-${sheetBubble.id}`,
+        title: sheetBubble.mission,
+        desc: sheetBubble.note,
+        time: "20분",
+        dist: "-",
+        cost: "-",
+        cat: sheetBubble.emotion,
+      });
+
+      Alert.alert("메인 미션으로 설정했어요", "홈 탭에서 기록을 남기고 완료할 수 있어요.");
+      closeSheet();
+    } catch (error) {
+      Alert.alert("미션 시작 실패", error instanceof Error ? error.message : "오류가 발생했어요.");
+    } finally {
+      setStartingMission(false);
+    }
   };
 
   const handleSelectSearchResult = (bubble) => {
@@ -224,7 +255,6 @@ export default function DiscoverScreen() {
           </Pressable>
         </View>
 
-        {/* 검색 결과 드롭다운 */}
         {searchQuery.trim().length > 0 && (
           <View style={styles.searchDropdown}>
             {searchResults.length > 0 ? (
@@ -301,8 +331,14 @@ export default function DiscoverScreen() {
               </View>
             ) : (
               <View style={{ flexDirection: "row", gap: 8, marginTop: 8 }}>
-                <Pressable style={styles.primaryBtn} onPress={handleTryMission}>
-                  <Text style={{ color: WH, fontSize: 13, fontWeight: "700" }}>나도 해볼래요</Text>
+                <Pressable
+                  style={[styles.primaryBtn, startingMission && { opacity: 0.6 }]}
+                  onPress={handleTryMission}
+                  disabled={startingMission}
+                >
+                  <Text style={{ color: WH, fontSize: 13, fontWeight: "700" }}>
+                    {startingMission ? "설정하는 중..." : "나도 해볼래요"}
+                  </Text>
                 </Pressable>
                 <Pressable style={styles.secondaryBtn}>
                   <Text style={{ color: T1, fontSize: 13 }}>저장</Text>

@@ -2,9 +2,10 @@ import * as Location from "expo-location";
 import { useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
+  Alert,
   Animated,
   Dimensions,
-  Modal,
+  Linking,
   PanResponder,
   Platform,
   Pressable,
@@ -15,11 +16,20 @@ import {
 } from "react-native";
 import { supabase } from "../../lib/supabase";
 import { Mission as BackendMission } from "../../services/challenge.service";
+import { createJourney, getActiveJourney } from "../../services/journey.service";
+import {
+  getActiveMissionAttempt,
+  selectMission,
+  startMission,
+} from "../../services/mission-attempt.service";
 import { Mission, useMission } from "../_mission-context";
 import { KakaoMapView } from "./_kakao-map";
+import { RecordModal } from "./_record-modal";
 
 const BL = "#3D5AFE";
 const BLL = "#EEF1FF";
+const PINK = "#EC4899";
+const PINKL = "#FCE7F3";
 const T0 = "#0F0F0F";
 const T1 = "#5C5F6A";
 const T2 = "#9EA3AE";
@@ -59,19 +69,57 @@ function mapBackendMission(bm: BackendMission): Mission {
     placeLat: bm.place_lat ?? undefined,
     placeLng: bm.place_lng ?? undefined,
     placeName: bm.place_name ?? undefined,
+    badgeIds: bm.badge_ids ?? [],
+    recommendationReason: bm.recommendation_reason ?? undefined,
+    requiredItems: bm.required_items ?? [],
   };
+}
+
+function getWalkInfo(lat1: number, lng1: number, lat2: number, lng2: number) {
+  const R = 6371;
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLng = ((lng2 - lng1) * Math.PI) / 180;
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos((lat1 * Math.PI) / 180) * Math.cos((lat2 * Math.PI) / 180) * Math.sin(dLng / 2) ** 2;
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  const distanceKm = R * c;
+  const minutes = Math.max(1, Math.round((distanceKm / 4) * 60));
+  return { distanceKm, minutes };
 }
 
 export default function HomeScreen() {
   const [missions, setMissions] = useState<Mission[]>(FALLBACK_MISSIONS);
   const [loading, setLoading] = useState(true);
-  const [selectedMission, setSelectedMission] = useState<Mission | null>(null);
   const [userLocation, setUserLocation] = useState<{ lat: number; lng: number } | null>(null);
+  const [expandedMissionId, setExpandedMissionId] = useState<string | number | null>(null);
+  const [startingMission, setStartingMission] = useState(false);
+  const [recordTarget, setRecordTarget] = useState<{ attemptId: string; title: string } | null>(null);
 
-  const { mainMission, setMainMission } = useMission();
+  const { activeAttempts, addActiveAttempt } = useMission();
 
   const sheetTranslateY = useRef(new Animated.Value(COLLAPSED_POSITION)).current;
   const dragStartPosition = useRef(COLLAPSED_POSITION);
+
+  useEffect(() => {
+    const restoreAttempts = async () => {
+      try {
+        const attempt = await getActiveMissionAttempt();
+        if (attempt && attempt.missions) {
+          addActiveAttempt({
+            attemptId: attempt.id,
+            journeyId: attempt.journey_id,
+            missionId: attempt.mission_id,
+            title: attempt.missions.title,
+            placeName: attempt.places ? attempt.places.name : undefined,
+          });
+        }
+      } catch (error) {
+        console.log("진행 중인 미션 복원 실패:", error instanceof Error ? error.message : error);
+      }
+    };
+    restoreAttempts();
+  }, []);
 
   useEffect(() => {
     const fetchMissions = async () => {
@@ -80,12 +128,10 @@ export default function HomeScreen() {
         let longitude: number | undefined;
 
         const { status } = await Location.requestForegroundPermissionsAsync();
-        console.log("📍 위치 권한 상태:", status);
         if (status === "granted") {
           const loc = await Location.getCurrentPositionAsync({});
           latitude = loc.coords.latitude;
           longitude = loc.coords.longitude;
-          console.log("📍 받아온 좌표:", latitude, longitude);
           setUserLocation({ lat: latitude, lng: longitude });
         }
 
@@ -100,9 +146,9 @@ export default function HomeScreen() {
         });
 
         if (error) throw error;
-        const missions: BackendMission[] = data?.missions ?? [];
-        if (missions.length > 0) {
-          setMissions(missions.map(mapBackendMission));
+        const fetchedMissions: BackendMission[] = data?.missions ?? [];
+        if (fetchedMissions.length > 0) {
+          setMissions(fetchedMissions.map(mapBackendMission));
         }
       } catch (error) {
         console.log(
@@ -185,23 +231,86 @@ export default function HomeScreen() {
   const webDragStyle =
     Platform.OS === "web" ? ({ touchAction: "none", userSelect: "none", cursor: "grab" } as any) : undefined;
 
+  const isStarted = (missionId: string | number) => {
+    return activeAttempts.some((a) => a.missionId === missionId);
+  };
+
+  const handleStartMission = async (mission: Mission) => {
+    setStartingMission(true);
+    try {
+      let journey = await getActiveJourney();
+      if (!journey) {
+        journey = await createJourney({ durationDays: 14 });
+      }
+      const attemptId = await selectMission({
+        journeyId: journey.id,
+        missionId: String(mission.id),
+      });
+      await startMission(attemptId);
+      addActiveAttempt({
+        attemptId: attemptId,
+        journeyId: journey.id,
+        missionId: mission.id,
+        title: mission.title,
+        placeName: mission.placeName,
+      });
+      setExpandedMissionId(null);
+    } catch (error) {
+      Alert.alert("미션 시작 실패", error instanceof Error ? error.message : "오류가 발생했어요.");
+    } finally {
+      setStartingMission(false);
+    }
+  };
+
+  const openDirections = (mission: Mission) => {
+    if (!mission.placeLat || !mission.placeLng) return;
+    const placeLabel = mission.placeName ? mission.placeName : mission.title;
+    const url = "https://map.kakao.com/link/to/" + encodeURIComponent(placeLabel) + "," + mission.placeLat + "," + mission.placeLng;
+    Linking.openURL(url).catch(() => {
+      Alert.alert("길찾기 실패", "지도 앱을 열 수 없어요.");
+    });
+  };
+
+  const expandedMission = missions.find((m) => m.id === expandedMissionId) || null;
+
+  let mapCenter = userLocation || DEFAULT_CENTER;
+  if (expandedMission && expandedMission.placeLat && expandedMission.placeLng) {
+    mapCenter = { lat: expandedMission.placeLat, lng: expandedMission.placeLng };
+  }
+
+  let walkInfo = null;
+  if (expandedMission && expandedMission.placeLat && expandedMission.placeLng && userLocation) {
+    walkInfo = getWalkInfo(userLocation.lat, userLocation.lng, expandedMission.placeLat, expandedMission.placeLng);
+  }
+
   return (
     <View style={styles.container}>
       <KakaoMapView
-        latitude={userLocation?.lat ?? DEFAULT_CENTER.lat}
-        longitude={userLocation?.lng ?? DEFAULT_CENTER.lng}
+        latitude={mapCenter.lat}
+        longitude={mapCenter.lng}
         style={styles.mapPlaceholder}
         userLocation={userLocation}
         markers={missions
           .filter((m) => m.placeLat && m.placeLng)
           .map((m) => ({
             id: m.id,
-            lat: m.placeLat!,
-            lng: m.placeLng!,
+            lat: m.placeLat,
+            lng: m.placeLng,
             label: m.title,
             category: m.cat,
           }))}
       />
+
+      {expandedMission && walkInfo && (
+        <View style={styles.walkInfoBar}>
+          <Text style={styles.walkInfoText}>
+            도보 {walkInfo.minutes}분 · {walkInfo.distanceKm.toFixed(1)}km
+          </Text>
+          <Pressable style={styles.directionsBtn} onPress={() => openDirections(expandedMission)}>
+            <Text style={styles.directionsBtnText}>길 찾기</Text>
+          </Pressable>
+        </View>
+      )}
 
       <Animated.View
         style={[styles.sheet, { height: SHEET_HEIGHT, transform: [{ translateY: sheetTranslateY }] }]}
@@ -220,13 +329,6 @@ export default function HomeScreen() {
           </Pressable>
         </View>
 
-        {mainMission && (
-          <View style={styles.pinnedBanner}>
-            <Text style={styles.pinnedLabel}>오늘의 대표 미션</Text>
-            <Text style={styles.pinnedTitle}>{mainMission.title}</Text>
-          </View>
-        )}
-
         {loading ? (
           <View style={styles.loadingArea}>
             <ActivityIndicator color={BL} size="small" />
@@ -238,90 +340,97 @@ export default function HomeScreen() {
             nestedScrollEnabled
             contentContainerStyle={styles.missionScrollContent}
           >
-            {missions.map((mission) => (
-              <View key={mission.id} style={styles.card}>
-                <View style={styles.cardTop}>
-                  <View style={styles.thumb} />
-                  <View style={styles.cardContent}>
-                    <View style={[styles.tag, { backgroundColor: mission.star ? "#FEF3C7" : BLL }]}>
-                      <Text style={[styles.tagText, { color: mission.star ? "#D97706" : BL }]}>
-                        {mission.star ? "★ 추천" : mission.cat}
-                      </Text>
-                    </View>
-                    <Text style={styles.cardTitle}>{mission.title}</Text>
-                    <Text style={styles.cardDesc}>{mission.desc}</Text>
-                    <Text style={styles.cardMeta}>
-                      {mission.time} · {mission.dist} · {mission.cost}
-                      {mission.placeName ? ` · 📍 ${mission.placeName}` : ""}
+            {expandedMission && (
+              <View style={styles.expandedCard}>
+                <View style={styles.categoryBadge}>
+                  <Text style={styles.categoryBadgeText}>{expandedMission.cat}</Text>
+                </View>
+                <Text style={styles.expandedTitle}>{expandedMission.title}</Text>
+                <Text style={styles.expandedDesc}>{expandedMission.desc}</Text>
+
+                <View style={styles.statRow}>
+                  <View style={styles.statCol}>
+                    <Text style={styles.statLabel}>예상 시간</Text>
+                    <Text style={styles.statValue}>{expandedMission.time}</Text>
+                  </View>
+                  <View style={styles.statCol}>
+                    <Text style={styles.statLabel}>준비물</Text>
+                    <Text style={styles.statValue}>
+                      {expandedMission.requiredItems && expandedMission.requiredItems.length > 0
+                        ? expandedMission.requiredItems.join(", ")
+                        : "필요 없음"}
                     </Text>
+                  </View>
+                  <View style={styles.statCol}>
+                    <Text style={styles.statLabel}>비용</Text>
+                    <Text style={styles.statValue}>{expandedMission.cost}</Text>
                   </View>
                 </View>
 
-                <View style={styles.buttonRow}>
-                  <Pressable
-                    onPress={() => setSelectedMission(mission)}
-                    style={({ pressed }) => [
-                      styles.selectBtn,
-                      mainMission?.id !== mission.id && styles.selectedButton,
-                      pressed && styles.pressed,
-                    ]}
-                  >
-                    <Text
-                      style={[
-                        styles.selectButtonText,
-                        mainMission?.id !== mission.id && styles.selectedButtonText,
-                      ]}
-                    >
-                      {mainMission?.id === mission.id ? "선택됨" : "이 미션 선택"}
-                    </Text>
-                  </Pressable>
+                {expandedMission.recommendationReason && (
+                  <View style={styles.reasonBox}>
+                    <Text style={styles.reasonLabel}>추천 이유</Text>
+                    <Text style={styles.reasonText}>{expandedMission.recommendationReason}</Text>
+                  </View>
+                )}
 
-                  <Pressable style={({ pressed }) => [styles.detailBtn, pressed && styles.pressed]}>
-                    <Text style={styles.detailButtonText}>자세히 보기</Text>
-                  </Pressable>
-                </View>
+                <Pressable
+                  onPress={() => handleStartMission(expandedMission)}
+                  disabled={startingMission}
+                  style={[styles.startBtn, startingMission && { opacity: 0.6 }]}
+                >
+                  <Text style={styles.startBtnText}>
+                    {startingMission ? "시작하는 중..." : "미션 시작하기"}
+                  </Text>
+                </Pressable>
               </View>
-            ))}
+            )}
+
+            {expandedMission && <Text style={styles.otherLabel}>다른 추천 미션</Text>}
+
+            {missions
+              .filter((m) => m.id !== expandedMissionId)
+              .map((mission) => {
+                const started = isStarted(mission.id);
+                return (
+                  <View key={mission.id} style={styles.compactCard}>
+                    <View style={styles.compactThumb} />
+                    <View style={styles.compactContent}>
+                      <Text style={styles.compactTitle} numberOfLines={1}>
+                        {mission.title}
+                      </Text>
+                      <Text style={styles.compactMeta}>
+                        {mission.time} · {mission.cost}
+                        {mission.placeName ? " · 📍 " + mission.placeName : ""}
+                      </Text>
+                    </View>
+                    <Pressable
+                      onPress={() => {
+                        if (started) {
+                          const attempt = activeAttempts.find((a) => a.missionId === mission.id);
+                          if (attempt) setRecordTarget({ attemptId: attempt.attemptId, title: attempt.title });
+                        } else {
+                          setExpandedMissionId(mission.id);
+                        }
+                      }}
+                      style={[styles.compactBtn, started && styles.compactBtnRecord]}
+                    >
+                      <Text style={[styles.compactBtnText, started && styles.compactBtnRecordText]}>
+                        {started ? "기록하기" : "선택"}
+                      </Text>
+                    </Pressable>
+                  </View>
+                );
+              })}
           </ScrollView>
         )}
       </Animated.View>
 
-      <Modal
-        visible={selectedMission !== null}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setSelectedMission(null)}
-      >
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalCard}>
-            <View style={styles.modalIcon}>
-              <Text style={styles.modalIconText}>✓</Text>
-            </View>
-            <Text style={styles.modalTitle}>이 미션을 선택할까요?</Text>
-            <Text style={styles.modalMissionTitle}>{selectedMission?.title}</Text>
-            <Text style={styles.modalDescription}>미션을 선택하면 오늘의 여정이 시작돼요.</Text>
-
-            <View style={styles.modalButtonRow}>
-              <Pressable
-                onPress={() => setSelectedMission(null)}
-                style={({ pressed }) => [styles.modalCancelButton, pressed && styles.pressed]}
-              >
-                <Text style={styles.modalCancelText}>취소</Text>
-              </Pressable>
-
-              <Pressable
-                onPress={() => {
-                  if (selectedMission) setMainMission(selectedMission);
-                  setSelectedMission(null);
-                }}
-                style={({ pressed }) => [styles.modalConfirmButton, pressed && styles.pressed]}
-              >
-                <Text style={styles.modalConfirmText}>미션 시작하기</Text>
-              </Pressable>
-            </View>
-          </View>
-        </View>
-      </Modal>
+      <RecordModal
+        visible={recordTarget !== null}
+        target={recordTarget}
+        onClose={() => setRecordTarget(null)}
+      />
     </View>
   );
 }
@@ -329,6 +438,27 @@ export default function HomeScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1, overflow: "hidden", backgroundColor: BG },
   mapPlaceholder: { ...StyleSheet.absoluteFillObject, alignItems: "center", justifyContent: "center", paddingBottom: 180, backgroundColor: "#DFE8F0" },
+  walkInfoBar: {
+    position: "absolute",
+    top: 60,
+    left: 16,
+    right: 16,
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+  },
+  walkInfoText: {
+    backgroundColor: WH,
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+    borderRadius: 20,
+    fontSize: 12,
+    fontWeight: "600",
+    color: T0,
+    overflow: "hidden",
+  },
+  directionsBtn: { backgroundColor: BL, paddingVertical: 8, paddingHorizontal: 16, borderRadius: 20 },
+  directionsBtnText: { color: WH, fontSize: 12, fontWeight: "700" },
   sheet: {
     position: "absolute",
     right: 0,
@@ -351,39 +481,48 @@ const styles = StyleSheet.create({
   sheetSub: { marginTop: 2, fontSize: 12, color: T2 },
   conditionBtn: { alignSelf: "flex-start", paddingHorizontal: 12, paddingVertical: 6, backgroundColor: BLL, borderRadius: 8 },
   conditionText: { fontSize: 11, fontWeight: "700", color: BL },
-  pinnedBanner: { marginHorizontal: 16, marginBottom: 10, padding: 14, backgroundColor: BLL, borderRadius: 14 },
-  pinnedLabel: { fontSize: 11, color: BL, fontWeight: "700", marginBottom: 3 },
-  pinnedTitle: { fontSize: 14, fontWeight: "700", color: T0 },
   loadingArea: { flex: 1, alignItems: "center", justifyContent: "center" },
   missionScroll: { flex: 1 },
-  missionScrollContent: { paddingBottom: 120 },
-  card: { marginHorizontal: 16, marginBottom: 10, padding: 14, backgroundColor: BG, borderWidth: 1, borderColor: "rgba(0,0,0,0.05)", borderRadius: 14 },
-  cardTop: { flexDirection: "row" },
-  thumb: { width: 56, height: 56, marginRight: 12, backgroundColor: T3, borderRadius: 10 },
-  cardContent: { flex: 1 },
-  tag: { alignSelf: "flex-start", marginBottom: 4, paddingHorizontal: 9, paddingVertical: 3, borderRadius: 7 },
-  tagText: { fontSize: 11, fontWeight: "700" },
-  cardTitle: { marginTop: 2, fontSize: 13, fontWeight: "600", color: T0 },
-  cardDesc: { marginTop: 3, fontSize: 11, color: T1 },
-  cardMeta: { marginTop: 6, fontSize: 11, color: T1 },
-  buttonRow: { flexDirection: "row", marginTop: 12 },
-  selectBtn: { flex: 1, alignItems: "center", marginRight: 8, paddingVertical: 10, backgroundColor: "#F3F4F6", borderRadius: 10 },
-  selectedButton: { backgroundColor: BL },
-  selectButtonText: { fontSize: 12, fontWeight: "700", color: T1 },
-  selectedButtonText: { color: WH },
-  detailBtn: { flex: 1, alignItems: "center", paddingVertical: 10, backgroundColor: WH, borderWidth: 1, borderColor: T3, borderRadius: 10 },
-  detailButtonText: { fontSize: 12, color: T1 },
+  missionScrollContent: { paddingBottom: 120, paddingHorizontal: 16 },
+  expandedCard: {
+    backgroundColor: WH,
+    borderWidth: 1,
+    borderColor: BLL,
+    borderRadius: 16,
+    padding: 18,
+    marginBottom: 16,
+  },
+  categoryBadge: { alignSelf: "flex-start", backgroundColor: "#FAECE7", borderRadius: 8, paddingVertical: 4, paddingHorizontal: 10, marginBottom: 10 },
+  categoryBadgeText: { fontSize: 11, fontWeight: "700", color: "#993C1D" },
+  expandedTitle: { fontSize: 19, fontWeight: "800", color: T0, marginBottom: 8 },
+  expandedDesc: { fontSize: 13, color: T1, lineHeight: 20, marginBottom: 16 },
+  statRow: { flexDirection: "row", borderTopWidth: 1, borderBottomWidth: 1, borderColor: T3, paddingVertical: 12, marginBottom: 12 },
+  statCol: { flex: 1 },
+  statLabel: { fontSize: 11, color: T2, marginBottom: 4 },
+  statValue: { fontSize: 13, fontWeight: "700", color: T0 },
+  reasonBox: { backgroundColor: BG, borderRadius: 10, padding: 12, marginBottom: 16, flexDirection: "row", flexWrap: "wrap", gap: 6 },
+  reasonLabel: { fontSize: 12, fontWeight: "700", color: BL },
+  reasonText: { fontSize: 12, color: T1, flexShrink: 1 },
+  startBtn: { backgroundColor: BL, borderRadius: 12, paddingVertical: 14, alignItems: "center" },
+  startBtnText: { color: WH, fontSize: 14, fontWeight: "700" },
+  otherLabel: { fontSize: 12, fontWeight: "700", color: T2, marginBottom: 8 },
+  compactCard: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: BG,
+    borderRadius: 12,
+    padding: 10,
+    marginBottom: 8,
+    borderWidth: 1,
+    borderColor: "rgba(0,0,0,0.05)",
+  },
+  compactThumb: { width: 44, height: 44, borderRadius: 8, backgroundColor: T3, marginRight: 10 },
+  compactContent: { flex: 1 },
+  compactTitle: { fontSize: 13, fontWeight: "600", color: T0 },
+  compactMeta: { fontSize: 11, color: T1, marginTop: 3 },
+  compactBtn: { backgroundColor: BLL, borderRadius: 16, paddingVertical: 7, paddingHorizontal: 14 },
+  compactBtnText: { fontSize: 11, fontWeight: "700", color: BL },
+  compactBtnRecord: { backgroundColor: PINKL },
+  compactBtnRecordText: { color: PINK },
   pressed: { opacity: 0.72 },
-  modalOverlay: { flex: 1, alignItems: "center", justifyContent: "center", paddingHorizontal: 24, backgroundColor: "rgba(0, 0, 0, 0.45)" },
-  modalCard: { width: "100%", maxWidth: 360, alignItems: "center", paddingHorizontal: 22, paddingTop: 26, paddingBottom: 20, backgroundColor: WH, borderRadius: 22, shadowColor: "#000000", shadowOffset: { width: 0, height: 8 }, shadowOpacity: 0.16, shadowRadius: 20, elevation: 20 },
-  modalIcon: { width: 48, height: 48, marginBottom: 14, alignItems: "center", justifyContent: "center", backgroundColor: BLL, borderRadius: 24 },
-  modalIconText: { fontSize: 22, fontWeight: "800", color: BL },
-  modalTitle: { marginBottom: 8, fontSize: 18, fontWeight: "800", color: T0 },
-  modalMissionTitle: { marginBottom: 7, fontSize: 14, fontWeight: "700", lineHeight: 21, textAlign: "center", color: BL },
-  modalDescription: { marginBottom: 22, fontSize: 12, textAlign: "center", color: T2 },
-  modalButtonRow: { width: "100%", flexDirection: "row" },
-  modalCancelButton: { flex: 1, alignItems: "center", marginRight: 8, paddingVertical: 13, backgroundColor: "#F3F4F6", borderRadius: 12 },
-  modalCancelText: { fontSize: 13, fontWeight: "700", color: T1 },
-  modalConfirmButton: { flex: 1, alignItems: "center", paddingVertical: 13, backgroundColor: BL, borderRadius: 12 },
-  modalConfirmText: { fontSize: 13, fontWeight: "700", color: WH },
 });
