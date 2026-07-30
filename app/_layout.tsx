@@ -1,3 +1,4 @@
+// 임시 주석
 import type { Session } from "@supabase/supabase-js";
 import { Stack } from "expo-router";
 import { createContext, useContext, useEffect, useState } from "react";
