@@ -1,3 +1,4 @@
+import * as Location from "expo-location";
 import { useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
@@ -12,7 +13,8 @@ import {
   Text,
   View,
 } from "react-native";
-import { Mission as BackendMission, getRecommendedMissions } from "../../services/challenge.service";
+import { supabase } from "../../lib/supabase";
+import { Mission as BackendMission } from "../../services/challenge.service";
 import { Mission, useMission } from "../_mission-context";
 import { KakaoMapView } from "./_kakao-map";
 
@@ -32,6 +34,8 @@ const COLLAPSED_HEADER_HEIGHT = 100;
 const COLLAPSED_VISIBLE_HEIGHT = TAB_BAR_SPACE + COLLAPSED_HEADER_HEIGHT;
 const COLLAPSED_POSITION = SHEET_HEIGHT - COLLAPSED_VISIBLE_HEIGHT;
 
+const DEFAULT_CENTER = { lat: 35.1795543, lng: 129.0756416 };
+
 const FALLBACK_MISSIONS: Mission[] = [
   { id: 1, title: "조용한 카페에서 30분 독서", desc: "일상 속 작은 고요함을 찾아봐요", time: "30분", dist: "0.3km", cost: "무료", cat: "독서", star: true },
   { id: 2, title: "공원 산책하며 계절 사진 찍기", desc: "지금 계절의 색을 카메라에 담아봐요", time: "20분", dist: "0.5km", cost: "무료", cat: "산책" },
@@ -46,9 +50,15 @@ function mapBackendMission(bm: BackendMission): Mission {
     desc: bm.short_description,
     time: bm.estimated_duration_min ? `${bm.estimated_duration_min}분` : "-",
     dist: "-",
-    cost: bm.estimated_cost === 0 ? "무료" : `${bm.estimated_cost.toLocaleString()}원`,
+    cost:
+      bm.estimated_cost == null || bm.estimated_cost === 0
+        ? "무료"
+        : `${bm.estimated_cost.toLocaleString()}원`,
     cat: bm.category?.name ?? "기타",
     star: false,
+    placeLat: bm.place_lat ?? undefined,
+    placeLng: bm.place_lng ?? undefined,
+    placeName: bm.place_name ?? undefined,
   };
 }
 
@@ -56,6 +66,7 @@ export default function HomeScreen() {
   const [missions, setMissions] = useState<Mission[]>(FALLBACK_MISSIONS);
   const [loading, setLoading] = useState(true);
   const [selectedMission, setSelectedMission] = useState<Mission | null>(null);
+  const [userLocation, setUserLocation] = useState<{ lat: number; lng: number } | null>(null);
 
   const { mainMission, setMainMission } = useMission();
 
@@ -63,17 +74,45 @@ export default function HomeScreen() {
   const dragStartPosition = useRef(COLLAPSED_POSITION);
 
   useEffect(() => {
-    getRecommendedMissions(5, 0)
-      .then((data) => {
-        console.log("받아온 미션:", data);
-        if (data.length > 0) {
-          setMissions(data.map(mapBackendMission));
+    const fetchMissions = async () => {
+      try {
+        let latitude: number | undefined;
+        let longitude: number | undefined;
+
+        const { status } = await Location.requestForegroundPermissionsAsync();
+        if (status === "granted") {
+          const loc = await Location.getCurrentPositionAsync({});
+          latitude = loc.coords.latitude;
+          longitude = loc.coords.longitude;
+          setUserLocation({ lat: latitude, lng: longitude });
         }
-      })
-      .catch((error: Error) => {
-        console.log("미션 API 연결 실패, 임시 데이터 사용:", error.message);
-      })
-      .finally(() => setLoading(false));
+
+        const { data, error } = await supabase.functions.invoke("clever-task", {
+          body: {
+            category: "휴식",
+            cost: "무료/유료",
+            locationType: "실내/실외",
+            latitude,
+            longitude,
+          },
+        });
+
+        if (error) throw error;
+        const missions: BackendMission[] = data?.missions ?? [];
+        if (missions.length > 0) {
+          setMissions(missions.map(mapBackendMission));
+        }
+      } catch (error) {
+        console.log(
+          "AI 미션 추천 실패, 임시 데이터 사용:",
+          error instanceof Error ? error.message : error
+        );
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    fetchMissions();
   }, []);
 
   const moveSheet = (destination: number) => {
@@ -147,9 +186,18 @@ export default function HomeScreen() {
   return (
     <View style={styles.container}>
       <KakaoMapView
-        latitude={35.1795543}
-        longitude={129.0756416}
+        latitude={userLocation?.lat ?? DEFAULT_CENTER.lat}
+        longitude={userLocation?.lng ?? DEFAULT_CENTER.lng}
         style={styles.mapPlaceholder}
+        userLocation={userLocation}
+        markers={missions
+          .filter((m) => m.placeLat && m.placeLng)
+          .map((m) => ({
+            id: m.id,
+            lat: m.placeLat!,
+            lng: m.placeLng!,
+            label: m.title,
+          }))}
       />
 
       <Animated.View
@@ -201,6 +249,7 @@ export default function HomeScreen() {
                     <Text style={styles.cardDesc}>{mission.desc}</Text>
                     <Text style={styles.cardMeta}>
                       {mission.time} · {mission.dist} · {mission.cost}
+                      {mission.placeName ? ` · 📍 ${mission.placeName}` : ""}
                     </Text>
                   </View>
                 </View>
