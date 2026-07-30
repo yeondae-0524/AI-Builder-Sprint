@@ -1,6 +1,6 @@
 import type { Session } from "@supabase/supabase-js";
 import { Stack } from "expo-router";
-import { useEffect, useState } from "react";
+import { createContext, useContext, useEffect, useState } from "react";
 import {
   ActivityIndicator,
   StyleSheet,
@@ -8,45 +8,71 @@ import {
 } from "react-native";
 
 import { supabase } from "../lib/supabase";
+import { getMyProfile } from "../services/profile.service";
+
+type PreferencesContextType = {
+  recheckPreferences: () => Promise<void>;
+};
+
+const PreferencesContext = createContext<PreferencesContextType>({
+  recheckPreferences: async () => {},
+});
+
+export function usePreferencesRecheck() {
+  return useContext(PreferencesContext);
+}
 
 export default function RootLayout() {
-  const [session, setSession] =
-    useState<Session | null>(null);
-
+  const [session, setSession] = useState<Session | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [needsPreferences, setNeedsPreferences] = useState(false);
+
+  const checkPreferences = async (currentSession: Session | null) => {
+    console.log("③ checkPreferences 호출, session 있음:", !!currentSession);
+    if (!currentSession) {
+      setNeedsPreferences(false);
+      return;
+    }
+    try {
+      const profile = await getMyProfile();
+      console.log("④ interests 값:", profile.interests);
+      const needsIt = !profile.interests || profile.interests.length === 0;
+      console.log("⑤ needsPreferences =", needsIt);
+      setNeedsPreferences(needsIt);
+    } catch (error) {
+      console.log("❌ 프로필 조회 실패:", error);
+      setNeedsPreferences(false);
+    }
+  };
 
   useEffect(() => {
     let isMounted = true;
 
-    // 앱을 켰을 때 저장된 로그인 정보 확인
     const loadSession = async () => {
       const {
         data: { session: savedSession },
       } = await supabase.auth.getSession();
 
-      if (!isMounted) {
-        return;
-      }
+      if (!isMounted) return;
 
       setSession(savedSession);
-      setIsLoading(false);
+      await checkPreferences(savedSession);
+
+      if (isMounted) setIsLoading(false);
     };
 
     loadSession();
 
-    // 로그인 또는 로그아웃이 발생하면 자동 반영
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange(
-      (_event, nextSession) => {
-        if (!isMounted) {
-          return;
-        }
+    } = supabase.auth.onAuthStateChange(async (_event, nextSession) => {
+      if (!isMounted) return;
 
-        setSession(nextSession);
-        setIsLoading(false);
-      },
-    );
+      setSession(nextSession);
+      await checkPreferences(nextSession);
+
+      if (isMounted) setIsLoading(false);
+    });
 
     return () => {
       isMounted = false;
@@ -54,30 +80,39 @@ export default function RootLayout() {
     };
   }, []);
 
-  // 저장된 로그인 정보를 확인하는 동안 표시
   if (isLoading) {
     return (
       <View style={styles.loadingContainer}>
-        <ActivityIndicator
-          size="large"
-          color="#3D5AFE"
-        />
+        <ActivityIndicator size="large" color="#3D5AFE" />
       </View>
     );
   }
 
   return (
-    <Stack screenOptions={{ headerShown: false }}>
-      {/* 로그인하지 않은 사용자만 접근 */}
-      <Stack.Protected guard={!session}>
-        <Stack.Screen name="(auth)" />
-      </Stack.Protected>
+    <PreferencesContext.Provider
+      value={{
+        recheckPreferences: async () => {
+          const {
+            data: { session: currentSession },
+          } = await supabase.auth.getSession();
+          await checkPreferences(currentSession);
+        },
+      }}
+    >
+      <Stack screenOptions={{ headerShown: false }}>
+        <Stack.Protected guard={!session}>
+          <Stack.Screen name="(auth)" />
+        </Stack.Protected>
 
-      {/* 로그인한 사용자만 접근 */}
-      <Stack.Protected guard={!!session}>
-        <Stack.Screen name="(tabs)" />
-      </Stack.Protected>
-    </Stack>
+        <Stack.Protected guard={!!session && needsPreferences}>
+          <Stack.Screen name="preferences" />
+        </Stack.Protected>
+
+        <Stack.Protected guard={!!session && !needsPreferences}>
+          <Stack.Screen name="(tabs)" />
+        </Stack.Protected>
+      </Stack>
+    </PreferencesContext.Provider>
   );
 }
 
