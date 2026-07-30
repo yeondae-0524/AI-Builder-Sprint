@@ -7,6 +7,7 @@ export type Profile = {
   avatar_url: string | null;
   activity_region: string | null;
   selected_title_id: string | null;
+  interests: string[];
   created_at: string;
   updated_at: string;
 };
@@ -16,6 +17,7 @@ export type UpdateProfileInput = {
   bio?: string | null;
   avatar_url?: string | null;
   activity_region?: string | null;
+  interests?: string[];
 };
 
 /**
@@ -45,6 +47,7 @@ export async function getMyProfile(): Promise<Profile> {
         avatar_url,
         activity_region,
         selected_title_id,
+        interests,
         created_at,
         updated_at
       `,
@@ -105,6 +108,7 @@ export async function updateMyProfile(
         avatar_url,
         activity_region,
         selected_title_id,
+        interests,
         created_at,
         updated_at
       `,
