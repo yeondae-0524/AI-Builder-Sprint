@@ -1,9 +1,6 @@
 import Ionicons from "@expo/vector-icons/Ionicons";
-import {
-  useCallback,
-  useEffect,
-  useState,
-} from "react";
+import { useCallback, useState } from "react";
+import { useFocusEffect } from "expo-router";
 import {
   ActivityIndicator,
   Alert,
@@ -97,7 +94,7 @@ type JourneyCard = {
   title: string;
   durationDays: number;
   targetRecordCount: number;
-  recordCount: number;
+  completedDayCount: number;
   startDate: string;
   endDate: string | null;
   status: "active" | "completed";
@@ -130,6 +127,26 @@ function getRelationArray<T>(
   }
 
   return Array.isArray(value) ? value : [value];
+}
+
+function getCompletedDayCount(
+  records: Array<{
+    recorded_at?: string | null;
+  }>,
+) {
+  return new Set(
+    records
+      .map((record) => {
+        if (
+          typeof record.recorded_at !== "string"
+        ) {
+          return "";
+        }
+
+        return record.recorded_at.slice(0, 10);
+      })
+      .filter(Boolean),
+  ).size;
 }
 
 function getErrorMessage(
@@ -385,7 +402,8 @@ export default function EssayScreen() {
                 status,
                 created_at,
                 records (
-                  id
+                  id,
+                  recorded_at
                 ),
                 essays (
                   id,
@@ -457,30 +475,43 @@ export default function EssayScreen() {
           return;
         }
 
+        const targetRecords =
+          getRelationArray<any>(
+            target.records,
+          );
+
+        const completedDayCount =
+          getCompletedDayCount(targetRecords);
+
+        const targetRecordCount = Number(
+          target.target_record_count ?? 0,
+        );
+
+        const hasCompletedEssay =
+          getRelationArray<any>(
+            target.essays,
+          ).some(
+            (essay) =>
+              essay.status === "completed",
+          );
+
         setJourneyCard({
           id: String(target.id),
           title:
-            target.title ?? "나의 Journey",
+            target.title ?? "나의 여정",
           durationDays: Number(
             target.duration_days ?? 0,
           ),
-          targetRecordCount: Number(
-            target.target_record_count ?? 0,
-          ),
-          recordCount: getRelationArray<any>(
-            target.records,
-          ).length,
+          targetRecordCount,
+          completedDayCount,
           startDate: target.start_date,
           endDate: target.end_date,
           status: target.status,
           canCreateEssay:
-            target.status === "completed" &&
-            !getRelationArray<any>(
-              target.essays,
-            ).some(
-              (essay) =>
-                essay.status === "completed",
-            ),
+            targetRecordCount > 0 &&
+            completedDayCount >=
+              targetRecordCount &&
+            !hasCompletedEssay,
         });
       } catch (error) {
         Alert.alert(
@@ -499,9 +530,11 @@ export default function EssayScreen() {
     [],
   );
 
-  useEffect(() => {
-    void loadScreenData();
-  }, [loadScreenData]);
+  useFocusEffect(
+    useCallback(() => {
+      void loadScreenData();
+    }, [loadScreenData]),
+  );
 
   const openEssay = async (essay: Essay) => {
     try {
@@ -543,6 +576,49 @@ export default function EssayScreen() {
 
     try {
       setCreateLoading(true);
+
+      if (journeyCard.status === "active") {
+        const {
+          data: completedJourney,
+          error: journeyCompleteError,
+        } = await supabase
+          .from("journeys")
+          .update({
+            status: "completed",
+          })
+          .eq("id", journeyCard.id)
+          .eq("status", "active")
+          .select("id")
+          .maybeSingle();
+
+        if (journeyCompleteError) {
+          throw journeyCompleteError;
+        }
+
+        if (!completedJourney) {
+          const {
+            data: currentJourney,
+            error: journeyCheckError,
+          } = await supabase
+            .from("journeys")
+            .select("status")
+            .eq("id", journeyCard.id)
+            .maybeSingle();
+
+          if (journeyCheckError) {
+            throw journeyCheckError;
+          }
+
+          if (
+            currentJourney?.status !==
+            "completed"
+          ) {
+            throw new Error(
+              "여정을 완료 상태로 변경하지 못했습니다.",
+            );
+          }
+        }
+      }
 
       const draftTitle =
         `${journeyCard.title}의 기록`;
@@ -895,11 +971,11 @@ export default function EssayScreen() {
   const targetCount =
     journeyCard?.targetRecordCount ?? 0;
 
-  const recordCount =
-    journeyCard?.recordCount ?? 0;
+  const completedDayCount =
+    journeyCard?.completedDayCount ?? 0;
 
   const remainingCount = Math.max(
-    targetCount - recordCount,
+    targetCount - completedDayCount,
     0,
   );
 
@@ -907,7 +983,9 @@ export default function EssayScreen() {
     targetCount > 0
       ? Math.min(
           Math.max(
-            (recordCount / targetCount) * 100,
+            (completedDayCount /
+              targetCount) *
+              100,
             0,
           ),
           100,
@@ -1064,15 +1142,14 @@ export default function EssayScreen() {
                 </View>
 
                 <Text style={styles.journeyText}>
-                  {journeyCard.durationDays}일의
-                  여정
+                  {journeyCard.title}
                 </Text>
               </View>
 
               <Text
                 style={styles.progressEssayTitle}
               >
-                {journeyCard.title}
+                여정이 진행중이에요
               </Text>
 
               <Text
@@ -1093,13 +1170,13 @@ export default function EssayScreen() {
                 <Text
                   style={styles.progressInfoText}
                 >
-                  {recordCount}개의 경험이 담겼어요
+                  {completedDayCount}일의 경험이 담겼어요
                 </Text>
 
                 <Text
                   style={styles.progressCount}
                 >
-                  {recordCount}/{targetCount}
+                  {completedDayCount}/{targetCount}
                 </Text>
               </View>
 
@@ -1191,14 +1268,14 @@ export default function EssayScreen() {
               <Text
                 style={styles.emptyCardTitle}
               >
-                진행 중인 Journey가 없어요
+                진행 중인 여정이 없어요
               </Text>
               <Text
                 style={
                   styles.emptyCardDescription
                 }
               >
-                Journey를 시작하고 경험을 기록하면
+                여정을 시작하고 경험을 기록하면
                 여기에 에세이 진행 상황이 표시됩니다.
               </Text>
             </View>
@@ -1278,7 +1355,7 @@ export default function EssayScreen() {
                   styles.emptyCardDescription
                 }
               >
-                완료된 Journey가 생기면 AI 에세이를
+                완료된 여정이 생기면 AI 에세이를
                 만들 수 있습니다.
               </Text>
             </View>
