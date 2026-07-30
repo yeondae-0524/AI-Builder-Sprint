@@ -17,34 +17,44 @@ export default function TabLayout() {
         tabBarHideOnKeyboard: true,
 
         tabBarLabelStyle: {
-          fontSize: 11,
+          fontSize: 10,
           fontWeight: "600",
-          marginTop: 2,
+          marginTop: 1,
+        },
+
+        tabBarItemStyle: {
+          borderRadius: 24,
         },
 
         tabBarStyle: {
           position: "absolute",
-          left: 16,
-          right: 16,
-          bottom: 18,
 
-          height: 72,
-          paddingTop: 8,
-          paddingBottom: 8,
+          left: 24,
+          right: 24,
+          bottom: 14,
+
+          height: 62,
+          paddingTop: 6,
+          paddingBottom: 6,
 
           backgroundColor: "#FFFFFF",
+
           borderTopWidth: 0,
-          borderRadius: 26,
+          borderWidth: 1,
+          borderColor: "rgba(0, 0, 0, 0.04)",
+
+          // 높이의 절반으로 설정하면 완전한 캡슐 모양
+          borderRadius: 31,
 
           shadowColor: "#000000",
           shadowOffset: {
             width: 0,
-            height: 4,
+            height: 3,
           },
-          shadowOpacity: 0.12,
-          shadowRadius: 12,
+          shadowOpacity: 0.1,
+          shadowRadius: 10,
 
-          elevation: 8,
+          elevation: 7,
         },
       }}
     >
