@@ -398,7 +398,7 @@ export async function getEssayPromptData(
     );
   }
 
-  const recordsText = items
+  const recordBlocks = items
     .map((item, index) => {
       const record = getSingleRelation(item.records);
 
@@ -436,10 +436,9 @@ export async function getEssayPromptData(
     .filter(
       (value): value is string =>
         typeof value === "string",
-    )
-    .join("\n\n");
+    );
 
-  if (!recordsText.trim()) {
+  if (recordBlocks.length === 0) {
     throw new Error(
       "AI에 전달할 기록 내용이 없습니다.",
     );
@@ -449,13 +448,29 @@ export async function getEssayPromptData(
     essayId: essay.id,
     journeyId: essay.journey_id,
     currentTitle: essay.title,
-    recordsText,
+    recordCount: recordBlocks.length,
+    recordsText: recordBlocks.join("\n\n"),
   };
 }
 
 export function createEssayGenerationPrompt(
   recordsText: string,
+  recordCount: number,
 ) {
+  if (recordCount < 1) {
+    throw new Error(
+      "에세이를 생성할 기록이 없습니다.",
+    );
+  }
+
+  const bridgeTemplate = Array.from(
+    { length: recordCount },
+    (_, index) => `    {
+      "recordIndex": ${index},
+      "bridgeText": "${index + 1}번째 기록을 자연스럽게 소개하거나 이어주는 문장"
+    }`,
+  ).join(",\n");
+
   return `
 다음은 한 사용자가 Journey 동안 작성한 실제 경험 기록입니다.
 
@@ -463,24 +478,22 @@ ${recordsText}
 
 위 기록만을 바탕으로 하나의 자연스러운 한국어 에세이를 구성하세요.
 
-규칙:
+반드시 지켜야 할 규칙:
 - 기록에 없는 사실을 만들어내지 마세요.
 - 사용자의 감정 변화와 경험의 흐름을 중심으로 작성하세요.
 - 과장되거나 지나치게 감성적인 문장은 피하세요.
-- 각 기록 사이를 자연스럽게 이어주는 연결 문장을 작성하세요.
-- 결과는 반드시 아래 JSON 형식으로만 반환하세요.
+- 실제 기록은 총 ${recordCount}개입니다.
+- bridges 배열도 반드시 정확히 ${recordCount}개여야 합니다.
+- recordIndex는 0부터 ${recordCount - 1}까지 각각 한 번씩만 사용하세요.
+- recordIndex를 빠뜨리거나 중복해서는 안 됩니다.
+- 설명이나 마크다운 없이 JSON 객체만 반환하세요.
+
+반환 형식:
 
 {
   "title": "에세이 제목",
   "bridges": [
-    {
-      "recordIndex": 0,
-      "bridgeText": "첫 번째 기록을 소개하는 연결 문장"
-    },
-    {
-      "recordIndex": 1,
-      "bridgeText": "두 번째 기록으로 이어지는 연결 문장"
-    }
+${bridgeTemplate}
   ]
 }
 `.trim();
@@ -611,6 +624,28 @@ function parseEssayAiResult(
 }
 
 /**
+ * bridges 개수와 recordIndex가
+ * 실제 기록 개수와 정확히 일치하는지 확인한다.
+ */
+function hasExactBridgeIndexes(
+  result: EssayAiResult,
+  recordCount: number,
+): boolean {
+  if (result.bridges.length !== recordCount) {
+    return false;
+  }
+
+  const indexes = result.bridges
+    .map((bridge) => bridge.recordIndex)
+    .sort((a, b) => a - b);
+
+  return indexes.every(
+    (recordIndex, index) =>
+      recordIndex === index,
+  );
+}
+
+/**
  * 에세이에 연결된 실제 기록을 Upstage에 전달하고,
  * 생성된 제목과 연결 문장을 DB에 저장한다.
  */
@@ -622,20 +657,73 @@ export async function generateAndSaveEssay(
   }
 
   // 1. 실제 기록을 AI 입력용 데이터로 변환
-  const { recordsText } =
-    await getEssayPromptData(essayId);
+  const {
+    recordsText,
+    recordCount,
+  } = await getEssayPromptData(essayId);
 
-  // 2. AI 프롬프트 생성
-  const prompt =
-    createEssayGenerationPrompt(recordsText);
+  // 2. 실제 기록 개수에 맞춘 AI 프롬프트 생성
+  const prompt = createEssayGenerationPrompt(
+    recordsText,
+    recordCount,
+  );
 
-  // 3. Upstage Edge Function 호출
+  // 3. 첫 번째 Upstage 호출
   const rawAnswer =
     await getChallengeRecommendation(prompt);
 
   // 4. AI 응답 JSON 변환 및 검증
-  const aiResult =
+  let aiResult =
     parseEssayAiResult(rawAnswer);
+
+  // bridges 개수나 인덱스가 틀리면 한 번 자동 교정 요청
+  if (
+    !hasExactBridgeIndexes(
+      aiResult,
+      recordCount,
+    )
+  ) {
+    const retryPrompt = `
+${prompt}
+
+이전 응답은 bridges 개수 또는 recordIndex가 잘못되었습니다.
+
+이전 응답:
+${rawAnswer}
+
+반드시 아래 조건을 지켜 다시 JSON 객체만 반환하세요.
+- bridges는 정확히 ${recordCount}개
+- recordIndex는 0부터 ${recordCount - 1}까지
+- 각 recordIndex는 정확히 한 번만 사용
+- 설명이나 마크다운을 작성하지 않음
+`.trim();
+
+    const retryAnswer =
+      await getChallengeRecommendation(
+        retryPrompt,
+      );
+
+    aiResult =
+      parseEssayAiResult(retryAnswer);
+  }
+
+  if (
+    !hasExactBridgeIndexes(
+      aiResult,
+      recordCount,
+    )
+  ) {
+    throw new Error(
+      `AI가 기록 ${recordCount}개에 맞는 연결 문장을 생성하지 못했습니다. 다시 시도해주세요.`,
+    );
+  }
+
+  const sortedBridges = [
+    ...aiResult.bridges,
+  ].sort(
+    (a, b) =>
+      a.recordIndex - b.recordIndex,
+  );
 
   // 5. 제목과 연결 문장을 DB에 저장
   const { data, error } = await supabase.rpc(
@@ -643,7 +731,7 @@ export async function generateAndSaveEssay(
     {
       p_essay_id: essayId,
       p_title: aiResult.title,
-      p_bridges: aiResult.bridges,
+      p_bridges: sortedBridges,
     },
   );
 
@@ -664,6 +752,6 @@ export async function generateAndSaveEssay(
   return {
     essayId: data as string,
     title: aiResult.title,
-    bridges: aiResult.bridges,
+    bridges: sortedBridges,
   };
 }

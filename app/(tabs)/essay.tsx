@@ -1,5 +1,9 @@
 import Ionicons from "@expo/vector-icons/Ionicons";
-import { useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useState,
+} from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -11,8 +15,17 @@ import {
   Text,
   View,
 } from "react-native";
-
 import { SafeAreaView } from "react-native-safe-area-context";
+
+import { supabase } from "../../lib/supabase";
+import {
+  createEssayDraft,
+  generateAndSaveEssay,
+  getEssayById,
+  getMyEssays,
+  updateEssay,
+} from "../../services/essay.service";
+import { getRecordPhotoUrl } from "../../services/storage.service";
 import { getChallengeRecommendation } from "../../services/upstage";
 
 const COLORS = {
@@ -47,24 +60,21 @@ const PHOTOS = {
 
   latte:
     "https://images.unsplash.com/photo-1558210834-473f430c09ac?w=400&h=400&fit=crop&auto=format",
-
-  parkWalk:
-    "https://images.unsplash.com/photo-1780342745241-c4bb07a0a198?w=400&h=400&fit=crop&auto=format",
-
-  autumnWalk:
-    "https://images.unsplash.com/photo-1774356148397-d5dfe91253c2?w=400&h=400&fit=crop&auto=format",
-
-  music:
-    "https://images.unsplash.com/photo-1583236753515-7e06aae56395?w=400&h=400&fit=crop&auto=format",
-
-  bookMug:
-    "https://images.unsplash.com/photo-1414124488080-0188dcbb8834?w=400&h=400&fit=crop&auto=format",
 };
+
+const BOOK_COLORS = [
+  "#1E3A5F",
+  "#2D5A4A",
+  "#5C3D2E",
+  "#3B4A6B",
+  "#60435F",
+];
 
 type EssayThickness = "thin" | "medium" | "thick";
 
 type Essay = {
-  id: number;
+  id: string;
+  journeyId: string;
   title: string;
   period: string;
   year: string;
@@ -75,55 +85,24 @@ type Essay = {
 };
 
 type EssayEntry = {
-  id: number;
+  id: string;
   photo: string;
   mission: string;
   userText: string;
   aiText: string;
 };
 
-const ESSAYS: Essay[] = [
-  {
-    id: 1,
-    title: "연남동에서 보낸 7일",
-    period: "6. 15 – 6. 22",
-    year: "2026",
-    thickness: "thin",
-    color: "#1E3A5F",
-    photo: PHOTOS.latte,
-    coverPhoto: PHOTOS.cafeWindow,
-  },
-  {
-    id: 2,
-    title: "소리를 따라 걸은 2주",
-    period: "5. 1 – 5. 14",
-    year: "2026",
-    thickness: "medium",
-    color: "#2D5A4A",
-    photo: PHOTOS.parkWalk,
-    coverPhoto: PHOTOS.bench,
-  },
-  {
-    id: 3,
-    title: "혼자였지만 혼자가 아닌",
-    period: "3. 1 – 3. 31",
-    year: "2026",
-    thickness: "thick",
-    color: "#5C3D2E",
-    photo: PHOTOS.autumnWalk,
-    coverPhoto: PHOTOS.street,
-  },
-  {
-    id: 4,
-    title: "빛의 기록",
-    period: "1. 10 – 1. 17",
-    year: "2026",
-    thickness: "thin",
-    color: "#3B4A6B",
-    photo: PHOTOS.nightLamp,
-    coverPhoto: PHOTOS.nightLamp,
-  },
-];
+type JourneyCard = {
+  id: string;
+  title: string;
+  durationDays: number;
+  targetRecordCount: number;
+  recordCount: number;
+  startDate: string;
+  endDate: string | null;
+  status: "active" | "completed";
+  canCreateEssay: boolean;
+};
 
 const SPINE_WIDTH: Record<EssayThickness, number> = {
   thin: 24,
@@ -133,43 +112,479 @@ const SPINE_WIDTH: Record<EssayThickness, number> = {
 
 const SPINE_HEIGHT = 172;
 
-function getEssayEntries(essay: Essay): EssayEntry[] {
-  return [
-    {
-      id: 1,
-      photo: PHOTOS.bookMug,
-      mission: "조용한 카페에서 30분 독서",
-      userText:
-        "카페 창가 자리가 비어 있었다. 30분 동안 읽기만 했는데 이상하게 마음이 가벼워졌다.",
-      aiText: "그 가벼움이 어디에서 왔는지 궁금해집니다.",
-    },
-    {
-      id: 2,
-      photo: essay.photo,
-      mission: "공원 산책하며 계절 사진 찍기",
-      userText:
-        "낙엽이 예쁘다고 느낀 건 아마 처음인 것 같다. 바스락거리는 소리가 좋았다.",
-      aiText:
-        "계절을 그냥 지나치지 않고 멈춰 들여다본 하루였군요.",
-    },
-    {
-      id: 3,
-      photo: PHOTOS.music,
-      mission: "버스킹 공연 감상하기",
-      userText:
-        "모르는 노래였는데도 계속 발이 떨어지지 않았다. 그 사람의 목소리가 마음에 걸렸다.",
-      aiText:
-        "낯선 음악이 왜 그렇게 익숙하게 느껴졌을까요.",
-    },
-  ];
+function getSingleRelation<T>(
+  value: T | T[] | null | undefined,
+): T | null {
+  if (Array.isArray(value)) {
+    return value[0] ?? null;
+  }
+
+  return value ?? null;
+}
+
+function getRelationArray<T>(
+  value: T | T[] | null | undefined,
+): T[] {
+  if (!value) {
+    return [];
+  }
+
+  return Array.isArray(value) ? value : [value];
+}
+
+function getErrorMessage(
+  error: unknown,
+  fallback: string,
+) {
+  return error instanceof Error
+    ? error.message
+    : fallback;
+}
+
+function formatShortDate(
+  value: string | null | undefined,
+) {
+  if (!value) {
+    return "-";
+  }
+
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return "-";
+  }
+
+  return `${date.getMonth() + 1}. ${date.getDate()}`;
+}
+
+function formatPeriod(
+  startDate: string | null | undefined,
+  endDate: string | null | undefined,
+) {
+  return `${formatShortDate(startDate)} – ${formatShortDate(
+    endDate ?? startDate,
+  )}`;
+}
+
+function getYear(
+  value: string | null | undefined,
+) {
+  if (!value) {
+    return String(new Date().getFullYear());
+  }
+
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return String(new Date().getFullYear());
+  }
+
+  return String(date.getFullYear());
+}
+
+function getThickness(
+  itemCount: number,
+): EssayThickness {
+  if (itemCount >= 15) {
+    return "thick";
+  }
+
+  if (itemCount >= 7) {
+    return "medium";
+  }
+
+  return "thin";
+}
+
+async function resolvePhotoUrl(
+  storagePath: string | null | undefined,
+  fallback: string,
+) {
+  if (!storagePath) {
+    return fallback;
+  }
+
+  if (/^https?:\/\//i.test(storagePath)) {
+    return storagePath;
+  }
+
+  try {
+    return await getRecordPhotoUrl(storagePath);
+  } catch (error) {
+    console.warn(
+      "사진 signed URL 생성 실패:",
+      error,
+    );
+    return fallback;
+  }
+}
+
+async function mapEssayListItem(
+  item: any,
+  index: number,
+): Promise<Essay> {
+  const journey = getSingleRelation<any>(
+    item.journeys,
+  );
+
+  const itemCount = getRelationArray<any>(
+    item.essay_items,
+  ).length;
+
+  const coverPhoto = await resolvePhotoUrl(
+    item.cover_photo_path,
+    PHOTOS.cafeWindow,
+  );
+
+  const startDate =
+    journey?.start_date ?? item.created_at;
+
+  const endDate =
+    journey?.end_date ?? item.updated_at;
+
+  return {
+    id: String(item.id),
+    journeyId: String(item.journey_id),
+    title: item.title ?? "나의 에세이",
+    period: formatPeriod(startDate, endDate),
+    year: getYear(startDate),
+    thickness: getThickness(itemCount),
+    color:
+      BOOK_COLORS[index % BOOK_COLORS.length],
+    photo: coverPhoto,
+    coverPhoto,
+  };
+}
+
+async function mapEssayEntries(
+  detail: any,
+): Promise<EssayEntry[]> {
+  const rawItems = getRelationArray<any>(
+    detail.essay_items,
+  ).sort(
+    (a, b) =>
+      Number(a.sort_order ?? 0) -
+      Number(b.sort_order ?? 0),
+  );
+
+  const mapped = await Promise.all(
+    rawItems.map(async (item, index) => {
+      const record = getSingleRelation<any>(
+        item.records,
+      );
+
+      if (!record) {
+        return null;
+      }
+
+      const missionAttempt =
+        getSingleRelation<any>(
+          record.mission_attempts,
+        );
+
+      const mission = getSingleRelation<any>(
+        missionAttempt?.missions,
+      );
+
+      const photos = getRelationArray<any>(
+        record.record_photos,
+      ).sort((a, b) => {
+        if (
+          Boolean(a.is_cover) !==
+          Boolean(b.is_cover)
+        ) {
+          return a.is_cover ? -1 : 1;
+        }
+
+        return (
+          Number(a.sort_order ?? 0) -
+          Number(b.sort_order ?? 0)
+        );
+      });
+
+      const photoUrl = await resolvePhotoUrl(
+        photos[0]?.storage_path,
+        index % 2 === 0
+          ? PHOTOS.bench
+          : PHOTOS.latte,
+      );
+
+      return {
+        id: String(item.id),
+        photo: photoUrl,
+        mission:
+          mission?.title ?? "기록한 경험",
+        userText:
+          record.content ?? "작성된 기록이 없습니다.",
+        aiText:
+          item.ai_bridge_text ??
+          "AI 연결 문장을 준비하고 있습니다.",
+      };
+    }),
+  );
+
+  return mapped.filter(
+    (item): item is EssayEntry =>
+      item !== null,
+  );
 }
 
 export default function EssayScreen() {
+  const [essays, setEssays] = useState<Essay[]>(
+    [],
+  );
   const [selectedEssay, setSelectedEssay] =
     useState<Essay | null>(null);
+  const [selectedEntries, setSelectedEntries] =
+    useState<EssayEntry[]>([]);
+  const [journeyCard, setJourneyCard] =
+    useState<JourneyCard | null>(null);
+
+  const [screenLoading, setScreenLoading] =
+    useState(true);
+  const [detailLoading, setDetailLoading] =
+    useState(false);
+  const [createLoading, setCreateLoading] =
+    useState(false);
   const [aiRecommendation, setAiRecommendation] =
     useState("");
   const [aiLoading, setAiLoading] = useState(false);
+
+  const loadScreenData = useCallback(
+    async (showLoading = true) => {
+      try {
+        if (showLoading) {
+          setScreenLoading(true);
+        }
+
+        const {
+          data: { user },
+          error: userError,
+        } = await supabase.auth.getUser();
+
+        if (userError) {
+          throw userError;
+        }
+
+        if (!user) {
+          throw new Error("로그인이 필요합니다.");
+        }
+
+        const [essayRows, journeyResult] =
+          await Promise.all([
+            getMyEssays(),
+            supabase
+              .from("journeys")
+              .select(`
+                id,
+                title,
+                duration_days,
+                target_record_count,
+                start_date,
+                end_date,
+                status,
+                created_at,
+                records (
+                  id
+                ),
+                essays (
+                  id,
+                  status
+                )
+              `)
+              .eq("user_id", user.id)
+              .in("status", [
+                "active",
+                "completed",
+              ])
+              .order("created_at", {
+                ascending: false,
+              }),
+          ]);
+
+        if (journeyResult.error) {
+          throw journeyResult.error;
+        }
+
+        const completedEssayRows =
+          (essayRows ?? []).filter(
+            (item: any) =>
+              item.status === "completed",
+          );
+
+        const mappedEssays = await Promise.all(
+          completedEssayRows.map(
+            (item, index) =>
+              mapEssayListItem(item, index),
+          ),
+        );
+
+        setEssays(mappedEssays);
+
+        const journeys =
+          (journeyResult.data ?? []) as any[];
+
+        const readyJourney = journeys.find(
+          (journey) => {
+            const linkedEssays =
+              getRelationArray<any>(
+                journey.essays,
+              );
+
+            const completedEssay =
+              linkedEssays.some(
+                (essay) =>
+                  essay.status === "completed",
+              );
+
+            return (
+              journey.status === "completed" &&
+              !completedEssay
+            );
+          },
+        );
+
+        const activeJourney = journeys.find(
+          (journey) =>
+            journey.status === "active",
+        );
+
+        const target =
+          readyJourney ?? activeJourney ?? null;
+
+        if (!target) {
+          setJourneyCard(null);
+          return;
+        }
+
+        setJourneyCard({
+          id: String(target.id),
+          title:
+            target.title ?? "나의 Journey",
+          durationDays: Number(
+            target.duration_days ?? 0,
+          ),
+          targetRecordCount: Number(
+            target.target_record_count ?? 0,
+          ),
+          recordCount: getRelationArray<any>(
+            target.records,
+          ).length,
+          startDate: target.start_date,
+          endDate: target.end_date,
+          status: target.status,
+          canCreateEssay:
+            target.status === "completed" &&
+            !getRelationArray<any>(
+              target.essays,
+            ).some(
+              (essay) =>
+                essay.status === "completed",
+            ),
+        });
+      } catch (error) {
+        Alert.alert(
+          "에세이 불러오기 실패",
+          getErrorMessage(
+            error,
+            "에세이 정보를 불러오지 못했습니다.",
+          ),
+        );
+      } finally {
+        if (showLoading) {
+          setScreenLoading(false);
+        }
+      }
+    },
+    [],
+  );
+
+  useEffect(() => {
+    void loadScreenData();
+  }, [loadScreenData]);
+
+  const openEssay = async (essay: Essay) => {
+    try {
+      setSelectedEssay(essay);
+      setSelectedEntries([]);
+      setAiRecommendation("");
+      setDetailLoading(true);
+
+      const detail = await getEssayById(
+        essay.id,
+      );
+
+      const entries =
+        await mapEssayEntries(detail);
+
+      setSelectedEntries(entries);
+    } catch (error) {
+      setSelectedEssay(null);
+
+      Alert.alert(
+        "에세이 상세 조회 실패",
+        getErrorMessage(
+          error,
+          "에세이 내용을 불러오지 못했습니다.",
+        ),
+      );
+    } finally {
+      setDetailLoading(false);
+    }
+  };
+
+  const handleCreateEssay = async () => {
+    if (
+      !journeyCard ||
+      !journeyCard.canCreateEssay
+    ) {
+      return;
+    }
+
+    try {
+      setCreateLoading(true);
+
+      const draftTitle =
+        `${journeyCard.title}의 기록`;
+
+      const essayId = await createEssayDraft({
+        journeyId: journeyCard.id,
+        title: draftTitle,
+      });
+
+      await generateAndSaveEssay(essayId);
+
+      await updateEssay(essayId, {
+        status: "completed",
+      });
+
+      const detail = await getEssayById(
+        essayId,
+      );
+
+      const createdEssay =
+        await mapEssayListItem(detail, 0);
+
+      const createdEntries =
+        await mapEssayEntries(detail);
+
+      setSelectedEssay(createdEssay);
+      setSelectedEntries(createdEntries);
+      setAiRecommendation("");
+
+      await loadScreenData(false);
+    } catch (error) {
+      Alert.alert(
+        "에세이 생성 실패",
+        getErrorMessage(
+          error,
+          "에세이를 생성하지 못했습니다.",
+        ),
+      );
+    } finally {
+      setCreateLoading(false);
+    }
+  };
 
   const handleShare = async () => {
     if (!selectedEssay) {
@@ -204,7 +619,10 @@ export default function EssayScreen() {
   };
 
   const handleAiRecommendation = async () => {
-    if (!selectedEssay) {
+    if (
+      !selectedEssay ||
+      selectedEntries.length === 0
+    ) {
       return;
     }
 
@@ -212,9 +630,7 @@ export default function EssayScreen() {
       setAiLoading(true);
       setAiRecommendation("");
 
-      const entries = getEssayEntries(selectedEssay);
-
-      const message = entries
+      const message = selectedEntries
         .map(
           (entry) =>
             `경험: ${entry.mission}\n사용자 기록: ${entry.userText}`,
@@ -226,20 +642,36 @@ export default function EssayScreen() {
 
       setAiRecommendation(result);
     } catch (error) {
-      const errorMessage =
-        error instanceof Error
-          ? error.message
-          : "AI 추천을 불러오지 못했습니다.";
-
-      Alert.alert("AI 추천 실패", errorMessage);
+      Alert.alert(
+        "AI 추천 실패",
+        getErrorMessage(
+          error,
+          "AI 추천을 불러오지 못했습니다.",
+        ),
+      );
     } finally {
       setAiLoading(false);
     }
   };
 
-  if (selectedEssay) {
-    const entries = getEssayEntries(selectedEssay);
+  if (screenLoading) {
+    return (
+      <SafeAreaView
+        style={styles.screenLoading}
+        edges={["top"]}
+      >
+        <ActivityIndicator
+          size="large"
+          color={COLORS.primary}
+        />
+        <Text style={styles.screenLoadingText}>
+          에세이를 불러오는 중이에요
+        </Text>
+      </SafeAreaView>
+    );
+  }
 
+  if (selectedEssay) {
     return (
       <SafeAreaView
         style={styles.safeAreaWhite}
@@ -267,34 +699,67 @@ export default function EssayScreen() {
                 {selectedEssay.title}
               </Text>
 
-              {entries.map((entry) => (
-                <View
-                  key={entry.id}
-                  style={styles.entryContainer}
-                >
-                  <Image
-                    source={{ uri: entry.photo }}
-                    style={styles.entryImage}
+              {detailLoading ? (
+                <View style={styles.detailLoading}>
+                  <ActivityIndicator
+                    color={COLORS.primary}
                   />
-
-                  <Text style={styles.entryMission}>
-                    {entry.mission}
+                  <Text
+                    style={
+                      styles.detailLoadingText
+                    }
+                  >
+                    기록을 불러오는 중이에요
                   </Text>
-
-                  <Text style={styles.entryUserText}>
-                    {entry.userText}
-                  </Text>
-
-                  <View style={styles.aiTextBox}>
-                    <Text style={styles.aiText}>
-                      {entry.aiText}
-                    </Text>
-                  </View>
                 </View>
-              ))}
+              ) : selectedEntries.length > 0 ? (
+                selectedEntries.map((entry) => (
+                  <View
+                    key={entry.id}
+                    style={styles.entryContainer}
+                  >
+                    <Image
+                      source={{
+                        uri: entry.photo,
+                      }}
+                      style={styles.entryImage}
+                    />
 
-              <View style={styles.aiRecommendationCard}>
-                <Text style={styles.aiRecommendationTitle}>
+                    <Text
+                      style={styles.entryMission}
+                    >
+                      {entry.mission}
+                    </Text>
+
+                    <Text
+                      style={styles.entryUserText}
+                    >
+                      {entry.userText}
+                    </Text>
+
+                    <View style={styles.aiTextBox}>
+                      <Text style={styles.aiText}>
+                        {entry.aiText}
+                      </Text>
+                    </View>
+                  </View>
+                ))
+              ) : (
+                <Text
+                  style={styles.emptyEntriesText}
+                >
+                  에세이에 연결된 기록이 없습니다.
+                </Text>
+              )}
+
+              <View
+                style={styles.aiRecommendationCard}
+              >
+                <Text
+                  style={
+                    styles.aiRecommendationTitle
+                  }
+                >
                   다음 작은 경험
                 </Text>
 
@@ -309,11 +774,17 @@ export default function EssayScreen() {
 
                 <Pressable
                   onPress={handleAiRecommendation}
-                  disabled={aiLoading}
+                  disabled={
+                    aiLoading ||
+                    selectedEntries.length === 0
+                  }
                   style={({ pressed }) => [
                     styles.aiRecommendationButton,
-                    pressed && styles.buttonPressed,
-                    aiLoading &&
+                    pressed &&
+                      styles.buttonPressed,
+                    (aiLoading ||
+                      selectedEntries.length ===
+                        0) &&
                       styles.aiRecommendationButtonDisabled,
                   ]}
                 >
@@ -355,13 +826,19 @@ export default function EssayScreen() {
                 ) : null}
               </View>
 
-              <View style={styles.detailBottomSpace} />
+              <View
+                style={styles.detailBottomSpace}
+              />
             </View>
           </ScrollView>
 
           <View style={styles.actionBar}>
             <Pressable
-              onPress={() => setSelectedEssay(null)}
+              onPress={() => {
+                setSelectedEssay(null);
+                setSelectedEntries([]);
+                setAiRecommendation("");
+              }}
               style={({ pressed }) => [
                 styles.iconActionButton,
                 pressed && styles.buttonPressed,
@@ -415,6 +892,31 @@ export default function EssayScreen() {
     );
   }
 
+  const targetCount =
+    journeyCard?.targetRecordCount ?? 0;
+
+  const recordCount =
+    journeyCard?.recordCount ?? 0;
+
+  const remainingCount = Math.max(
+    targetCount - recordCount,
+    0,
+  );
+
+  const progressPercent =
+    targetCount > 0
+      ? Math.min(
+          Math.max(
+            (recordCount / targetCount) * 100,
+            0,
+          ),
+          100,
+        )
+      : 0;
+
+  const canCreateEssay =
+    Boolean(journeyCard?.canCreateEssay);
+
   return (
     <SafeAreaView
       style={styles.safeArea}
@@ -434,33 +936,40 @@ export default function EssayScreen() {
           </Text>
         </View>
 
-        {/* 책장 */}
         <View style={styles.bookshelfContainer}>
           <ScrollView
             horizontal
             showsHorizontalScrollIndicator={false}
             contentContainerStyle={styles.bookRow}
           >
-            {/* 진행 중인 책 */}
-            <View style={styles.progressBook}>
-              <View style={styles.rotatedLabelWrapper}>
-                <Text style={styles.progressBookText}>
-                  진행 중
-                </Text>
+            {journeyCard ? (
+              <View style={styles.progressBook}>
+                <View
+                  style={
+                    styles.rotatedLabelWrapper
+                  }
+                >
+                  <Text
+                    style={styles.progressBookText}
+                  >
+                    {canCreateEssay
+                      ? "완성 가능"
+                      : "진행 중"}
+                  </Text>
+                </View>
               </View>
-            </View>
+            ) : null}
 
-            {/* 완성된 책 */}
-            {ESSAYS.map((essay, index) => {
+            {essays.map((essay, index) => {
               const bookHeight =
                 SPINE_HEIGHT -
-                (index === 0 ? 0 : index * 4);
+                Math.min(index, 5) * 4;
 
               return (
                 <Pressable
                   key={essay.id}
                   onPress={() =>
-                    setSelectedEssay(essay)
+                    void openEssay(essay)
                   }
                   style={({ pressed }) => [
                     styles.bookSpine,
@@ -470,13 +979,16 @@ export default function EssayScreen() {
                           essay.thickness
                         ],
                       height: bookHeight,
-                      backgroundColor: essay.color,
+                      backgroundColor:
+                        essay.color,
                     },
                     pressed && styles.bookPressed,
                   ]}
                 >
                   <View
-                    style={styles.rotatedLabelWrapper}
+                    style={
+                      styles.rotatedLabelWrapper
+                    }
                   >
                     <Text
                       numberOfLines={1}
@@ -490,7 +1002,8 @@ export default function EssayScreen() {
                       {essay.title}
                     </Text>
 
-                    {essay.thickness !== "thin" && (
+                    {essay.thickness !==
+                      "thin" && (
                       <Text
                         style={
                           styles.bookSpineYear
@@ -506,136 +1019,270 @@ export default function EssayScreen() {
               );
             })}
 
-            {/* 비어 있는 책 자리 */}
-            {[20, 26, 22].map((width, index) => (
-              <View
-                key={`empty-book-${index}`}
-                style={[
-                  styles.emptyBook,
-                  {
-                    width,
-                    height:
-                      SPINE_HEIGHT * 0.82 -
-                      index * 6,
-                  },
-                ]}
-              />
-            ))}
+            {[20, 26, 22].map(
+              (width, index) => (
+                <View
+                  key={`empty-book-${index}`}
+                  style={[
+                    styles.emptyBook,
+                    {
+                      width,
+                      height:
+                        SPINE_HEIGHT * 0.82 -
+                        index * 6,
+                    },
+                  ]}
+                />
+              ),
+            )}
 
-            <View style={styles.bookRowEndSpace} />
+            <View
+              style={styles.bookRowEndSpace}
+            />
           </ScrollView>
 
           <View style={styles.shelf} />
           <View style={styles.wall} />
         </View>
 
-        {/* 진행 중인 에세이 */}
         <View style={styles.body}>
-          <View style={styles.progressCard}>
-            <View style={styles.progressCardTop}>
-              <View style={styles.progressTag}>
-                <Text style={styles.progressTagText}>
-                  진행 중
+          {journeyCard ? (
+            <View style={styles.progressCard}>
+              <View
+                style={styles.progressCardTop}
+              >
+                <View style={styles.progressTag}>
+                  <Text
+                    style={
+                      styles.progressTagText
+                    }
+                  >
+                    {canCreateEssay
+                      ? "완료"
+                      : "진행 중"}
+                  </Text>
+                </View>
+
+                <Text style={styles.journeyText}>
+                  {journeyCard.durationDays}일의
+                  여정
                 </Text>
               </View>
 
-              <Text style={styles.journeyText}>
-                14일의 여정
-              </Text>
-            </View>
-
-            <Text style={styles.progressEssayTitle}>
-              나의 7월 기록들
-            </Text>
-
-            <Text style={styles.progressEssayPeriod}>
-              2026. 7. 16 – 7. 29
-            </Text>
-
-            <View style={styles.progressInfoRow}>
-              <Text style={styles.progressInfoText}>
-                4개의 경험이 담겼어요
-              </Text>
-
-              <Text style={styles.progressCount}>
-                4/7
-              </Text>
-            </View>
-
-            <View style={styles.progressBarBackground}>
-              <View style={styles.progressBarFill} />
-            </View>
-
-            <View style={styles.remainingNotice}>
-              <Text style={styles.remainingText}>
-                완성까지{" "}
-                <Text style={styles.remainingStrong}>
-                  3개의 경험
-                </Text>
-                이 더 필요해요
-              </Text>
-            </View>
-
-            <Pressable
-              disabled
-              style={styles.disabledCreateButton}
-            >
               <Text
-                style={styles.disabledCreateButtonText}
+                style={styles.progressEssayTitle}
               >
-                에세이 만들기 (3개 남음)
+                {journeyCard.title}
               </Text>
-            </Pressable>
-          </View>
 
-          {/* 완성된 에세이 목록 */}
-          <Text style={styles.completedSectionTitle}>
-            완성된 에세이 ({ESSAYS.length})
+              <Text
+                style={styles.progressEssayPeriod}
+              >
+                {getYear(
+                  journeyCard.startDate,
+                )}
+                . {formatPeriod(
+                  journeyCard.startDate,
+                  journeyCard.endDate,
+                )}
+              </Text>
+
+              <View
+                style={styles.progressInfoRow}
+              >
+                <Text
+                  style={styles.progressInfoText}
+                >
+                  {recordCount}개의 경험이 담겼어요
+                </Text>
+
+                <Text
+                  style={styles.progressCount}
+                >
+                  {recordCount}/{targetCount}
+                </Text>
+              </View>
+
+              <View
+                style={
+                  styles.progressBarBackground
+                }
+              >
+                <View
+                  style={[
+                    styles.progressBarFill,
+                    {
+                      width:
+                        `${progressPercent}%` as `${number}%`,
+                    },
+                  ]}
+                />
+              </View>
+
+              <View
+                style={styles.remainingNotice}
+              >
+                <Text
+                  style={styles.remainingText}
+                >
+                  {canCreateEssay ? (
+                    <>
+                      모든 경험이 모였어요. 이제{" "}
+                      <Text
+                        style={
+                          styles.remainingStrong
+                        }
+                      >
+                        에세이를 만들 수 있어요.
+                      </Text>
+                    </>
+                  ) : (
+                    <>
+                      완성까지{" "}
+                      <Text
+                        style={
+                          styles.remainingStrong
+                        }
+                      >
+                        {remainingCount}개의 경험
+                      </Text>
+                      이 더 필요해요
+                    </>
+                  )}
+                </Text>
+              </View>
+
+              <Pressable
+                onPress={handleCreateEssay}
+                disabled={
+                  !canCreateEssay ||
+                  createLoading
+                }
+                style={({ pressed }) => [
+                  canCreateEssay
+                    ? styles.createButton
+                    : styles.disabledCreateButton,
+                  pressed &&
+                    canCreateEssay &&
+                    styles.buttonPressed,
+                ]}
+              >
+                {createLoading ? (
+                  <ActivityIndicator
+                    color={COLORS.white}
+                  />
+                ) : (
+                  <Text
+                    style={
+                      canCreateEssay
+                        ? styles.createButtonText
+                        : styles.disabledCreateButtonText
+                    }
+                  >
+                    {canCreateEssay
+                      ? "AI 에세이 만들기"
+                      : `에세이 만들기 (${remainingCount}개 남음)`}
+                  </Text>
+                )}
+              </Pressable>
+            </View>
+          ) : (
+            <View style={styles.emptyCard}>
+              <Text
+                style={styles.emptyCardTitle}
+              >
+                진행 중인 Journey가 없어요
+              </Text>
+              <Text
+                style={
+                  styles.emptyCardDescription
+                }
+              >
+                Journey를 시작하고 경험을 기록하면
+                여기에 에세이 진행 상황이 표시됩니다.
+              </Text>
+            </View>
+          )}
+
+          <Text
+            style={styles.completedSectionTitle}
+          >
+            완성된 에세이 ({essays.length})
           </Text>
 
-          {ESSAYS.map((essay) => (
-            <Pressable
-              key={essay.id}
-              onPress={() => setSelectedEssay(essay)}
-              style={({ pressed }) => [
-                styles.essayListCard,
-                pressed && styles.cardPressed,
-              ]}
-            >
-              <View
-                style={[
-                  styles.essayAccent,
-                  {
-                    backgroundColor: essay.color,
-                  },
+          {essays.length > 0 ? (
+            essays.map((essay) => (
+              <Pressable
+                key={essay.id}
+                onPress={() =>
+                  void openEssay(essay)
+                }
+                style={({ pressed }) => [
+                  styles.essayListCard,
+                  pressed && styles.cardPressed,
                 ]}
-              />
+              >
+                <View
+                  style={[
+                    styles.essayAccent,
+                    {
+                      backgroundColor:
+                        essay.color,
+                    },
+                  ]}
+                />
 
-              <Image
-                source={{ uri: essay.photo }}
-                style={styles.essayThumbnail}
-              />
+                <Image
+                  source={{ uri: essay.photo }}
+                  style={styles.essayThumbnail}
+                />
 
-              <View style={styles.essayListText}>
-                <Text
-                  numberOfLines={1}
-                  style={styles.essayListTitle}
+                <View
+                  style={styles.essayListText}
                 >
-                  {essay.title}
-                </Text>
+                  <Text
+                    numberOfLines={1}
+                    style={
+                      styles.essayListTitle
+                    }
+                  >
+                    {essay.title}
+                  </Text>
 
-                <Text style={styles.essayListPeriod}>
-                  {essay.year}년 {essay.period}
-                </Text>
-              </View>
+                  <Text
+                    style={
+                      styles.essayListPeriod
+                    }
+                  >
+                    {essay.year}년{" "}
+                    {essay.period}
+                  </Text>
+                </View>
 
-              <Ionicons
-                name="chevron-forward"
-                size={18}
-                color={COLORS.textMuted}
-              />
-            </Pressable>
-          ))}
+                <Ionicons
+                  name="chevron-forward"
+                  size={18}
+                  color={COLORS.textMuted}
+                />
+              </Pressable>
+            ))
+          ) : (
+            <View style={styles.emptyCard}>
+              <Text
+                style={styles.emptyCardTitle}
+              >
+                아직 완성된 에세이가 없어요
+              </Text>
+              <Text
+                style={
+                  styles.emptyCardDescription
+                }
+              >
+                완료된 Journey가 생기면 AI 에세이를
+                만들 수 있습니다.
+              </Text>
+            </View>
+          )}
         </View>
 
         <View style={styles.bottomSpace} />
@@ -1244,4 +1891,71 @@ const styles = StyleSheet.create({
   buttonPressed: {
     opacity: 0.72,
   },
+
+  screenLoading: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: COLORS.background,
+  },
+
+  screenLoadingText: {
+    marginTop: 12,
+    fontSize: 13,
+    color: COLORS.textSub,
+  },
+
+  emptyCard: {
+    padding: 18,
+    backgroundColor: COLORS.white,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: 16,
+  },
+
+  emptyCardTitle: {
+    marginBottom: 5,
+    fontSize: 15,
+    fontWeight: "700",
+    color: COLORS.textMain,
+  },
+
+  emptyCardDescription: {
+    fontSize: 12,
+    lineHeight: 19,
+    color: COLORS.textMuted,
+  },
+
+  createButton: {
+    marginTop: 12,
+    paddingVertical: 13,
+    alignItems: "center",
+    backgroundColor: COLORS.primary,
+    borderRadius: 11,
+  },
+
+  createButtonText: {
+    fontSize: 13,
+    fontWeight: "700",
+    color: COLORS.white,
+  },
+
+  detailLoading: {
+    paddingVertical: 44,
+    alignItems: "center",
+  },
+
+  detailLoadingText: {
+    marginTop: 10,
+    fontSize: 12,
+    color: COLORS.textMuted,
+  },
+
+  emptyEntriesText: {
+    paddingVertical: 28,
+    textAlign: "center",
+    fontSize: 13,
+    color: COLORS.textMuted,
+  },
+
 });
