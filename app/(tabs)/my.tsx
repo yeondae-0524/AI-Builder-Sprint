@@ -1,5 +1,6 @@
 import Ionicons from "@expo/vector-icons/Ionicons";
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { supabase } from "../../lib/supabase";
 import {
   Alert,
   Pressable,
@@ -229,6 +230,42 @@ function LevelTag({
 }
 
 export default function MyScreen() {
+  const [nickname, setNickname] = useState("사용자");
+  const [isUserLoading, setIsUserLoading] = useState(true);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    const loadCurrentUser = async () => {
+      const {
+        data: { user },
+        error,
+      } = await supabase.auth.getUser();
+
+      if (!isMounted) {
+        return;
+      }
+
+      if (error) {
+        console.error("사용자 정보 불러오기 실패:", error.message);
+        setIsUserLoading(false);
+        return;
+      }
+
+      const savedNickname =
+        user?.user_metadata?.nickname;
+
+      setNickname(savedNickname ?? "사용자");
+
+      setIsUserLoading(false);
+    };
+
+    loadCurrentUser();
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
   const [selectedBadge, setSelectedBadge] =
     useState<Badge | null>(null);
 
@@ -467,7 +504,9 @@ export default function MyScreen() {
           </View>
 
           <View style={styles.profileTextArea}>
-            <Text style={styles.profileName}>유정</Text>
+            <Text style={styles.profileName}>
+              {isUserLoading ? "불러오는 중..." : nickname}
+            </Text>
 
             <LevelTag text="소리의 탐험가" />
 
