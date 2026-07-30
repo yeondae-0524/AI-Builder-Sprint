@@ -134,15 +134,6 @@ const LEVEL_LABEL: Record<BadgeLevel, string> = {
   locked: "잠김",
 };
 
-const STATS: StatItem[] = [
-  { label: "완료 미션", value: "18" },
-  { label: "기록 경험", value: "14" },
-  { label: "발견 장소", value: "23" },
-  { label: "완성 에세이", value: "4" },
-  { label: "받은 좋아요", value: "89" },
-  { label: "획득 뱃지", value: "4" },
-];
-
 const INITIAL_INTERESTS = ["산책", "음악", "휴식"];
 
 const DISCOVERED_INTERESTS = [
@@ -233,34 +224,196 @@ export default function MyScreen() {
   const [nickname, setNickname] = useState("사용자");
   const [isUserLoading, setIsUserLoading] = useState(true);
 
+  const [stats, setStats] = useState<StatItem[]>([
+    { label: "완료 미션", value: "0" },
+    { label: "기록 경험", value: "0" },
+    { label: "발견 장소", value: "0" },
+    { label: "완성 에세이", value: "0" },
+    { label: "받은 좋아요", value: "0" },
+    { label: "획득 뱃지", value: "0" },
+  ]);
+
   useEffect(() => {
     let isMounted = true;
 
-    const loadCurrentUser = async () => {
+    const loadMyData = async () => {
+      setIsUserLoading(true);
+
       const {
         data: { user },
-        error,
+        error: userError,
       } = await supabase.auth.getUser();
 
       if (!isMounted) {
         return;
       }
 
-      if (error) {
-        console.error("사용자 정보 불러오기 실패:", error.message);
+      if (userError || !user) {
+        console.error(
+          "사용자 정보 불러오기 실패:",
+          userError?.message,
+        );
         setIsUserLoading(false);
         return;
       }
 
-      const savedNickname =
-        user?.user_metadata?.nickname;
+      setNickname(
+        user.user_metadata.nickname ?? "사용자",
+      );
 
-      setNickname(savedNickname ?? "사용자");
+      const [
+        completedMissionsResult,
+        recordsResult,
+        completedEssaysResult,
+        badgesResult,
+      ] = await Promise.all([
+        // 완료한 미션
+        supabase
+          .from("mission_attempts")
+          .select("id", {
+            count: "exact",
+            head: true,
+          })
+          .eq("user_id", user.id)
+          .not("completed_at", "is", null),
+
+        // 사용자의 기록과 방문 장소
+        supabase
+          .from("records")
+          .select("id, place_id")
+          .eq("user_id", user.id),
+
+        // 완성된 에세이
+        supabase
+          .from("essays")
+          .select("id", {
+            count: "exact",
+            head: true,
+          })
+          .eq("user_id", user.id)
+          .eq("status", "completed"),
+
+        // 획득한 뱃지
+        supabase
+          .from("user_badges")
+          .select("badge_id")
+          .eq("user_id", user.id),
+      ]);
+
+      if (!isMounted) {
+        return;
+      }
+
+      if (completedMissionsResult.error) {
+        console.error(
+          "완료 미션 조회 실패:",
+          completedMissionsResult.error.message,
+        );
+      }
+
+      if (recordsResult.error) {
+        console.error(
+          "기록 조회 실패:",
+          recordsResult.error.message,
+        );
+      }
+
+      if (completedEssaysResult.error) {
+        console.error(
+          "에세이 조회 실패:",
+          completedEssaysResult.error.message,
+        );
+      }
+
+      if (badgesResult.error) {
+        console.error(
+          "뱃지 조회 실패:",
+          badgesResult.error.message,
+        );
+      }
+
+      const records = recordsResult.data ?? [];
+
+      const recordIds = records.map(
+        (record) => record.id,
+      );
+
+      // records의 place_id 중 중복을 제거
+      const discoveredPlaceCount = new Set(
+        records
+          .map((record) => record.place_id)
+          .filter(Boolean),
+      ).size;
+
+      // badge_id 중 중복을 제거
+      const badgeCount = new Set(
+        (badgesResult.data ?? []).map(
+          (badge) => badge.badge_id,
+        ),
+      ).size;
+
+      let receivedLikesCount = 0;
+
+      // 사용자가 작성한 기록에 달린 좋아요 개수
+      if (recordIds.length > 0) {
+        const { count, error: likesError } =
+          await supabase
+            .from("record_likes")
+            .select("id", {
+              count: "exact",
+              head: true,
+            })
+            .in("record_id", recordIds);
+
+        if (likesError) {
+          console.error(
+            "받은 좋아요 조회 실패:",
+            likesError.message,
+          );
+        } else {
+          receivedLikesCount = count ?? 0;
+        }
+      }
+
+      if (!isMounted) {
+        return;
+      }
+
+      setStats([
+        {
+          label: "완료 미션",
+          value: String(
+            completedMissionsResult.count ?? 0,
+          ),
+        },
+        {
+          label: "기록 경험",
+          value: String(records.length),
+        },
+        {
+          label: "발견 장소",
+          value: String(discoveredPlaceCount),
+        },
+        {
+          label: "완성 에세이",
+          value: String(
+            completedEssaysResult.count ?? 0,
+          ),
+        },
+        {
+          label: "받은 좋아요",
+          value: String(receivedLikesCount),
+        },
+        {
+          label: "획득 뱃지",
+          value: String(badgeCount),
+        },
+      ]);
 
       setIsUserLoading(false);
     };
 
-    loadCurrentUser();
+    loadMyData();
 
     return () => {
       isMounted = false;
@@ -295,11 +448,17 @@ export default function MyScreen() {
         {
           text: "로그아웃",
           style: "destructive",
-          onPress: () => {
-            Alert.alert(
-              "안내",
-              "로그아웃 기능은 추후 연결할 예정입니다.",
-            );
+          onPress: async () => {
+            const { error } =
+              await supabase.auth.signOut();
+
+            if (error) {
+              Alert.alert(
+                "로그아웃 실패",
+                error.message,
+              );
+              return;
+            }
           },
         },
       ],
@@ -553,7 +712,7 @@ export default function MyScreen() {
 
         {/* 활동 통계 */}
         <View style={styles.statsGrid}>
-          {STATS.map((stat) => (
+          {stats.map((stat) => (
             <View
               key={stat.label}
               style={styles.statCard}
