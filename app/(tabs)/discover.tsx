@@ -11,8 +11,8 @@ import {
   Text,
   View,
 } from "react-native";
-import Svg, { Rect } from "react-native-svg";
 import { useMission } from "../_mission-context";
+import { KakaoMapView } from "./_kakao-map";
 
 const BL = "#3D5AFE";
 const BLL = "#EEF1FF";
@@ -45,6 +45,8 @@ const MAP_COLORS = ["#D6DFE9", "#DAEACF", "#D8E2EE"];
 
 export default function DiscoverScreen() {
   const [activeFilter, setActiveFilter] = useState("가까운 기록");
+
+
   const [activeBubble, setActiveBubble] = useState(null);
   const [sheetBubble, setSheetBubble] = useState(null);
   const [liked, setLiked] = useState([]);
@@ -131,14 +133,19 @@ export default function DiscoverScreen() {
 
   return (
     <View style={styles.container}>
-      <View style={StyleSheet.absoluteFill}>
-        <Svg width="100%" height="100%" viewBox="0 0 400 450" preserveAspectRatio="xMidYMid slice">
-          <Rect width="400" height="450" fill="#E4EBF3" />
-          {MAP_BLOCKS.map(([x, y, w, h, ci], i) => (
-            <Rect key={i} x={x} y={y} width={w} height={h} rx={4} fill={MAP_COLORS[ci]} />
-          ))}
-        </Svg>
-      </View>
+      <KakaoMapView
+        latitude={35.1795543}
+        longitude={129.0756416}
+        markers={BUBBLES.map((b, i) => ({
+          id: b.id,
+          lat: 35.1795543 + (i - 2) * 0.003,
+          lng: 129.0756416 + (i - 1.5) * 0.003,
+        }))}
+        onMarkerPress={(id) => {
+          const bubble = BUBBLES.find((b) => b.id === id);
+          if (bubble) setActiveBubble(bubble);
+        }}
+      />
 
       {BUBBLES.map((b) => (
         <Pressable

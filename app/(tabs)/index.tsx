@@ -13,6 +13,7 @@ import {
   View,
 } from "react-native";
 import { Mission, useMission } from "../_mission-context";
+import { KakaoMapView } from "./_kakao-map";
 
 const BL = "#3D5AFE";
 const BLL = "#EEF1FF";
@@ -134,9 +135,11 @@ export default function HomeScreen() {
 
   return (
     <View style={styles.container}>
-      <View style={styles.mapPlaceholder}>
-        <Text style={styles.mapText}>지도 영역 (추후 연동)</Text>
-      </View>
+    <KakaoMapView
+      latitude={35.1795543}
+      longitude={129.0756416}
+      style={styles.mapPlaceholder}
+    />
 
       <Animated.View
         style={[styles.sheet, { height: SHEET_HEIGHT, transform: [{ translateY: sheetTranslateY }] }]}
