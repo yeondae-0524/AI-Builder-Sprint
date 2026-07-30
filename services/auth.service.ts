@@ -1,6 +1,6 @@
 import type {
-    AuthChangeEvent,
-    Session,
+  AuthChangeEvent,
+  Session,
 } from "@supabase/supabase-js";
 
 import { supabase } from "../lib/supabase";
