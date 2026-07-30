@@ -1,14 +1,16 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
   Animated,
   Dimensions,
+  Keyboard,
   PanResponder,
   Platform,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from "react-native";
 import { useMission } from "../_mission-context";
@@ -25,36 +27,85 @@ const WH = "#FFFFFF";
 const SCREEN_HEIGHT = Dimensions.get("window").height;
 const SHEET_CLOSE_POSITION = SCREEN_HEIGHT * 0.6;
 
+const DEFAULT_CENTER = { lat: 35.1795543, lng: 129.0756416 };
+
 const FILTERS = ["가까운 기록", "최근 기록", "내 취향", "새로운 분야", "산책"];
 
 const BUBBLES = [
-  { id: 1, place: "연남동 카페 봄날", mission: "조용한 카페에서 30분 독서", time: "2일 전", nick: "소리의 탐험가", emotion: "차분함", note: "창가 자리에서 책 읽으니 딴 세상 같았어요.", likes: 12, photo: "https://images.unsplash.com/photo-1493857671505-72967e2e2760?w=200&h=200&fit=crop" },
-  { id: 2, place: "경의선 숲길", mission: "공원 산책하며 계절 사진 찍기", time: "1일 전", nick: "산책러", emotion: "상쾌함", note: "노을 질 때가 진짜 예뻐요.", likes: 8, photo: "https://images.unsplash.com/photo-1441974231531-c6227db76b6e?w=200&h=200&fit=crop" },
-  { id: 3, place: "망원동 책방", mission: "동네 책방에서 한 페이지 읽기", time: "3시간 전", nick: "책방순례자", emotion: "설렘", note: "사장님이 추천해주신 책이 취향저격.", likes: 21, multi: true, count: 3, photo: "https://images.unsplash.com/photo-1495446815901-a7297e633e8d?w=200&h=200&fit=crop" },
-  { id: 4, place: "홍대 거리", mission: "버스킹 공연 5분 이상 감상하기", time: "5시간 전", nick: "귀호강", emotion: "즐거움", note: "우연히 들은 버스킹인데 목소리가 좋았어요.", likes: 15, photo: "https://images.unsplash.com/photo-1493225457124-a3eb161ffa5f?w=200&h=200&fit=crop" },
+  {
+    id: 1,
+    place: "연남동 카페 봄날",
+    lat: 35.1795543,
+    lng: 129.0806416,
+    mission: "조용한 카페에서 30분 독서",
+    time: "2일 전",
+    nick: "소리의 탐험가",
+    emotion: "차분함",
+    note: "창가 자리에서 책 읽으니 딴 세상 같았어요.",
+    likes: 12,
+    photo: "https://images.unsplash.com/photo-1493857671505-72967e2e2760?w=200&h=200&fit=crop",
+  },
+  {
+    id: 2,
+    place: "경의선 숲길",
+    lat: 35.1825543,
+    lng: 129.0756416,
+    mission: "공원 산책하며 계절 사진 찍기",
+    time: "1일 전",
+    nick: "산책러",
+    emotion: "상쾌함",
+    note: "노을 질 때가 진짜 예뻐요.",
+    likes: 8,
+    photo: "https://images.unsplash.com/photo-1441974231531-c6227db76b6e?w=200&h=200&fit=crop",
+  },
+  {
+    id: 3,
+    place: "망원동 책방",
+    lat: 35.1765543,
+    lng: 129.0716416,
+    mission: "동네 책방에서 한 페이지 읽기",
+    time: "3시간 전",
+    nick: "책방순례자",
+    emotion: "설렘",
+    note: "사장님이 추천해주신 책이 취향저격.",
+    likes: 21,
+    multi: true,
+    count: 3,
+    photo: "https://images.unsplash.com/photo-1495446815901-a7297e633e8d?w=200&h=200&fit=crop",
+  },
+  {
+    id: 4,
+    place: "홍대 거리",
+    lat: 35.1815543,
+    lng: 129.0806416,
+    mission: "버스킹 공연 5분 이상 감상하기",
+    time: "5시간 전",
+    nick: "귀호강",
+    emotion: "즐거움",
+    note: "우연히 들은 버스킹인데 목소리가 좋았어요.",
+    likes: 15,
+    photo: "https://images.unsplash.com/photo-1493225457124-a3eb161ffa5f?w=200&h=200&fit=crop",
+  },
 ];
-
-const MAP_BLOCKS = [
-  [8, 8, 63, 90, 0], [80, 8, 88, 90, 1], [177, 8, 94, 90, 2], [280, 8, 58, 90, 0], [346, 8, 44, 90, 1],
-  [8, 108, 63, 80, 1], [80, 108, 88, 80, 2], [177, 108, 94, 80, 0], [280, 108, 58, 80, 1], [346, 108, 44, 80, 2],
-  [8, 198, 63, 70, 2], [80, 198, 88, 70, 0], [177, 198, 50, 70, 1], [237, 198, 134, 70, 0], [280, 198, 110, 70, 2],
-  [8, 278, 63, 90, 0], [80, 278, 88, 90, 1], [177, 278, 94, 90, 2], [280, 278, 58, 90, 0], [346, 278, 44, 90, 1],
-  [8, 358, 63, 90, 0], [80, 358, 88, 90, 1], [177, 358, 94, 90, 2], [280, 358, 58, 90, 0], [346, 358, 44, 90, 1],
-];
-const MAP_COLORS = ["#D6DFE9", "#DAEACF", "#D8E2EE"];
 
 export default function DiscoverScreen() {
   const [activeFilter, setActiveFilter] = useState("가까운 기록");
-
-
   const [activeBubble, setActiveBubble] = useState(null);
   const [sheetBubble, setSheetBubble] = useState(null);
   const [liked, setLiked] = useState([]);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [mapCenter, setMapCenter] = useState(DEFAULT_CENTER);
 
   const { mainMission, setMainMission } = useMission();
 
   const sheetTranslateY = useRef(new Animated.Value(SHEET_CLOSE_POSITION)).current;
   const dragStart = useRef(0);
+
+  // 검색어와 장소 이름이 일치하는 것들
+  const searchResults = useMemo(() => {
+    if (!searchQuery.trim()) return [];
+    return BUBBLES.filter((b) => b.place.includes(searchQuery.trim()));
+  }, [searchQuery]);
 
   useEffect(() => {
     if (activeBubble) {
@@ -131,15 +182,22 @@ export default function DiscoverScreen() {
     closeSheet();
   };
 
+  const handleSelectSearchResult = (bubble) => {
+    setMapCenter({ lat: bubble.lat, lng: bubble.lng });
+    setActiveBubble(bubble);
+    setSearchQuery("");
+    Keyboard.dismiss();
+  };
+
   return (
     <View style={styles.container}>
       <KakaoMapView
-        latitude={35.1795543}
-        longitude={129.0756416}
-        markers={BUBBLES.map((b, i) => ({
+        latitude={mapCenter.lat}
+        longitude={mapCenter.lng}
+        markers={BUBBLES.map((b) => ({
           id: b.id,
-          lat: 35.1795543 + (i - 2) * 0.003,
-          lng: 129.0756416 + (i - 1.5) * 0.003,
+          lat: b.lat,
+          lng: b.lng,
           photo: b.photo,
           count: b.multi ? b.count : undefined,
         }))}
@@ -149,38 +207,61 @@ export default function DiscoverScreen() {
         }}
       />
 
-      {BUBBLES.map((b) => (
-        <Pressable
-          key={b.id}
-          onPress={() => setActiveBubble(activeBubble?.id === b.id ? null : b)}
-          style={[styles.bubble, { left: b.x, top: b.y }, activeBubble?.id === b.id && styles.bubbleActive]}
-        >
-          {b.multi && <Text style={{ fontSize: 10, color: T1 }}>+{b.count}</Text>}
-        </Pressable>
-      ))}
-
       <View style={styles.topBar}>
         <View style={styles.searchRow}>
           <View style={styles.searchInput}>
-            <Text style={{ fontSize: 13, color: T2 }}>장소나 지역 검색</Text>
+            <TextInput
+              value={searchQuery}
+              onChangeText={setSearchQuery}
+              placeholder="장소나 지역 검색"
+              placeholderTextColor={T2}
+              style={styles.searchTextInput}
+              returnKeyType="search"
+            />
           </View>
           <Pressable style={styles.filterIconBtn}>
             <Text style={{ fontSize: 14 }}>≡</Text>
           </Pressable>
         </View>
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 6 }}>
-          {FILTERS.map((f) => (
-            <Pressable
-              key={f}
-              onPress={() => setActiveFilter(f)}
-              style={[styles.chip, activeFilter === f && styles.chipActive]}
-            >
-              <Text style={{ fontSize: 11, color: activeFilter === f ? WH : T1, fontWeight: activeFilter === f ? "700" : "400" }}>
-                {f}
-              </Text>
-            </Pressable>
-          ))}
-        </ScrollView>
+
+        {/* 검색 결과 드롭다운 */}
+        {searchQuery.trim().length > 0 && (
+          <View style={styles.searchDropdown}>
+            {searchResults.length > 0 ? (
+              searchResults.map((b) => (
+                <Pressable
+                  key={b.id}
+                  onPress={() => handleSelectSearchResult(b)}
+                  style={({ pressed }) => [styles.searchResultRow, pressed && { opacity: 0.6 }]}
+                >
+                  <View style={styles.searchResultThumb} />
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.searchResultPlace}>{b.place}</Text>
+                    <Text style={styles.searchResultMission}>{b.mission}</Text>
+                  </View>
+                </Pressable>
+              ))
+            ) : (
+              <Text style={styles.searchEmptyText}>"{searchQuery}"에 대한 검색 결과가 없어요</Text>
+            )}
+          </View>
+        )}
+
+        {searchQuery.trim().length === 0 && (
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 6 }}>
+            {FILTERS.map((f) => (
+              <Pressable
+                key={f}
+                onPress={() => setActiveFilter(f)}
+                style={[styles.chip, activeFilter === f && styles.chipActive]}
+              >
+                <Text style={{ fontSize: 11, color: activeFilter === f ? WH : T1, fontWeight: activeFilter === f ? "700" : "400" }}>
+                  {f}
+                </Text>
+              </Pressable>
+            ))}
+          </ScrollView>
+        )}
       </View>
 
       {sheetBubble && (
@@ -237,24 +318,29 @@ export default function DiscoverScreen() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, position: "relative", backgroundColor: "#DFE8F0" },
-  bubble: {
-    position: "absolute",
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-    backgroundColor: T3,
-    borderWidth: 3,
-    borderColor: WH,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  bubbleActive: { borderColor: BL },
-  topBar: { position: "absolute", top: 52, left: 16, right: 16 },
+  topBar: { position: "absolute", top: 52, left: 16, right: 16, zIndex: 10, elevation: 10 },
   searchRow: { flexDirection: "row", gap: 8, marginBottom: 8 },
-  searchInput: { flex: 1, backgroundColor: WH, borderRadius: 12, paddingVertical: 10, paddingHorizontal: 14 },
+  searchInput: { flex: 1, backgroundColor: WH, borderRadius: 12, paddingHorizontal: 14, justifyContent: "center" },
+  searchTextInput: { fontSize: 13, color: T0, paddingVertical: 10 },
   filterIconBtn: { width: 44, backgroundColor: WH, borderRadius: 12, alignItems: "center", justifyContent: "center" },
   chip: { backgroundColor: WH, borderRadius: 20, paddingVertical: 5, paddingHorizontal: 12 },
   chipActive: { backgroundColor: BL },
+  searchDropdown: {
+    backgroundColor: WH,
+    borderRadius: 12,
+    paddingVertical: 4,
+    maxHeight: 260,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.1,
+    shadowRadius: 10,
+    elevation: 6,
+  },
+  searchResultRow: { flexDirection: "row", alignItems: "center", padding: 10, gap: 10 },
+  searchResultThumb: { width: 40, height: 40, borderRadius: 8, backgroundColor: T3 },
+  searchResultPlace: { fontSize: 13, fontWeight: "600", color: T0 },
+  searchResultMission: { fontSize: 11, color: T1, marginTop: 2 },
+  searchEmptyText: { padding: 14, fontSize: 12, color: T2, textAlign: "center" },
   sheet: {
     position: "absolute",
     bottom: 0,
