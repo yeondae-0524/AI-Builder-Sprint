@@ -12,6 +12,7 @@ import {
   Text,
   View,
 } from "react-native";
+import { Mission as BackendMission, getRecommendedMissions } from "../../services/challenge.service";
 import { Mission, useMission } from "../_mission-context";
 import { KakaoMapView } from "./_kakao-map";
 
@@ -23,8 +24,6 @@ const T2 = "#9EA3AE";
 const T3 = "#E4E6EA";
 const WH = "#FFFFFF";
 const BG = "#F7F8FA";
-
-const API_URL = "http://localhost:3000";
 
 const SCREEN_HEIGHT = Dimensions.get("window").height;
 const SHEET_HEIGHT = SCREEN_HEIGHT - 90;
@@ -40,6 +39,19 @@ const FALLBACK_MISSIONS: Mission[] = [
   { id: 4, title: "버스킹 공연 5분 이상 감상하기", desc: "길 위의 음악에 귀 기울여봐요", time: "10분", dist: "1.2km", cost: "무료", cat: "음악" },
 ];
 
+function mapBackendMission(bm: BackendMission): Mission {
+  return {
+    id: bm.id,
+    title: bm.title,
+    desc: bm.short_description,
+    time: bm.estimated_duration_min ? `${bm.estimated_duration_min}분` : "-",
+    dist: "-",
+    cost: bm.estimated_cost === 0 ? "무료" : `${bm.estimated_cost.toLocaleString()}원`,
+    cat: bm.category?.name ?? "기타",
+    star: false,
+  };
+}
+
 export default function HomeScreen() {
   const [missions, setMissions] = useState<Mission[]>(FALLBACK_MISSIONS);
   const [loading, setLoading] = useState(true);
@@ -51,13 +63,12 @@ export default function HomeScreen() {
   const dragStartPosition = useRef(COLLAPSED_POSITION);
 
   useEffect(() => {
-    fetch(`${API_URL}/missions`)
-      .then((response) => {
-        if (!response.ok) throw new Error(`HTTP 오류: ${response.status}`);
-        return response.json();
-      })
-      .then((data: unknown) => {
-        if (Array.isArray(data)) setMissions(data as Mission[]);
+    getRecommendedMissions(5, 0)
+      .then((data) => {
+        console.log("받아온 미션:", data);
+        if (data.length > 0) {
+          setMissions(data.map(mapBackendMission));
+        }
       })
       .catch((error: Error) => {
         console.log("미션 API 연결 실패, 임시 데이터 사용:", error.message);
@@ -135,11 +146,11 @@ export default function HomeScreen() {
 
   return (
     <View style={styles.container}>
-    <KakaoMapView
-      latitude={35.1795543}
-      longitude={129.0756416}
-      style={styles.mapPlaceholder}
-    />
+      <KakaoMapView
+        latitude={35.1795543}
+        longitude={129.0756416}
+        style={styles.mapPlaceholder}
+      />
 
       <Animated.View
         style={[styles.sheet, { height: SHEET_HEIGHT, transform: [{ translateY: sheetTranslateY }] }]}
@@ -158,7 +169,6 @@ export default function HomeScreen() {
           </Pressable>
         </View>
 
-        {/* 오늘의 대표 미션 배너 — 발견 탭이나 아래 리스트에서 고정하면 여기 뜸 */}
         {mainMission && (
           <View style={styles.pinnedBanner}>
             <Text style={styles.pinnedLabel}>오늘의 대표 미션</Text>
@@ -267,7 +277,6 @@ export default function HomeScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1, overflow: "hidden", backgroundColor: BG },
   mapPlaceholder: { ...StyleSheet.absoluteFillObject, alignItems: "center", justifyContent: "center", paddingBottom: 180, backgroundColor: "#DFE8F0" },
-  mapText: { fontSize: 12, color: T2 },
   sheet: {
     position: "absolute",
     right: 0,
