@@ -1,39 +1,121 @@
-import { supabase } from "@/lib/supabase"; // 본인의 supabase 클라이언트 경로
+import { supabase } from "@/lib/supabase";
 
-/**
- * [사진 업로드 함수]
- * @param file - HTML input에서 선택된 File 객체 또는 React Native의 image 데이터
- * @param userId - 업로드하는 사용자 ID (파일명 중복 방지용)
- * @returns { success: boolean, imageUrl?: string, error?: any }
- */
-export const uploadMissionImage = async (file: File, userId: string) => {
+type ImageMimeType =
+  | "image/jpeg"
+  | "image/png"
+  | "image/webp";
+
+type UploadMissionImageParams = {
+  imageUri: string;
+  recordId: string;
+  mimeType?: ImageMimeType;
+};
+
+export async function uploadMissionImage({
+  imageUri,
+  recordId,
+  mimeType = "image/jpeg",
+}: UploadMissionImageParams) {
+  let uploadedPath: string | null = null;
+
   try {
-    // 1. 파일 이름 중복을 방지하기 위해 '사용자ID_시간스탬프_원래이름' 형태로 생성
-    const fileExt = file.name.split(".").pop();
-    const fileName = `${userId}_${Date.now()}.${fileExt}`;
-    const filePath = `missions/${fileName}`;
+    const {
+      data: { user },
+      error: userError,
+    } = await supabase.auth.getUser();
 
-    // 2. Supabase Storage 'records' 버킷에 파일 업로드
-    const { data: uploadData, error: uploadError } = await supabase.storage
-      .from("records")
-      .upload(filePath, file, {
-        cacheControl: "3600",
-        upsert: false, // 동일 파일명 덮어쓰기 여부
+    if (userError) {
+      throw userError;
+    }
+
+    if (!user) {
+      throw new Error("로그인이 필요합니다.");
+    }
+
+    if (!recordId) {
+      throw new Error("recordId가 필요합니다.");
+    }
+
+    const response = await fetch(imageUri);
+
+    if (!response.ok) {
+      throw new Error("이미지 파일을 불러오지 못했습니다.");
+    }
+
+    const imageData = await response.arrayBuffer();
+
+    const extensionMap: Record<ImageMimeType, string> = {
+      "image/jpeg": "jpg",
+      "image/png": "png",
+      "image/webp": "webp",
+    };
+
+    const extension = extensionMap[mimeType];
+
+    const randomValue = Math.random()
+      .toString(36)
+      .slice(2);
+
+    const fileName =
+      `${Date.now()}-${randomValue}.${extension}`;
+
+    // Storage 정책과 맞는 경로
+    // 사용자ID/기록ID/파일명
+    const filePath =
+      `${user.id}/${recordId}/${fileName}`;
+
+    const { data: uploadData, error: uploadError } =
+      await supabase.storage
+        .from("record-photos")
+        .upload(filePath, imageData, {
+          cacheControl: "3600",
+          contentType: mimeType,
+          upsert: false,
+        });
+
+    if (uploadError) {
+      throw uploadError;
+    }
+
+    uploadedPath = uploadData.path;
+
+    const { error: photoError } = await supabase
+      .from("record_photos")
+      .insert({
+        record_id: recordId,
+        storage_path: uploadData.path,
+        sort_order: 0,
+        is_cover: true,
       });
 
-    if (uploadError) throw uploadError;
+    if (photoError) {
+      await supabase.storage
+        .from("record-photos")
+        .remove([uploadData.path]);
 
-    // 3. 업로드된 사진의 Public URL(인터넷 공개 주소) 가져오기
-    const { data: urlData } = supabase.storage
-      .from("records")
-      .getPublicUrl(filePath);
+      uploadedPath = null;
+      throw photoError;
+    }
 
     return {
       success: true,
-      imageUrl: urlData.publicUrl, // 이 URL을 1단계 createRecord의 imageUrl에 전달하면 됩니다!
+      storagePath: uploadData.path,
     };
   } catch (error) {
-    console.error("uploadMissionImage Error:", error);
-    return { success: false, error };
+    console.error(
+      "uploadMissionImage Error:",
+      error,
+    );
+
+    if (uploadedPath) {
+      await supabase.storage
+        .from("record-photos")
+        .remove([uploadedPath]);
+    }
+
+    return {
+      success: false,
+      error,
+    };
   }
-};
+}

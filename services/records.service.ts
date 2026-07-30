@@ -1,59 +1,70 @@
 import { supabase } from "@/lib/supabase";
-import { addBadgePoints } from "./badge.service"; // 👈 방금 만든 뱃지 서비스 불러오기!
+
+export type RecordVisibility =
+  | "private"
+  | "anonymous"
+  | "nickname";
 
 export interface CreateRecordDTO {
-  userId: string;
-  journeyId: string;
-  missionId: string; // Edge Function이 만들어준 진짜 DB UUID
-  content: string;   // 사용자가 작성한 에세이/글
-  imageUrl?: string; // 스토리지에 올린 사진 URL (선택)
+  missionAttemptId: string;
+  emotion: string;
+  content: string;
+  visibility?: RecordVisibility;
+  placeId?: string | null;
 }
 
 /**
- * [미션 기록 저장 및 뱃지 포인트 적립]
+ * 기록 생성과 함께 다음 작업을 처리한다.
+ *
+ * - records 생성
+ * - mission_attempts 완료 처리
+ * - Journey 목표 달성 시 completed 처리
  */
-export const createRecord = async ({
-  userId,
-  journeyId,
-  missionId,
+export async function createRecord({
+  missionAttemptId,
+  emotion,
   content,
-  imageUrl,
-}: CreateRecordDTO) => {
+  visibility = "private",
+  placeId = null,
+}: CreateRecordDTO) {
   try {
-    // 1. 사용자의 기록을 'records' 테이블에 저장
-    const newRecord = {
-      user_id: userId,
-      journey_id: journeyId,
-      mission_id: missionId,
-      content,
-      image_url: imageUrl,
-    };
-
-    const { data: recordData, error: recordError } = await supabase
-      .from("records")
-      .insert([newRecord])
-      .select()
-      .single();
-
-    if (recordError) throw recordError;
-
-    // 2. 방금 완료한 미션의 DB 데이터를 조회해서 어떤 뱃지가 걸려있는지(badge_ids) 확인
-    const { data: missionData, error: missionError } = await supabase
-      .from("missions")
-      .select("badge_ids")
-      .eq("id", missionId)
-      .single();
-
-    if (missionError) throw missionError;
-
-    // 3. 뱃지 포인트 올려주기 실행! 🚀
-    if (missionData.badge_ids && missionData.badge_ids.length > 0) {
-      await addBadgePoints(userId, missionData.badge_ids);
+    if (!missionAttemptId) {
+      throw new Error("missionAttemptId가 필요합니다.");
     }
 
-    return { success: true, data: recordData };
+    if (!emotion.trim()) {
+      throw new Error("감정을 선택해야 합니다.");
+    }
+
+    if (!content.trim()) {
+      throw new Error("기록 내용을 입력해야 합니다.");
+    }
+
+    const { data: recordId, error } = await supabase.rpc(
+      "complete_mission_with_record",
+      {
+        p_mission_attempt_id: missionAttemptId,
+        p_emotion: emotion.trim(),
+        p_content: content.trim(),
+        p_visibility: visibility,
+        p_place_id: placeId,
+      },
+    );
+
+    if (error) {
+      throw error;
+    }
+
+    return {
+      success: true as const,
+      recordId: recordId as string,
+    };
   } catch (error) {
     console.error("createRecord Error:", error);
-    return { success: false, error };
+
+    return {
+      success: false as const,
+      error,
+    };
   }
-};
+}
