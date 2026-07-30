@@ -1,6 +1,6 @@
 import Ionicons from "@expo/vector-icons/Ionicons";
-import { useEffect, useState } from "react";
-import { supabase } from "../../lib/supabase";
+import { useFocusEffect } from "expo-router";
+import { useCallback, useState } from "react";
 import {
   Alert,
   Pressable,
@@ -10,6 +10,7 @@ import {
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { supabase } from "../../lib/supabase";
 
 const COLORS = {
   primary: "#3D5AFE",
@@ -55,6 +56,105 @@ type SettingItem = {
   label: string;
   description: string;
 };
+
+type ActiveJourney = {
+  id: string;
+  title: string;
+  target_record_count: number;
+  start_date: string;
+  end_date: string;
+  status: string;
+};
+
+type MyRecord = {
+  id: string;
+  place_id: string | null;
+  journey_id: string | null;
+  content: string | null;
+  emotion: string | null;
+  recorded_at: string;
+};
+
+type AiKeywordResponse = {
+  answer?: string;
+};
+
+const DAY_IN_MS = 24 * 60 * 60 * 1000;
+
+function toDateKey(date: Date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+
+  return `${year}-${month}-${day}`;
+}
+
+function parseDateKey(dateKey: string) {
+  const [year, month, day] =
+    dateKey.split("-").map(Number);
+
+  return new Date(year, month - 1, day);
+}
+
+function normalizeStringArray(
+  value: unknown,
+): string[] {
+  if (Array.isArray(value)) {
+    return value
+      .filter(
+        (item): item is string =>
+          typeof item === "string",
+      )
+      .map((item) => item.trim())
+      .filter(Boolean);
+  }
+
+  if (typeof value === "string") {
+    try {
+      const parsed: unknown = JSON.parse(value);
+
+      if (Array.isArray(parsed)) {
+        return normalizeStringArray(parsed);
+      }
+    } catch {
+      return value
+        .split(",")
+        .map((item) => item.trim())
+        .filter(Boolean);
+    }
+  }
+
+  return [];
+}
+
+function parseAiKeywords(answer: string) {
+  const arrayText = answer.match(/\[[\s\S]*\]/)?.[0];
+
+  if (arrayText) {
+    try {
+      const parsed: unknown = JSON.parse(arrayText);
+      const keywords = normalizeStringArray(parsed);
+
+      if (keywords.length > 0) {
+        return keywords.slice(0, 3);
+      }
+    } catch {
+      // JSON 형식이 아니면 아래 일반 문자열 처리로 이동
+    }
+  }
+
+  return answer
+    .replace(/```json|```/g, "")
+    .split(/[,\n#]/)
+    .map((item) =>
+      item
+        .replace(/^[-\d.)\s]+/, "")
+        .replace(/["[\]]/g, "")
+        .trim(),
+    )
+    .filter(Boolean)
+    .slice(0, 3);
+}
 
 const BADGES: Badge[] = [
   {
@@ -133,14 +233,6 @@ const LEVEL_LABEL: Record<BadgeLevel, string> = {
   prism: "PRISM",
   locked: "잠김",
 };
-
-const INITIAL_INTERESTS = ["산책", "음악", "휴식"];
-
-const DISCOVERED_INTERESTS = [
-  "조용한 공간",
-  "저녁 산책",
-  "혼자 하는 활동",
-];
 
 const SETTINGS: SettingItem[] = [
   {
@@ -223,6 +315,28 @@ function LevelTag({
 export default function MyScreen() {
   const [nickname, setNickname] = useState("사용자");
   const [isUserLoading, setIsUserLoading] = useState(true);
+  const [journey, setJourney] =
+    useState<ActiveJourney | null>(null);
+
+  const [
+    journeyRecordCount,
+    setJourneyRecordCount,
+  ] = useState(0);
+
+  const [
+    initialInterests,
+    setInitialInterests,
+  ] = useState<string[]>([]);
+
+  const [
+    discoveredInterests,
+    setDiscoveredInterests,
+  ] = useState<string[]>([]);
+
+  const [
+    isAiInterestLoading,
+    setIsAiInterestLoading,
+  ] = useState(true);
 
   const [stats, setStats] = useState<StatItem[]>([
     { label: "완료 미션", value: "0" },
@@ -233,192 +347,415 @@ export default function MyScreen() {
     { label: "획득 뱃지", value: "0" },
   ]);
 
-  useEffect(() => {
-    let isMounted = true;
+  useFocusEffect(
+    useCallback(() => {
+      let isMounted = true;
 
-    const loadMyData = async () => {
-      setIsUserLoading(true);
+      const loadMyData = async () => {
+        setIsUserLoading(true);
+        setIsAiInterestLoading(true);
 
-      const {
-        data: { user },
-        error: userError,
-      } = await supabase.auth.getUser();
+        try {
+          const {
+            data: { user },
+            error: userError,
+          } = await supabase.auth.getUser();
 
-      if (!isMounted) {
-        return;
-      }
+          if (userError || !user) {
+            throw new Error(
+              userError?.message ??
+                "로그인 정보를 확인할 수 없습니다.",
+            );
+          }
 
-      if (userError || !user) {
-        console.error(
-          "사용자 정보 불러오기 실패:",
-          userError?.message,
-        );
-        setIsUserLoading(false);
-        return;
-      }
+          if (!isMounted) {
+            return;
+          }
 
-      setNickname(
-        user.user_metadata.nickname ?? "사용자",
-      );
+          /*
+          * 회원가입 때 profiles.interests에 저장된
+          * 관심사를 가져옵니다.
+          *
+          * 기본 저장 키는 interests로 사용하고,
+          * 기존 코드와의 호환을 위해 다른 이름도 확인합니다.
+          */
+          const {
+            data: profileData,
+            error: profileError,
+          } = await supabase
+            .from("profiles")
+            .select("nickname, interests")
+            .eq("id", user.id)
+            .single();
 
-      const [
-        completedMissionsResult,
-        recordsResult,
-        completedEssaysResult,
-        badgesResult,
-      ] = await Promise.all([
-        // 완료한 미션
-        supabase
-          .from("mission_attempts")
-          .select("id", {
-            count: "exact",
-            head: true,
-          })
-          .eq("user_id", user.id)
-          .not("completed_at", "is", null),
+          if (profileError) {
+  console.error(
+    "프로필 조회 실패:",
+    profileError.message,
+  );
 
-        // 사용자의 기록과 방문 장소
-        supabase
-          .from("records")
-          .select("id, place_id")
-          .eq("user_id", user.id),
+  setNickname(
+    user.user_metadata.nickname ?? "사용자",
+  );
 
-        // 완성된 에세이
-        supabase
-          .from("essays")
-          .select("id", {
-            count: "exact",
-            head: true,
-          })
-          .eq("user_id", user.id)
-          .eq("status", "completed"),
+  setInitialInterests([]);
+} else {
+  setNickname(
+    profileData.nickname ??
+      user.user_metadata.nickname ??
+      "사용자",
+  );
 
-        // 획득한 뱃지
-        supabase
-          .from("user_badges")
-          .select("badge_id")
-          .eq("user_id", user.id),
-      ]);
+  setInitialInterests(
+    normalizeStringArray(
+      profileData.interests,
+    ),
+  );
+}
 
-      if (!isMounted) {
-        return;
-      }
+          const now = new Date();
 
-      if (completedMissionsResult.error) {
-        console.error(
-          "완료 미션 조회 실패:",
-          completedMissionsResult.error.message,
-        );
-      }
-
-      if (recordsResult.error) {
-        console.error(
-          "기록 조회 실패:",
-          recordsResult.error.message,
-        );
-      }
-
-      if (completedEssaysResult.error) {
-        console.error(
-          "에세이 조회 실패:",
-          completedEssaysResult.error.message,
-        );
-      }
-
-      if (badgesResult.error) {
-        console.error(
-          "뱃지 조회 실패:",
-          badgesResult.error.message,
-        );
-      }
-
-      const records = recordsResult.data ?? [];
-
-      const recordIds = records.map(
-        (record) => record.id,
-      );
-
-      // records의 place_id 중 중복을 제거
-      const discoveredPlaceCount = new Set(
-        records
-          .map((record) => record.place_id)
-          .filter(Boolean),
-      ).size;
-
-      // badge_id 중 중복을 제거
-      const badgeCount = new Set(
-        (badgesResult.data ?? []).map(
-          (badge) => badge.badge_id,
-        ),
-      ).size;
-
-      let receivedLikesCount = 0;
-
-      // 사용자가 작성한 기록에 달린 좋아요 개수
-      if (recordIds.length > 0) {
-        const { count, error: likesError } =
-          await supabase
-            .from("record_likes")
-            .select("id", {
-              count: "exact",
-              head: true,
-            })
-            .in("record_id", recordIds);
-
-        if (likesError) {
-          console.error(
-            "받은 좋아요 조회 실패:",
-            likesError.message,
+          const todayStart = new Date(
+            now.getFullYear(),
+            now.getMonth(),
+            now.getDate(),
           );
-        } else {
-          receivedLikesCount = count ?? 0;
+
+          const todayKey = toDateKey(todayStart);
+
+          const [
+            completedMissionsResult,
+            recordsResult,
+            completedEssaysResult,
+            badgesResult,
+            journeyResult,
+          ] = await Promise.all([
+            supabase
+              .from("mission_attempts")
+              .select("id", {
+                count: "exact",
+                head: true,
+              })
+              .eq("user_id", user.id)
+              .not("completed_at", "is", null),
+
+            supabase
+              .from("records")
+              .select(
+                `
+                id,
+                place_id,
+                journey_id,
+                content,
+                emotion,
+                recorded_at
+                `,
+              )
+              .eq("user_id", user.id)
+              .order("recorded_at", {
+                ascending: false,
+              }),
+
+            supabase
+              .from("essays")
+              .select("id", {
+                count: "exact",
+                head: true,
+              })
+              .eq("user_id", user.id)
+              .eq("status", "completed"),
+
+            supabase
+              .from("user_badges")
+              .select("badge_id")
+              .eq("user_id", user.id),
+
+            /*
+            * 캘린더에서 설정한 현재 진행 중인 여정을
+            * 동일한 journeys 테이블에서 조회합니다.
+            */
+            supabase
+              .from("journeys")
+              .select(
+                `
+                id,
+                title,
+                target_record_count,
+                start_date,
+                end_date,
+                status
+                `,
+              )
+              .eq("user_id", user.id)
+              .eq("status", "active")
+              .lte("start_date", todayKey)
+              .gte("end_date", todayKey)
+              .order("start_date", {
+                ascending: false,
+              })
+              .limit(1)
+              .maybeSingle(),
+          ]);
+
+          if (!isMounted) {
+            return;
+          }
+
+          const queryErrors = [
+            completedMissionsResult.error,
+            recordsResult.error,
+            completedEssaysResult.error,
+            badgesResult.error,
+            journeyResult.error,
+          ].filter(Boolean);
+
+          queryErrors.forEach((error) => {
+            console.error(
+              "MY 데이터 조회 실패:",
+              error?.message,
+            );
+          });
+
+          const records =
+            (recordsResult.data ?? []) as MyRecord[];
+
+          const activeJourney =
+            (journeyResult.data ??
+              null) as ActiveJourney | null;
+
+          setJourney(activeJourney);
+
+          const journeyCompletedDayCount =
+  activeJourney
+    ? new Set(
+        records
+          .filter(
+            (record) =>
+              record.journey_id ===
+              activeJourney.id,
+          )
+          .map((record) => record.recorded_at),
+      ).size
+    : 0;
+
+setJourneyRecordCount(
+  journeyCompletedDayCount,
+);
+
+          const recordIds = records.map(
+            (record) => record.id,
+          );
+
+          const discoveredPlaceCount =
+            new Set(
+              records
+                .map((record) => record.place_id)
+                .filter(Boolean),
+            ).size;
+
+          const badgeCount =
+            new Set(
+              (badgesResult.data ?? []).map(
+                (badge) => badge.badge_id,
+              ),
+            ).size;
+
+          let receivedLikesCount = 0;
+
+          if (recordIds.length > 0) {
+            const {
+              count,
+              error: likesError,
+            } = await supabase
+              .from("record_likes")
+              .select("id", {
+                count: "exact",
+                head: true,
+              })
+              .in("record_id", recordIds);
+
+            if (likesError) {
+              console.error(
+                "받은 좋아요 조회 실패:",
+                likesError.message,
+              );
+            } else {
+              receivedLikesCount = count ?? 0;
+            }
+          }
+
+          if (!isMounted) {
+            return;
+          }
+
+          setStats([
+            {
+              label: "완료 미션",
+              value: String(
+                completedMissionsResult.count ?? 0,
+              ),
+            },
+            {
+              label: "기록 경험",
+              value: String(records.length),
+            },
+            {
+              label: "발견 장소",
+              value: String(
+                discoveredPlaceCount,
+              ),
+            },
+            {
+              label: "완성 에세이",
+              value: String(
+                completedEssaysResult.count ?? 0,
+              ),
+            },
+            {
+              label: "받은 좋아요",
+              value: String(
+                receivedLikesCount,
+              ),
+            },
+            {
+              label: "획득 뱃지",
+              value: String(badgeCount),
+            },
+          ]);
+
+          /*
+          * 가장 최근 기록 최대 20개를 AI에게 보내
+          * 경험에서 나타난 취향 키워드 3개를 받습니다.
+          */
+          const recordsForAi = records
+            .filter(
+              (record) =>
+                typeof record.content === "string" &&
+                record.content.trim().length > 0,
+            )
+            .slice(0, 20);
+
+          if (recordsForAi.length === 0) {
+            setDiscoveredInterests([]);
+            return;
+          }
+
+          const experienceText =
+            recordsForAi
+              .map(
+                (record, index) =>
+                  `${index + 1}. 감정: ${
+                    record.emotion ?? "미입력"
+                  }\n기록: ${record.content}`,
+              )
+              .join("\n\n");
+
+          const aiPrompt = `
+  다음은 한 사용자가 직접 작성한 경험 기록이다.
+
+  ${experienceText}
+
+  이 기록에서 반복적으로 나타나는 활동, 공간, 시간대, 분위기, 행동 성향을 분석해 사용자의 취향을 나타내는 한국어 키워드 3개를 뽑아라.
+
+  규칙:
+  - 각 키워드는 2~10자 정도의 짧은 명사구
+  - 서로 의미가 겹치지 않게 작성
+  - 평가나 진단을 하지 말 것
+  - 설명을 쓰지 말 것
+  - 반드시 JSON 문자열 배열 하나만 반환할 것
+
+  출력 예시:
+  ["조용한 공간", "저녁 산책", "혼자 하는 활동"]
+          `.trim();
+
+          const {
+            data: aiData,
+            error: aiError,
+          } =
+            await supabase.functions.invoke<AiKeywordResponse>(
+              "upstage-test",
+              {
+                body: {
+                  message: aiPrompt,
+                },
+              },
+            );
+
+          if (!isMounted) {
+            return;
+          }
+
+          if (aiError) {
+            console.error(
+              "AI 취향 분석 실패:",
+              aiError.message,
+            );
+
+            setDiscoveredInterests([]);
+            return;
+          }
+
+          setDiscoveredInterests(
+            aiData?.answer
+              ? parseAiKeywords(aiData.answer)
+              : [],
+          );
+        } catch (error) {
+          if (!isMounted) {
+            return;
+          }
+
+          const message =
+            error instanceof Error
+              ? error.message
+              : "MY 정보를 불러오지 못했습니다.";
+
+          console.error("MY 화면 로딩 실패:", message);
+        } finally {
+          if (isMounted) {
+            setIsUserLoading(false);
+            setIsAiInterestLoading(false);
+          }
         }
-      }
+      };
 
-      if (!isMounted) {
-        return;
-      }
+      void loadMyData();
 
-      setStats([
-        {
-          label: "완료 미션",
-          value: String(
-            completedMissionsResult.count ?? 0,
-          ),
-        },
-        {
-          label: "기록 경험",
-          value: String(records.length),
-        },
-        {
-          label: "발견 장소",
-          value: String(discoveredPlaceCount),
-        },
-        {
-          label: "완성 에세이",
-          value: String(
-            completedEssaysResult.count ?? 0,
-          ),
-        },
-        {
-          label: "받은 좋아요",
-          value: String(receivedLikesCount),
-        },
-        {
-          label: "획득 뱃지",
-          value: String(badgeCount),
-        },
-      ]);
+      return () => {
+        isMounted = false;
+      };
+    }, []),
+  );
 
-      setIsUserLoading(false);
-    };
+  const today = new Date();
 
-    loadMyData();
+const todayStart = new Date(
+  today.getFullYear(),
+  today.getMonth(),
+  today.getDate(),
+);
 
-    return () => {
-      isMounted = false;
-    };
-  }, []);
+const journeyDday =
+  journey === null
+    ? null
+    : Math.max(
+        0,
+        Math.ceil(
+          (parseDateKey(
+            journey.end_date,
+          ).getTime() -
+            todayStart.getTime()) /
+            DAY_IN_MS,
+        ),
+      );
+
+const journeyDdayText =
+  journeyDday === null
+    ? "--"
+    : journeyDday === 0
+      ? "D-DAY"
+      : `D-${journeyDday}`;
+
   const [selectedBadge, setSelectedBadge] =
     useState<Badge | null>(null);
 
@@ -696,18 +1033,37 @@ export default function MyScreen() {
               </Text>
 
               <Text style={styles.journeyTitle}>
-                14일의 여정
+                {isUserLoading
+                  ? "불러오는 중..."
+                  : journey?.title ??
+                    "진행 중인 여정이 없어요"}
               </Text>
             </View>
 
-            <LevelTag text="D-5" />
+            <LevelTag text={journeyDdayText} />
           </View>
 
-          <ProgressBar value={4} total={7} />
+          {journey ? (
+            <>
+              <ProgressBar
+                value={journeyRecordCount}
+                total={journey.target_record_count}
+              />
 
-          <Text style={styles.journeyProgressText}>
-            7번 중 4번 완료
-          </Text>
+              <Text style={styles.journeyProgressText}>
+                {journey.target_record_count}번 중{" "}
+                {journeyRecordCount}번 완료
+              </Text>
+            </>
+          ) : (
+            <>
+              <ProgressBar value={0} total={1} />
+
+              <Text style={styles.journeyProgressText}>
+                캘린더에서 새 여정을 시작해 주세요.
+              </Text>
+            </>
+          )}
         </View>
 
         {/* 활동 통계 */}
@@ -738,16 +1094,22 @@ export default function MyScreen() {
             </Text>
 
             <View style={styles.chipContainer}>
-              {INITIAL_INTERESTS.map((interest) => (
-                <View
-                  key={interest}
-                  style={styles.basicChip}
-                >
-                  <Text style={styles.basicChipText}>
-                    {interest}
-                  </Text>
-                </View>
-              ))}
+              {initialInterests.length > 0 ? (
+                initialInterests.map((interest) => (
+                  <View
+                    key={interest}
+                    style={styles.basicChip}
+                  >
+                    <Text style={styles.basicChipText}>
+                      {interest}
+                    </Text>
+                  </View>
+                ))
+              ) : (
+                <Text style={styles.interestNotice}>
+                  회원가입 때 선택한 관심사가 없어요.
+                </Text>
+              )}
             </View>
           </View>
 
@@ -757,16 +1119,26 @@ export default function MyScreen() {
             </Text>
 
             <View style={styles.chipContainer}>
-              {DISCOVERED_INTERESTS.map((interest) => (
-                <View
-                  key={interest}
-                  style={styles.discoveredChip}
-                >
-                  <Text style={styles.discoveredChipText}>
-                    {interest}
-                  </Text>
-                </View>
-              ))}
+              {isAiInterestLoading ? (
+                <Text style={styles.interestNotice}>
+                  AI가 최근 경험을 분석하는 중이에요.
+                </Text>
+              ) : discoveredInterests.length > 0 ? (
+                discoveredInterests.map((interest) => (
+                  <View
+                    key={interest}
+                    style={styles.discoveredChip}
+                  >
+                    <Text style={styles.discoveredChipText}>
+                      {interest}
+                    </Text>
+                  </View>
+                ))
+              ) : (
+                <Text style={styles.interestNotice}>
+                  기록이 쌓이면 AI가 취향을 발견해줘요.
+                </Text>
+              )}
             </View>
           </View>
 
