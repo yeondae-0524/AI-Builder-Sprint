@@ -17,6 +17,7 @@ export type UpdateProfileInput = {
   bio?: string | null;
   avatar_url?: string | null;
   activity_region?: string | null;
+  selected_title_id?: string | null;
   interests?: string[];
 };
 

@@ -11,6 +11,7 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { supabase } from "../../lib/supabase";
+import { updateMyProfile } from "../../services/profile.service";
 
 const COLORS = {
   primary: "#3D5AFE",
@@ -27,15 +28,11 @@ const COLORS = {
   success: "#10B981",
 };
 
-type BadgeLevel =
-  | "bronze"
-  | "silver"
-  | "gold"
-  | "prism"
-  | "locked";
+type BadgeLevel = "bronze" | "silver" | "gold" | "prism";
 
 type Badge = {
-  id: number;
+  // 실제 user_badges.badge_id 값
+  id: string;
   name: string;
   category: string;
   level: BadgeLevel;
@@ -45,6 +42,17 @@ type Badge = {
   color: string;
   backgroundColor: string;
   title?: string;
+};
+
+type BadgeDefinition = Omit<Badge, "id" | "level" | "count"> & {
+  aliases: string[];
+};
+
+type UserBadgeRow = {
+  badge_id: string | number;
+  points: number | null;
+  tier: string | null;
+  updated_at: string | null;
 };
 
 type StatItem = {
@@ -90,21 +98,14 @@ function toDateKey(date: Date) {
 }
 
 function parseDateKey(dateKey: string) {
-  const [year, month, day] =
-    dateKey.split("-").map(Number);
-
+  const [year, month, day] = dateKey.split("-").map(Number);
   return new Date(year, month - 1, day);
 }
 
-function normalizeStringArray(
-  value: unknown,
-): string[] {
+function normalizeStringArray(value: unknown): string[] {
   if (Array.isArray(value)) {
     return value
-      .filter(
-        (item): item is string =>
-          typeof item === "string",
-      )
+      .filter((item): item is string => typeof item === "string")
       .map((item) => item.trim())
       .filter(Boolean);
   }
@@ -156,24 +157,39 @@ function parseAiKeywords(answer: string) {
     .slice(0, 3);
 }
 
-const BADGES: Badge[] = [
+function normalizeBadgeKey(value: string) {
+  return value.toLowerCase().replace(/[\s_-]/g, "");
+}
+
+function normalizeBadgeLevel(value: unknown): BadgeLevel {
+  const level = String(value ?? "bronze").toLowerCase();
+
+  if (level === "silver" || level === "gold" || level === "prism") {
+    return level;
+  }
+
+  return "bronze";
+}
+
+/*
+ * 화면에 표시할 뱃지 디자인 카탈로그입니다.
+ * aliases 중 하나가 user_badges.badge_id와 일치하면 해당 디자인을 사용합니다.
+ * 실제 DB의 badge_id가 다르면 aliases에 그 값을 추가하면 됩니다.
+ */
+const BADGE_DEFINITIONS: BadgeDefinition[] = [
   {
-    id: 1,
+    aliases: ["1", "walk", "walking", "walk_collector", "산책"],
     name: "산책 수집가",
     category: "산책",
-    level: "gold",
-    count: 8,
     nextAt: 12,
     emoji: "🥾",
     color: "#D97706",
     backgroundColor: "#FEF3C7",
   },
   {
-    id: 2,
+    aliases: ["2", "sound", "music", "sound_explorer", "음악"],
     name: "소리 탐험가",
     category: "음악",
-    level: "prism",
-    count: 15,
     nextAt: 0,
     emoji: "🎵",
     color: COLORS.primary,
@@ -181,57 +197,89 @@ const BADGES: Badge[] = [
     title: "소리의 탐험가",
   },
   {
-    id: 3,
+    aliases: ["3", "book", "reading", "book_traveler", "독서"],
     name: "책방 여행자",
     category: "독서",
-    level: "silver",
-    count: 4,
     nextAt: 8,
     emoji: "📖",
     color: "#6B7280",
     backgroundColor: "#F3F4F6",
   },
   {
-    id: 4,
+    aliases: ["4", "food", "taste", "rest", "휴식"],
     name: "새로운 맛 발견자",
     category: "휴식",
-    level: "bronze",
-    count: 2,
     nextAt: 4,
     emoji: "🍞",
     color: "#92400E",
     backgroundColor: "#FEF3C7",
   },
   {
-    id: 5,
+    aliases: ["5", "observer", "observation", "관찰"],
     name: "작은 관찰자",
     category: "관찰",
-    level: "locked",
-    count: 0,
     nextAt: 4,
     emoji: "🔍",
-    color: COLORS.textMuted,
-    backgroundColor: COLORS.background,
+    color: "#6B7280",
+    backgroundColor: "#F3F4F6",
   },
   {
-    id: 6,
+    aliases: ["6", "local", "discovery", "local_explorer", "발견"],
     name: "로컬 탐험가",
     category: "발견",
-    level: "locked",
-    count: 0,
     nextAt: 4,
     emoji: "📍",
-    color: COLORS.textMuted,
-    backgroundColor: COLORS.background,
+    color: COLORS.primary,
+    backgroundColor: COLORS.primaryLight,
   },
 ];
+
+function createBadgeFromRow(row: UserBadgeRow): Badge {
+  const actualId = String(row.badge_id);
+  const normalizedId = normalizeBadgeKey(actualId);
+
+  const definition = BADGE_DEFINITIONS.find((item) =>
+    item.aliases.some((alias) => normalizeBadgeKey(alias) === normalizedId),
+  );
+
+  const level = normalizeBadgeLevel(row.tier);
+  const count = typeof row.points === "number" ? row.points : 0;
+
+  if (!definition) {
+    console.warn("화면 정의가 없는 뱃지:", actualId);
+
+    return {
+      id: actualId,
+      name: "새로운 뱃지",
+      category: "기타",
+      level,
+      count,
+      nextAt: level === "prism" ? 0 : count + 1,
+      emoji: "🏅",
+      color: COLORS.primary,
+      backgroundColor: COLORS.primaryLight,
+    };
+  }
+
+  return {
+    id: actualId,
+    name: definition.name,
+    category: definition.category,
+    level,
+    count,
+    nextAt: level === "prism" ? 0 : definition.nextAt,
+    emoji: definition.emoji,
+    color: definition.color,
+    backgroundColor: definition.backgroundColor,
+    title: definition.title,
+  };
+}
 
 const LEVEL_LABEL: Record<BadgeLevel, string> = {
   bronze: "BRONZE",
   silver: "SILVER",
   gold: "GOLD",
   prism: "PRISM",
-  locked: "잠김",
 };
 
 const SETTINGS: SettingItem[] = [
@@ -262,8 +310,9 @@ function ProgressBar({
   total: number;
   color?: string;
 }) {
-  const percentage =
-    total > 0 ? `${Math.min((value / total) * 100, 100)}%` : "0%";
+  const percentage = (
+    total > 0 ? `${Math.min((value / total) * 100, 100)}%` : "0%"
+  ) as `${number}%`;
 
   return (
     <View style={styles.progressBarBackground}>
@@ -290,24 +339,8 @@ function LevelTag({
   backgroundColor?: string;
 }) {
   return (
-    <View
-      style={[
-        styles.levelTag,
-        {
-          backgroundColor,
-        },
-      ]}
-    >
-      <Text
-        style={[
-          styles.levelTagText,
-          {
-            color,
-          },
-        ]}
-      >
-        {text}
-      </Text>
+    <View style={[styles.levelTag, { backgroundColor }]}>
+      <Text style={[styles.levelTagText, { color }]}>{text}</Text>
     </View>
   );
 }
@@ -315,28 +348,17 @@ function LevelTag({
 export default function MyScreen() {
   const [nickname, setNickname] = useState("사용자");
   const [isUserLoading, setIsUserLoading] = useState(true);
-  const [journey, setJourney] =
-    useState<ActiveJourney | null>(null);
 
-  const [
-    journeyRecordCount,
-    setJourneyRecordCount,
-  ] = useState(0);
+  const [journey, setJourney] = useState<ActiveJourney | null>(null);
+  const [journeyRecordCount, setJourneyRecordCount] = useState(0);
 
-  const [
-    initialInterests,
-    setInitialInterests,
-  ] = useState<string[]>([]);
+  const [initialInterests, setInitialInterests] = useState<string[]>([]);
+  const [discoveredInterests, setDiscoveredInterests] = useState<string[]>([]);
+  const [isAiInterestLoading, setIsAiInterestLoading] = useState(true);
 
-  const [
-    discoveredInterests,
-    setDiscoveredInterests,
-  ] = useState<string[]>([]);
-
-  const [
-    isAiInterestLoading,
-    setIsAiInterestLoading,
-  ] = useState(true);
+  const [selectedTitleId, setSelectedTitleId] = useState<string | null>(null);
+  const [earnedBadges, setEarnedBadges] = useState<Badge[]>([]);
+  const [selectedBadge, setSelectedBadge] = useState<Badge | null>(null);
 
   const [stats, setStats] = useState<StatItem[]>([
     { label: "완료 미션", value: "0" },
@@ -363,8 +385,7 @@ export default function MyScreen() {
 
           if (userError || !user) {
             throw new Error(
-              userError?.message ??
-                "로그인 정보를 확인할 수 없습니다.",
+              userError?.message ?? "로그인 정보를 확인할 수 없습니다.",
             );
           }
 
@@ -372,55 +393,43 @@ export default function MyScreen() {
             return;
           }
 
-          /*
-          * 회원가입 때 profiles.interests에 저장된
-          * 관심사를 가져옵니다.
-          *
-          * 기본 저장 키는 interests로 사용하고,
-          * 기존 코드와의 호환을 위해 다른 이름도 확인합니다.
-          */
-          const {
-            data: profileData,
-            error: profileError,
-          } = await supabase
+          const { data: profileData, error: profileError } = await supabase
             .from("profiles")
-            .select("nickname, interests")
+            .select(
+              `
+              nickname,
+              interests,
+              selected_title_id
+              `,
+            )
             .eq("id", user.id)
             .single();
 
           if (profileError) {
-  console.error(
-    "프로필 조회 실패:",
-    profileError.message,
-  );
+            console.error("프로필 조회 실패:", profileError.message);
 
-  setNickname(
-    user.user_metadata.nickname ?? "사용자",
-  );
-
-  setInitialInterests([]);
-} else {
-  setNickname(
-    profileData.nickname ??
-      user.user_metadata.nickname ??
-      "사용자",
-  );
-
-  setInitialInterests(
-    normalizeStringArray(
-      profileData.interests,
-    ),
-  );
-}
+            setNickname(user.user_metadata.nickname ?? "사용자");
+            setInitialInterests([]);
+            setSelectedTitleId(null);
+          } else {
+            setNickname(
+              profileData.nickname ?? user.user_metadata.nickname ?? "사용자",
+            );
+            setInitialInterests(normalizeStringArray(profileData.interests));
+            setSelectedTitleId(
+              profileData.selected_title_id === null ||
+                profileData.selected_title_id === undefined
+                ? null
+                : String(profileData.selected_title_id),
+            );
+          }
 
           const now = new Date();
-
           const todayStart = new Date(
             now.getFullYear(),
             now.getMonth(),
             now.getDate(),
           );
-
           const todayKey = toDateKey(todayStart);
 
           const [
@@ -452,9 +461,7 @@ export default function MyScreen() {
                 `,
               )
               .eq("user_id", user.id)
-              .order("recorded_at", {
-                ascending: false,
-              }),
+              .order("recorded_at", { ascending: false }),
 
             supabase
               .from("essays")
@@ -467,13 +474,17 @@ export default function MyScreen() {
 
             supabase
               .from("user_badges")
-              .select("badge_id")
-              .eq("user_id", user.id),
+              .select(
+                `
+                badge_id,
+                points,
+                tier,
+                updated_at
+                `,
+              )
+              .eq("user_id", user.id)
+              .order("updated_at", { ascending: false }),
 
-            /*
-            * 캘린더에서 설정한 현재 진행 중인 여정을
-            * 동일한 journeys 테이블에서 조회합니다.
-            */
             supabase
               .from("journeys")
               .select(
@@ -490,9 +501,7 @@ export default function MyScreen() {
               .eq("status", "active")
               .lte("start_date", todayKey)
               .gte("end_date", todayKey)
-              .order("start_date", {
-                ascending: false,
-              })
+              .order("start_date", { ascending: false })
               .limit(1)
               .maybeSingle(),
           ]);
@@ -510,63 +519,52 @@ export default function MyScreen() {
           ].filter(Boolean);
 
           queryErrors.forEach((error) => {
-            console.error(
-              "MY 데이터 조회 실패:",
-              error?.message,
-            );
+            console.error("MY 데이터 조회 실패:", error?.message);
           });
 
-          const records =
-            (recordsResult.data ?? []) as MyRecord[];
-
-          const activeJourney =
-            (journeyResult.data ??
-              null) as ActiveJourney | null;
+          const records = (recordsResult.data ?? []) as MyRecord[];
+          const activeJourney = (journeyResult.data ??
+            null) as ActiveJourney | null;
 
           setJourney(activeJourney);
 
-          const journeyCompletedDayCount =
-  activeJourney
-    ? new Set(
-        records
-          .filter(
-            (record) =>
-              record.journey_id ===
-              activeJourney.id,
-          )
-          .map((record) => record.recorded_at),
-      ).size
-    : 0;
+          const journeyCompletedDayCount = activeJourney
+            ? new Set(
+                records
+                  .filter((record) => record.journey_id === activeJourney.id)
+                  .map((record) => record.recorded_at),
+              ).size
+            : 0;
 
-setJourneyRecordCount(
-  journeyCompletedDayCount,
-);
+          setJourneyRecordCount(journeyCompletedDayCount);
 
-          const recordIds = records.map(
-            (record) => record.id,
+          const userBadgeRows = (badgesResult.data ?? []) as UserBadgeRow[];
+          const uniqueBadgeRows = new Map<string, UserBadgeRow>();
+
+          userBadgeRows.forEach((row) => {
+            const badgeId = String(row.badge_id);
+
+            // updated_at 내림차순으로 조회했으므로 같은 뱃지는 첫 행만 사용합니다.
+            if (!uniqueBadgeRows.has(badgeId)) {
+              uniqueBadgeRows.set(badgeId, row);
+            }
+          });
+
+          const earnedBadgeList = Array.from(uniqueBadgeRows.values()).map(
+            createBadgeFromRow,
           );
 
-          const discoveredPlaceCount =
-            new Set(
-              records
-                .map((record) => record.place_id)
-                .filter(Boolean),
-            ).size;
+          setEarnedBadges(earnedBadgeList);
 
-          const badgeCount =
-            new Set(
-              (badgesResult.data ?? []).map(
-                (badge) => badge.badge_id,
-              ),
-            ).size;
+          const recordIds = records.map((record) => record.id);
+          const discoveredPlaceCount = new Set(
+            records.map((record) => record.place_id).filter(Boolean),
+          ).size;
 
           let receivedLikesCount = 0;
 
           if (recordIds.length > 0) {
-            const {
-              count,
-              error: likesError,
-            } = await supabase
+            const { count, error: likesError } = await supabase
               .from("record_likes")
               .select("id", {
                 count: "exact",
@@ -575,10 +573,7 @@ setJourneyRecordCount(
               .in("record_id", recordIds);
 
             if (likesError) {
-              console.error(
-                "받은 좋아요 조회 실패:",
-                likesError.message,
-              );
+              console.error("받은 좋아요 조회 실패:", likesError.message);
             } else {
               receivedLikesCount = count ?? 0;
             }
@@ -591,9 +586,7 @@ setJourneyRecordCount(
           setStats([
             {
               label: "완료 미션",
-              value: String(
-                completedMissionsResult.count ?? 0,
-              ),
+              value: String(completedMissionsResult.count ?? 0),
             },
             {
               label: "기록 경험",
@@ -601,32 +594,22 @@ setJourneyRecordCount(
             },
             {
               label: "발견 장소",
-              value: String(
-                discoveredPlaceCount,
-              ),
+              value: String(discoveredPlaceCount),
             },
             {
               label: "완성 에세이",
-              value: String(
-                completedEssaysResult.count ?? 0,
-              ),
+              value: String(completedEssaysResult.count ?? 0),
             },
             {
               label: "받은 좋아요",
-              value: String(
-                receivedLikesCount,
-              ),
+              value: String(receivedLikesCount),
             },
             {
               label: "획득 뱃지",
-              value: String(badgeCount),
+              value: String(earnedBadgeList.length),
             },
           ]);
 
-          /*
-          * 가장 최근 기록 최대 20개를 AI에게 보내
-          * 경험에서 나타난 취향 키워드 3개를 받습니다.
-          */
           const recordsForAi = records
             .filter(
               (record) =>
@@ -640,65 +623,52 @@ setJourneyRecordCount(
             return;
           }
 
-          const experienceText =
-            recordsForAi
-              .map(
-                (record, index) =>
-                  `${index + 1}. 감정: ${
-                    record.emotion ?? "미입력"
-                  }\n기록: ${record.content}`,
-              )
-              .join("\n\n");
+          const experienceText = recordsForAi
+            .map(
+              (record, index) =>
+                `${index + 1}. 감정: ${
+                  record.emotion ?? "미입력"
+                }\n기록: ${record.content}`,
+            )
+            .join("\n\n");
 
           const aiPrompt = `
-  다음은 한 사용자가 직접 작성한 경험 기록이다.
+다음은 한 사용자가 직접 작성한 경험 기록이다.
 
-  ${experienceText}
+${experienceText}
 
-  이 기록에서 반복적으로 나타나는 활동, 공간, 시간대, 분위기, 행동 성향을 분석해 사용자의 취향을 나타내는 한국어 키워드 3개를 뽑아라.
+이 기록에서 반복적으로 나타나는 활동, 공간, 시간대, 분위기, 행동 성향을 분석해 사용자의 취향을 나타내는 한국어 키워드 3개를 뽑아라.
 
-  규칙:
-  - 각 키워드는 2~10자 정도의 짧은 명사구
-  - 서로 의미가 겹치지 않게 작성
-  - 평가나 진단을 하지 말 것
-  - 설명을 쓰지 말 것
-  - 반드시 JSON 문자열 배열 하나만 반환할 것
+규칙:
+- 각 키워드는 2~10자 정도의 짧은 명사구
+- 서로 의미가 겹치지 않게 작성
+- 평가나 진단을 하지 말 것
+- 설명을 쓰지 말 것
+- 반드시 JSON 문자열 배열 하나만 반환할 것
 
-  출력 예시:
-  ["조용한 공간", "저녁 산책", "혼자 하는 활동"]
+출력 예시:
+["조용한 공간", "저녁 산책", "혼자 하는 활동"]
           `.trim();
 
-          const {
-            data: aiData,
-            error: aiError,
-          } =
-            await supabase.functions.invoke<AiKeywordResponse>(
-              "upstage-test",
-              {
-                body: {
-                  message: aiPrompt,
-                },
+          const { data: aiData, error: aiError } =
+            await supabase.functions.invoke<AiKeywordResponse>("upstage-test", {
+              body: {
+                message: aiPrompt,
               },
-            );
+            });
 
           if (!isMounted) {
             return;
           }
 
           if (aiError) {
-            console.error(
-              "AI 취향 분석 실패:",
-              aiError.message,
-            );
-
+            console.error("AI 취향 분석 실패:", aiError.message);
             setDiscoveredInterests([]);
             return;
           }
 
           setDiscoveredInterests(
-            aiData?.answer
-              ? parseAiKeywords(aiData.answer)
-              : [],
+            aiData?.answer ? parseAiKeywords(aiData.answer) : [],
           );
         } catch (error) {
           if (!isMounted) {
@@ -728,41 +698,37 @@ setJourneyRecordCount(
   );
 
   const today = new Date();
+  const todayStart = new Date(
+    today.getFullYear(),
+    today.getMonth(),
+    today.getDate(),
+  );
 
-const todayStart = new Date(
-  today.getFullYear(),
-  today.getMonth(),
-  today.getDate(),
-);
+  const journeyDday =
+    journey === null
+      ? null
+      : Math.max(
+          0,
+          Math.ceil(
+            (parseDateKey(journey.end_date).getTime() - todayStart.getTime()) /
+              DAY_IN_MS,
+          ),
+        );
 
-const journeyDday =
-  journey === null
-    ? null
-    : Math.max(
-        0,
-        Math.ceil(
-          (parseDateKey(
-            journey.end_date,
-          ).getTime() -
-            todayStart.getTime()) /
-            DAY_IN_MS,
-        ),
-      );
+  const journeyDdayText =
+    journeyDday === null
+      ? "--"
+      : journeyDday === 0
+        ? "D-DAY"
+        : `D-${journeyDday}`;
 
-const journeyDdayText =
-  journeyDday === null
-    ? "--"
-    : journeyDday === 0
-      ? "D-DAY"
-      : `D-${journeyDday}`;
-
-  const [selectedBadge, setSelectedBadge] =
-    useState<Badge | null>(null);
+  const selectedTitle =
+    earnedBadges.find((badge) => badge.id === selectedTitleId)?.title ?? null;
 
   const handleProfileEdit = () => {
     Alert.alert(
       "프로필 수정",
-      "프로필 이미지, 닉네임, 소개를 수정하는 화면은 추후 연결할 예정입니다.",
+      "프로필 이미지와 닉네임을 수정하는 화면은 추후 연결할 예정입니다.",
     );
   };
 
@@ -773,47 +739,62 @@ const journeyDdayText =
     );
   };
 
-  const handleLogout = () => {
-    Alert.alert(
-      "로그아웃",
-      "정말 로그아웃하시겠어요?",
-      [
-        {
-          text: "취소",
-          style: "cancel",
-        },
-        {
-          text: "로그아웃",
-          style: "destructive",
-          onPress: async () => {
-            const { error } =
-              await supabase.auth.signOut();
+  const handleEquipTitle = async (badge: Badge) => {
+    if (!badge.title) {
+      Alert.alert("칭호 없음", "이 뱃지에서 획득한 칭호가 없어요.");
+      return;
+    }
 
-            if (error) {
-              Alert.alert(
-                "로그아웃 실패",
-                error.message,
-              );
-              return;
-            }
-          },
+    try {
+      await updateMyProfile({
+        selected_title_id: badge.id,
+      });
+
+      setSelectedTitleId(badge.id);
+
+      Alert.alert(
+        "대표 칭호 설정",
+        `"${badge.title}" 칭호를 대표 칭호로 설정했어요.`,
+      );
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : "대표 칭호를 설정하지 못했습니다.";
+
+      Alert.alert("대표 칭호 설정 실패", message);
+    }
+  };
+
+  const handleLogout = () => {
+    Alert.alert("로그아웃", "정말 로그아웃하시겠어요?", [
+      {
+        text: "취소",
+        style: "cancel",
+      },
+      {
+        text: "로그아웃",
+        style: "destructive",
+        onPress: async () => {
+          const { error } = await supabase.auth.signOut();
+
+          if (error) {
+            Alert.alert("로그아웃 실패", error.message);
+          }
         },
-      ],
-    );
+      },
+    ]);
   };
 
   if (selectedBadge) {
     const isPrism = selectedBadge.level === "prism";
-    const isLocked = selectedBadge.level === "locked";
-
-    const remainingCount =
-      selectedBadge.nextAt - selectedBadge.count;
+    const remainingCount = Math.max(
+      selectedBadge.nextAt - selectedBadge.count,
+      0,
+    );
 
     return (
-      <SafeAreaView
-        style={styles.safeArea}
-        edges={["top"]}
-      >
+      <SafeAreaView style={styles.safeArea} edges={["top"]}>
         <ScrollView
           showsVerticalScrollIndicator={false}
           contentContainerStyle={styles.badgeDetailContent}
@@ -825,15 +806,8 @@ const journeyDdayText =
               pressed && styles.pressed,
             ]}
           >
-            <Ionicons
-              name="arrow-back"
-              size={20}
-              color={COLORS.textMain}
-            />
-
-            <Text style={styles.backButtonText}>
-              뱃지 보관함
-            </Text>
+            <Ionicons name="arrow-back" size={20} color={COLORS.textMain} />
+            <Text style={styles.backButtonText}>뱃지 보관함</Text>
           </Pressable>
 
           <View style={styles.badgeDetailHeader}>
@@ -841,49 +815,29 @@ const journeyDdayText =
               style={[
                 styles.largeBadgeCircle,
                 {
-                  backgroundColor:
-                    selectedBadge.backgroundColor,
-                  borderColor: isLocked
-                    ? COLORS.textMuted
-                    : selectedBadge.color,
-                  opacity: isLocked ? 0.4 : 1,
+                  backgroundColor: selectedBadge.backgroundColor,
+                  borderColor: selectedBadge.color,
                 },
               ]}
             >
-              <Text
-                style={[
-                  styles.largeBadgeEmoji,
-                  isLocked && styles.lockedEmoji,
-                ]}
-              >
-                {selectedBadge.emoji}
-              </Text>
+              <Text style={styles.largeBadgeEmoji}>{selectedBadge.emoji}</Text>
             </View>
 
-            <Text style={styles.badgeDetailName}>
-              {selectedBadge.name}
-            </Text>
+            <Text style={styles.badgeDetailName}>{selectedBadge.name}</Text>
 
             <LevelTag
               text={LEVEL_LABEL[selectedBadge.level]}
-              color={
-                isLocked
-                  ? COLORS.textMuted
-                  : selectedBadge.color
-              }
-              backgroundColor={
-                selectedBadge.backgroundColor
-              }
+              color={selectedBadge.color}
+              backgroundColor={selectedBadge.backgroundColor}
             />
 
-            {isPrism && selectedBadge.title && (
+            {selectedBadge.title && (
               <View style={styles.titleEarnedRow}>
                 <Ionicons
                   name="sparkles"
                   size={15}
                   color={COLORS.primary}
                 />
-
                 <Text style={styles.titleEarnedText}>
                   칭호 &quot;{selectedBadge.title}&quot; 획득
                 </Text>
@@ -893,31 +847,21 @@ const journeyDdayText =
 
           <View style={styles.badgeProgressCard}>
             <View style={styles.badgeInfoRow}>
-              <Text style={styles.badgeInfoLabel}>
-                완료한 미션
-              </Text>
-
-              <Text style={styles.badgeInfoValue}>
-                {selectedBadge.count}회
-              </Text>
+              <Text style={styles.badgeInfoLabel}>누적 포인트</Text>
+              <Text style={styles.badgeInfoValue}>{selectedBadge.count}</Text>
             </View>
 
-            {!isPrism && !isLocked && (
+            {!isPrism && selectedBadge.nextAt > 0 && (
               <>
                 <View style={styles.badgeInfoRow}>
-                  <Text style={styles.badgeInfoLabel}>
-                    다음 단계까지
-                  </Text>
-
+                  <Text style={styles.badgeInfoLabel}>다음 단계까지</Text>
                   <Text
                     style={[
                       styles.badgeRemainingValue,
-                      {
-                        color: selectedBadge.color,
-                      },
+                      { color: selectedBadge.color },
                     ]}
                   >
-                    {remainingCount}회
+                    {remainingCount}점
                   </Text>
                 </View>
 
@@ -936,44 +880,23 @@ const journeyDdayText =
                   size={17}
                   color={COLORS.success}
                 />
-
-                <Text style={styles.completeText}>
-                  최고 단계 달성
-                </Text>
-              </View>
-            )}
-
-            {isLocked && (
-              <View style={styles.lockedInformation}>
-                <Ionicons
-                  name="lock-closed-outline"
-                  size={16}
-                  color={COLORS.textMuted}
-                />
-
-                <Text style={styles.lockedInformationText}>
-                  관련 미션을 {selectedBadge.nextAt}회 완료하면
-                  브론즈 뱃지가 열려요.
-                </Text>
+                <Text style={styles.completeText}>최고 단계 달성</Text>
               </View>
             )}
           </View>
 
-          {isPrism && selectedBadge.title && (
+          {selectedBadge.title && (
             <Pressable
-              onPress={() =>
-                Alert.alert(
-                  "대표 칭호 설정",
-                  `"${selectedBadge.title}" 칭호를 프로필에 설정했습니다.`,
-                )
-              }
+              onPress={() => handleEquipTitle(selectedBadge)}
               style={({ pressed }) => [
                 styles.equipTitleButton,
                 pressed && styles.pressed,
               ]}
             >
               <Text style={styles.equipTitleButtonText}>
-                대표 칭호로 설정
+                {selectedTitleId === selectedBadge.id
+                  ? "현재 대표 칭호"
+                  : "대표 칭호로 설정"}
               </Text>
             </Pressable>
           )}
@@ -985,10 +908,7 @@ const journeyDdayText =
   }
 
   return (
-    <SafeAreaView
-      style={styles.safeArea}
-      edges={["top"]}
-    >
+    <SafeAreaView style={styles.safeArea} edges={["top"]}>
       <ScrollView
         showsVerticalScrollIndicator={false}
         contentContainerStyle={styles.screenContent}
@@ -1004,11 +924,15 @@ const journeyDdayText =
               {isUserLoading ? "불러오는 중..." : nickname}
             </Text>
 
-            <LevelTag text="소리의 탐험가" />
-
-            <Text style={styles.profileDescription}>
-              📍 서울 마포구 · 조용한 공간을 좋아해요
-            </Text>
+            {selectedTitle ? (
+              <LevelTag text={selectedTitle} />
+            ) : (
+              <LevelTag
+                text="대표 칭호 없음"
+                color={COLORS.textMuted}
+                backgroundColor={COLORS.background}
+              />
+            )}
           </View>
 
           <Pressable
@@ -1018,9 +942,7 @@ const journeyDdayText =
               pressed && styles.pressed,
             ]}
           >
-            <Text style={styles.profileEditButtonText}>
-              수정
-            </Text>
+            <Text style={styles.profileEditButtonText}>수정</Text>
           </Pressable>
         </View>
 
@@ -1028,15 +950,11 @@ const journeyDdayText =
         <View style={styles.journeyCard}>
           <View style={styles.journeyHeader}>
             <View>
-              <Text style={styles.journeyCaption}>
-                진행 중인 여정
-              </Text>
-
+              <Text style={styles.journeyCaption}>진행 중인 여정</Text>
               <Text style={styles.journeyTitle}>
                 {isUserLoading
                   ? "불러오는 중..."
-                  : journey?.title ??
-                    "진행 중인 여정이 없어요"}
+                  : journey?.title ?? "진행 중인 여정이 없어요"}
               </Text>
             </View>
 
@@ -1049,16 +967,13 @@ const journeyDdayText =
                 value={journeyRecordCount}
                 total={journey.target_record_count}
               />
-
               <Text style={styles.journeyProgressText}>
-                {journey.target_record_count}번 중{" "}
-                {journeyRecordCount}번 완료
+                {journey.target_record_count}일 중 {journeyRecordCount}일 완료
               </Text>
             </>
           ) : (
             <>
               <ProgressBar value={0} total={1} />
-
               <Text style={styles.journeyProgressText}>
                 캘린더에서 새 여정을 시작해 주세요.
               </Text>
@@ -1069,17 +984,9 @@ const journeyDdayText =
         {/* 활동 통계 */}
         <View style={styles.statsGrid}>
           {stats.map((stat) => (
-            <View
-              key={stat.label}
-              style={styles.statCard}
-            >
-              <Text style={styles.statValue}>
-                {stat.value}
-              </Text>
-
-              <Text style={styles.statLabel}>
-                {stat.label}
-              </Text>
+            <View key={stat.label} style={styles.statCard}>
+              <Text style={styles.statValue}>{stat.value}</Text>
+              <Text style={styles.statLabel}>{stat.label}</Text>
             </View>
           ))}
         </View>
@@ -1089,20 +996,13 @@ const journeyDdayText =
           <Text style={styles.sectionTitle}>취향</Text>
 
           <View style={styles.interestGroup}>
-            <Text style={styles.interestCaption}>
-              처음 선택한 관심사
-            </Text>
+            <Text style={styles.interestCaption}>처음 선택한 관심사</Text>
 
             <View style={styles.chipContainer}>
               {initialInterests.length > 0 ? (
                 initialInterests.map((interest) => (
-                  <View
-                    key={interest}
-                    style={styles.basicChip}
-                  >
-                    <Text style={styles.basicChipText}>
-                      {interest}
-                    </Text>
+                  <View key={interest} style={styles.basicChip}>
+                    <Text style={styles.basicChipText}>{interest}</Text>
                   </View>
                 ))
               ) : (
@@ -1114,9 +1014,7 @@ const journeyDdayText =
           </View>
 
           <View style={styles.interestGroup}>
-            <Text style={styles.interestCaption}>
-              경험에서 나타난 취향
-            </Text>
+            <Text style={styles.interestCaption}>경험에서 나타난 취향</Text>
 
             <View style={styles.chipContainer}>
               {isAiInterestLoading ? (
@@ -1125,13 +1023,8 @@ const journeyDdayText =
                 </Text>
               ) : discoveredInterests.length > 0 ? (
                 discoveredInterests.map((interest) => (
-                  <View
-                    key={interest}
-                    style={styles.discoveredChip}
-                  >
-                    <Text style={styles.discoveredChipText}>
-                      {interest}
-                    </Text>
+                  <View key={interest} style={styles.discoveredChip}>
+                    <Text style={styles.discoveredChipText}>{interest}</Text>
                   </View>
                 ))
               ) : (
@@ -1147,92 +1040,83 @@ const journeyDdayText =
           </Text>
         </View>
 
-        {/* 뱃지 */}
+        {/* 실제 획득한 뱃지만 표시 */}
         <View style={styles.sectionCard}>
-          <Text style={styles.sectionTitle}>
-            뱃지 보관함
-          </Text>
+          <Text style={styles.sectionTitle}>뱃지 보관함</Text>
 
-          <View style={styles.badgeGrid}>
-            {BADGES.map((badge) => {
-              const isLocked = badge.level === "locked";
-              const isPrism = badge.level === "prism";
+          {earnedBadges.length > 0 ? (
+            <View style={styles.badgeGrid}>
+              {earnedBadges.map((badge) => {
+                const isPrism = badge.level === "prism";
 
-              return (
-                <Pressable
-                  key={badge.id}
-                  onPress={() => setSelectedBadge(badge)}
-                  style={({ pressed }) => [
-                    styles.badgeCard,
-                    {
-                      backgroundColor:
-                        badge.backgroundColor,
-                      borderColor: isPrism
-                        ? COLORS.primary
-                        : "transparent",
-                      opacity: isLocked ? 0.4 : 1,
-                    },
-                    pressed && styles.pressed,
-                  ]}
-                >
-                  <Text
-                    style={[
-                      styles.badgeEmoji,
-                      isLocked && styles.lockedEmoji,
-                    ]}
-                  >
-                    {badge.emoji}
-                  </Text>
-
-                  <Text
-                    style={[
-                      styles.badgeLevel,
+                return (
+                  <Pressable
+                    key={badge.id}
+                    onPress={() => setSelectedBadge(badge)}
+                    style={({ pressed }) => [
+                      styles.badgeCard,
                       {
-                        color: badge.color,
+                        backgroundColor: badge.backgroundColor,
+                        borderColor: isPrism
+                          ? COLORS.primary
+                          : "transparent",
                       },
+                      pressed && styles.pressed,
                     ]}
                   >
-                    {LEVEL_LABEL[badge.level]}
-                  </Text>
-
-                  <Text
-                    numberOfLines={2}
-                    style={styles.badgeName}
-                  >
-                    {badge.name}
-                  </Text>
-                </Pressable>
-              );
-            })}
-          </View>
+                    <Text style={styles.badgeEmoji}>{badge.emoji}</Text>
+                    <Text
+                      style={[
+                        styles.badgeLevel,
+                        {
+                          color: badge.color,
+                        },
+                      ]}
+                    >
+                      {LEVEL_LABEL[badge.level]}
+                    </Text>
+                    <Text numberOfLines={2} style={styles.badgeName}>
+                      {badge.name}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+          ) : (
+            <View style={styles.emptyBadgeArea}>
+              <Ionicons
+                name="ribbon-outline"
+                size={28}
+                color={COLORS.textMuted}
+              />
+              <Text style={styles.emptyBadgeText}>
+                아직 획득한 뱃지가 없어요.
+              </Text>
+              <Text style={styles.emptyBadgeDescription}>
+                미션을 완료하면 새로운 뱃지가 열려요.
+              </Text>
+            </View>
+          )}
         </View>
 
         {/* 설정 */}
         <View style={styles.settingsCard}>
           <View style={styles.settingsHeader}>
-            <Text style={styles.settingsHeaderText}>
-              설정
-            </Text>
+            <Text style={styles.settingsHeaderText}>설정</Text>
           </View>
 
           {SETTINGS.map((setting, index) => (
             <Pressable
               key={setting.label}
-              onPress={() =>
-                handleSettingPress(setting)
-              }
+              onPress={() => handleSettingPress(setting)}
               style={({ pressed }) => [
                 styles.settingRow,
-                index < SETTINGS.length - 1 &&
-                  styles.settingRowBorder,
+                index < SETTINGS.length - 1 && styles.settingRowBorder,
                 pressed && styles.settingPressed,
               ]}
             >
               <View style={styles.settingTextArea}>
-                <Text style={styles.settingLabel}>
-                  {setting.label}
-                </Text>
-
+                <Text style={styles.settingLabel}>{setting.label}</Text>
                 <Text style={styles.settingDescription}>
                   {setting.description}
                 </Text>
@@ -1254,9 +1138,7 @@ const journeyDdayText =
             pressed && styles.pressed,
           ]}
         >
-          <Text style={styles.logoutText}>
-            로그아웃
-          </Text>
+          <Text style={styles.logoutText}>로그아웃</Text>
         </Pressable>
 
         <View style={styles.bottomSpace} />
@@ -1285,21 +1167,16 @@ const styles = StyleSheet.create({
   profileSection: {
     flexDirection: "row",
     alignItems: "center",
-
     marginBottom: 20,
   },
 
   profileImage: {
     width: 68,
     height: 68,
-
     marginRight: 16,
-
     alignItems: "center",
     justifyContent: "center",
-
     backgroundColor: "#DCE3FF",
-
     borderWidth: 2,
     borderColor: COLORS.primaryLight,
     borderRadius: 34,
@@ -1316,26 +1193,15 @@ const styles = StyleSheet.create({
 
   profileName: {
     marginBottom: 4,
-
     fontSize: 18,
     fontWeight: "700",
     color: COLORS.textMain,
   },
 
-  profileDescription: {
-    marginTop: 5,
-
-    fontSize: 11,
-    lineHeight: 16,
-    color: COLORS.textMuted,
-  },
-
   profileEditButton: {
     paddingHorizontal: 12,
     paddingVertical: 8,
-
     backgroundColor: COLORS.white,
-
     borderWidth: 1,
     borderColor: COLORS.border,
     borderRadius: 10,
@@ -1351,10 +1217,8 @@ const styles = StyleSheet.create({
 
   levelTag: {
     alignSelf: "flex-start",
-
     paddingHorizontal: 8,
     paddingVertical: 4,
-
     borderRadius: 7,
   },
 
@@ -1368,9 +1232,7 @@ const styles = StyleSheet.create({
   journeyCard: {
     marginBottom: 14,
     padding: 15,
-
     backgroundColor: COLORS.white,
-
     borderWidth: 1,
     borderColor: "rgba(0, 0, 0, 0.06)",
     borderRadius: 16,
@@ -1380,13 +1242,11 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "flex-start",
     justifyContent: "space-between",
-
     marginBottom: 10,
   },
 
   journeyCaption: {
     marginBottom: 2,
-
     fontSize: 11,
     color: COLORS.textMuted,
   },
@@ -1399,16 +1259,13 @@ const styles = StyleSheet.create({
 
   journeyProgressText: {
     marginTop: 6,
-
     fontSize: 11,
     color: COLORS.textMuted,
   },
 
   progressBarBackground: {
     height: 5,
-
     overflow: "hidden",
-
     backgroundColor: "#ECEEF2",
     borderRadius: 3,
   },
@@ -1423,22 +1280,17 @@ const styles = StyleSheet.create({
   statsGrid: {
     flexDirection: "row",
     flexWrap: "wrap",
-
     marginHorizontal: -4,
     marginBottom: 10,
   },
 
   statCard: {
     width: "31.33%",
-
     marginHorizontal: "1%",
     marginBottom: 8,
     paddingVertical: 12,
-
     alignItems: "center",
-
     backgroundColor: COLORS.white,
-
     borderWidth: 1,
     borderColor: "rgba(0, 0, 0, 0.05)",
     borderRadius: 12,
@@ -1453,7 +1305,6 @@ const styles = StyleSheet.create({
 
   statLabel: {
     marginTop: 3,
-
     fontSize: 10,
     color: COLORS.textMuted,
   },
@@ -1463,9 +1314,7 @@ const styles = StyleSheet.create({
   sectionCard: {
     marginBottom: 14,
     padding: 15,
-
     backgroundColor: COLORS.white,
-
     borderWidth: 1,
     borderColor: "rgba(0, 0, 0, 0.05)",
     borderRadius: 16,
@@ -1473,7 +1322,6 @@ const styles = StyleSheet.create({
 
   sectionTitle: {
     marginBottom: 12,
-
     fontSize: 14,
     fontWeight: "700",
     color: COLORS.textMain,
@@ -1487,7 +1335,6 @@ const styles = StyleSheet.create({
 
   interestCaption: {
     marginBottom: 6,
-
     fontSize: 11,
     color: COLORS.textMuted,
   },
@@ -1500,10 +1347,8 @@ const styles = StyleSheet.create({
   basicChip: {
     marginRight: 6,
     marginBottom: 6,
-
     paddingHorizontal: 10,
     paddingVertical: 5,
-
     backgroundColor: COLORS.background,
     borderRadius: 8,
   },
@@ -1517,10 +1362,8 @@ const styles = StyleSheet.create({
   discoveredChip: {
     marginRight: 6,
     marginBottom: 6,
-
     paddingHorizontal: 10,
     paddingVertical: 5,
-
     backgroundColor: COLORS.primaryLight,
     borderRadius: 8,
   },
@@ -1541,40 +1384,29 @@ const styles = StyleSheet.create({
   badgeGrid: {
     flexDirection: "row",
     flexWrap: "wrap",
-
     marginHorizontal: -5,
   },
 
   badgeCard: {
     width: "30.33%",
-
     minHeight: 100,
-
     marginHorizontal: "1.5%",
     marginBottom: 10,
     paddingHorizontal: 7,
     paddingVertical: 13,
-
     alignItems: "center",
     justifyContent: "center",
-
     borderWidth: 1.5,
     borderRadius: 14,
   },
 
   badgeEmoji: {
     marginBottom: 5,
-
     fontSize: 24,
-  },
-
-  lockedEmoji: {
-    opacity: 0.6,
   },
 
   badgeLevel: {
     marginBottom: 5,
-
     fontSize: 9,
     fontWeight: "800",
     letterSpacing: 0.8,
@@ -1587,15 +1419,30 @@ const styles = StyleSheet.create({
     color: COLORS.textSub,
   },
 
+  emptyBadgeArea: {
+    alignItems: "center",
+    paddingVertical: 22,
+  },
+
+  emptyBadgeText: {
+    marginTop: 8,
+    fontSize: 13,
+    fontWeight: "600",
+    color: COLORS.textSub,
+  },
+
+  emptyBadgeDescription: {
+    marginTop: 4,
+    fontSize: 11,
+    color: COLORS.textMuted,
+  },
+
   /* 설정 */
 
   settingsCard: {
     marginBottom: 14,
-
     overflow: "hidden",
-
     backgroundColor: COLORS.white,
-
     borderWidth: 1,
     borderColor: "rgba(0, 0, 0, 0.05)",
     borderRadius: 16,
@@ -1604,7 +1451,6 @@ const styles = StyleSheet.create({
   settingsHeader: {
     paddingHorizontal: 16,
     paddingVertical: 13,
-
     borderBottomWidth: 1,
     borderBottomColor: COLORS.background,
   },
@@ -1620,7 +1466,6 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-
     paddingHorizontal: 16,
     paddingVertical: 13,
   },
@@ -1641,7 +1486,6 @@ const styles = StyleSheet.create({
 
   settingLabel: {
     marginBottom: 2,
-
     fontSize: 13,
     fontWeight: "500",
     color: COLORS.textMain,
@@ -1675,23 +1519,19 @@ const styles = StyleSheet.create({
 
   backButton: {
     alignSelf: "flex-start",
-
     flexDirection: "row",
     alignItems: "center",
-
     marginBottom: 20,
   },
 
   backButtonText: {
     marginLeft: 8,
-
     fontSize: 14,
     color: COLORS.textMain,
   },
 
   badgeDetailHeader: {
     alignItems: "center",
-
     paddingTop: 20,
     paddingBottom: 24,
   },
@@ -1699,12 +1539,9 @@ const styles = StyleSheet.create({
   largeBadgeCircle: {
     width: 80,
     height: 80,
-
     marginBottom: 12,
-
     alignItems: "center",
     justifyContent: "center",
-
     borderWidth: 2.5,
     borderRadius: 40,
   },
@@ -1715,7 +1552,6 @@ const styles = StyleSheet.create({
 
   badgeDetailName: {
     marginBottom: 7,
-
     fontSize: 18,
     fontWeight: "700",
     color: COLORS.textMain,
@@ -1724,13 +1560,11 @@ const styles = StyleSheet.create({
   titleEarnedRow: {
     flexDirection: "row",
     alignItems: "center",
-
     marginTop: 9,
   },
 
   titleEarnedText: {
     marginLeft: 5,
-
     fontSize: 12,
     fontWeight: "600",
     color: COLORS.primary,
@@ -1739,7 +1573,6 @@ const styles = StyleSheet.create({
   badgeProgressCard: {
     marginBottom: 12,
     padding: 16,
-
     backgroundColor: COLORS.white,
     borderRadius: 14,
   },
@@ -1747,7 +1580,6 @@ const styles = StyleSheet.create({
   badgeInfoRow: {
     flexDirection: "row",
     justifyContent: "space-between",
-
     marginBottom: 10,
   },
 
@@ -1774,37 +1606,14 @@ const styles = StyleSheet.create({
 
   completeText: {
     marginLeft: 5,
-
     fontSize: 12,
     fontWeight: "600",
     color: COLORS.success,
   },
 
-  lockedInformation: {
-    flexDirection: "row",
-    alignItems: "center",
-
-    padding: 10,
-
-    backgroundColor: COLORS.background,
-    borderRadius: 9,
-  },
-
-  lockedInformationText: {
-    flex: 1,
-
-    marginLeft: 7,
-
-    fontSize: 11,
-    lineHeight: 17,
-    color: COLORS.textMuted,
-  },
-
   equipTitleButton: {
     alignItems: "center",
-
     paddingVertical: 13,
-
     backgroundColor: COLORS.primary,
     borderRadius: 12,
   },
