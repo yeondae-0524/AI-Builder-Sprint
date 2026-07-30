@@ -630,6 +630,25 @@ async function main() {
     attempt.id,
     recordId,
   );
+  
+  const essayResult =
+  await createEssayDraftAndVerify(
+    user,
+    journey.id,
+  );
+
+  console.log("에세이:", essayResult.essay);
+  console.log(
+    "에세이 기록:",
+    essayResult.essayItems,
+  );
+
+  const aiEssay =
+  await generateEssayWithUpstageAndVerify(
+    essayResult.essay.id,
+  );
+
+  console.log("AI 에세이 결과:", aiEssay);
 
   await supabase.auth.signOut({
     scope: "local",
@@ -652,3 +671,395 @@ main().catch(async (error) => {
 
   process.exitCode = 1;
 });
+
+async function createEssayDraftAndVerify(
+  user,
+  journeyId,
+) {
+  const {
+    data: essayId,
+    error: createEssayError,
+  } = await supabase.rpc("create_essay_draft", {
+    p_journey_id: journeyId,
+    p_title: "백엔드 통합 테스트 에세이",
+  });
+
+  throwIfError(
+    "create_essay_draft RPC 실패",
+    createEssayError,
+  );
+
+  if (!essayId) {
+    throw new Error(
+      "에세이 ID가 반환되지 않았습니다.",
+    );
+  }
+
+  console.log(`✅ 에세이 초안 생성 성공: ${essayId}`);
+
+  const {
+    data: essay,
+    error: essayError,
+  } = await supabase
+    .from("essays")
+    .select(`
+      id,
+      user_id,
+      journey_id,
+      title,
+      cover_photo_path,
+      visibility,
+      status,
+      created_at,
+      updated_at
+    `)
+    .eq("id", essayId)
+    .eq("user_id", user.id)
+    .single();
+
+  throwIfError(
+    "생성된 에세이 조회 실패",
+    essayError,
+  );
+
+  const {
+    data: essayItems,
+    error: essayItemsError,
+  } = await supabase
+    .from("essay_items")
+    .select(`
+      id,
+      essay_id,
+      record_id,
+      ai_bridge_text,
+      sort_order,
+      created_at
+    `)
+    .eq("essay_id", essayId)
+    .order("sort_order", {
+      ascending: true,
+    });
+
+  throwIfError(
+    "에세이 기록 연결 조회 실패",
+    essayItemsError,
+  );
+
+  if (!essayItems || essayItems.length === 0) {
+    throw new Error(
+      "에세이에 연결된 기록이 없습니다.",
+    );
+  }
+
+  if (essay.status !== "draft") {
+    throw new Error(
+      `에세이 상태가 draft가 아닙니다: ${essay.status}`,
+    );
+  }
+
+  console.log("✅ 에세이 상세 조회 성공");
+  console.log(
+    `✅ 연결된 기록 수: ${essayItems.length}`,
+  );
+
+  return {
+    essay,
+    essayItems,
+  };
+}
+
+function getSingleRelation(value) {
+  if (Array.isArray(value)) {
+    return value[0] ?? null;
+  }
+
+  return value ?? null;
+}
+
+function parseEssayAiResult(rawAnswer) {
+  const cleaned = rawAnswer
+    .trim()
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```$/i, "");
+
+  const firstBrace = cleaned.indexOf("{");
+  const lastBrace = cleaned.lastIndexOf("}");
+
+  if (
+    firstBrace === -1 ||
+    lastBrace === -1 ||
+    lastBrace < firstBrace
+  ) {
+    throw new Error(
+      "AI 응답에서 JSON을 찾을 수 없습니다.",
+    );
+  }
+
+  let parsed;
+
+  try {
+    parsed = JSON.parse(
+      cleaned.slice(firstBrace, lastBrace + 1),
+    );
+  } catch {
+    throw new Error(
+      `AI 응답 JSON 변환 실패:\n${rawAnswer}`,
+    );
+  }
+
+  if (
+    typeof parsed.title !== "string" ||
+    !parsed.title.trim()
+  ) {
+    throw new Error(
+      "AI 응답에 제목이 없습니다.",
+    );
+  }
+
+  if (!Array.isArray(parsed.bridges)) {
+    throw new Error(
+      "AI 응답에 bridges 배열이 없습니다.",
+    );
+  }
+
+  const bridges = parsed.bridges.map(
+    (bridge, index) => {
+      if (
+        !Number.isInteger(bridge.recordIndex) ||
+        typeof bridge.bridgeText !== "string" ||
+        !bridge.bridgeText.trim()
+      ) {
+        throw new Error(
+          `${index + 1}번째 연결 문장 형식이 잘못됐습니다.`,
+        );
+      }
+
+      return {
+        recordIndex: bridge.recordIndex,
+        bridgeText: bridge.bridgeText.trim(),
+      };
+    },
+  );
+
+  return {
+    title: parsed.title.trim(),
+    bridges,
+  };
+}
+
+async function generateEssayWithUpstageAndVerify(
+  essayId,
+) {
+  const {
+    data: essay,
+    error: essayError,
+  } = await supabase
+    .from("essays")
+    .select(`
+      id,
+      journey_id,
+      essay_items (
+        id,
+        sort_order,
+        records (
+          id,
+          recorded_at,
+          emotion,
+          content,
+          mission_attempts (
+            missions (
+              title
+            )
+          ),
+          places (
+            name
+          )
+        )
+      )
+    `)
+    .eq("id", essayId)
+    .single();
+
+  throwIfError(
+    "AI 입력용 에세이 조회 실패",
+    essayError,
+  );
+
+  const items = [
+    ...(essay.essay_items ?? []),
+  ].sort(
+    (a, b) => a.sort_order - b.sort_order,
+  );
+
+  if (items.length === 0) {
+    throw new Error(
+      "AI에 전달할 기록이 없습니다.",
+    );
+  }
+
+  const recordsText = items
+    .map((item, index) => {
+      const record = getSingleRelation(
+        item.records,
+      );
+
+      if (!record) {
+        return null;
+      }
+
+      const missionAttempt =
+        getSingleRelation(
+          record.mission_attempts,
+        );
+
+      const mission = getSingleRelation(
+        missionAttempt?.missions,
+      );
+
+      const place = getSingleRelation(
+        record.places,
+      );
+
+      return [
+        `[기록 ${index + 1}]`,
+        `날짜: ${record.recorded_at}`,
+        `미션: ${
+          mission?.title ?? "미션 정보 없음"
+        }`,
+        `장소: ${
+          place?.name ?? "장소 정보 없음"
+        }`,
+        `감정: ${record.emotion}`,
+        `내용: ${record.content}`,
+      ].join("\n");
+    })
+    .filter(Boolean)
+    .join("\n\n");
+
+  const prompt = `
+다음은 한 사용자가 Journey 동안 작성한 실제 경험 기록입니다.
+
+${recordsText}
+
+위 기록만을 바탕으로 자연스러운 한국어 에세이를 구성하세요.
+
+규칙:
+- 기록에 없는 사실을 만들지 마세요.
+- 사용자의 감정과 경험을 중심으로 작성하세요.
+- 각 기록을 소개하거나 이어주는 연결 문장을 작성하세요.
+- 반드시 JSON만 반환하세요.
+- bridges 개수는 기록 개수와 같아야 합니다.
+- recordIndex는 0부터 시작합니다.
+
+{
+  "title": "에세이 제목",
+  "bridges": [
+    {
+      "recordIndex": 0,
+      "bridgeText": "기록을 자연스럽게 소개하는 문장"
+    }
+  ]
+}
+`.trim();
+
+  const {
+    data: upstageData,
+    error: upstageError,
+  } = await supabase.functions.invoke(
+    "upstage-test",
+    {
+      body: {
+        message: prompt,
+      },
+    },
+  );
+
+  throwIfError(
+    "Upstage Edge Function 호출 실패",
+    upstageError,
+  );
+
+  if (!upstageData?.answer) {
+    throw new Error(
+      "Upstage 응답에 answer가 없습니다.",
+    );
+  }
+
+  console.log("✅ Upstage AI 응답 수신 성공");
+  console.log("AI 원본 응답:", upstageData.answer);
+
+  const aiResult = parseEssayAiResult(
+    upstageData.answer,
+  );
+
+  if (
+    aiResult.bridges.length !== items.length
+  ) {
+    throw new Error(
+      `AI 연결 문장 개수가 기록 개수와 다릅니다. 기록: ${items.length}, 연결 문장: ${aiResult.bridges.length}`,
+    );
+  }
+
+  const {
+    data: savedEssayId,
+    error: saveError,
+  } = await supabase.rpc(
+    "save_essay_ai_result",
+    {
+      p_essay_id: essayId,
+      p_title: aiResult.title,
+      p_bridges: aiResult.bridges,
+    },
+  );
+
+  throwIfError(
+    "AI 에세이 결과 저장 실패",
+    saveError,
+  );
+
+  const {
+    data: savedEssay,
+    error: verifyError,
+  } = await supabase
+    .from("essays")
+    .select(`
+      id,
+      title,
+      status,
+      essay_items (
+        id,
+        sort_order,
+        ai_bridge_text
+      )
+    `)
+    .eq("id", savedEssayId)
+    .single();
+
+  throwIfError(
+    "저장된 AI 에세이 확인 실패",
+    verifyError,
+  );
+
+  const savedItems =
+    savedEssay.essay_items ?? [];
+
+  if (
+    savedItems.some(
+      (item) => !item.ai_bridge_text,
+    )
+  ) {
+    throw new Error(
+      "저장되지 않은 AI 연결 문장이 있습니다.",
+    );
+  }
+
+  console.log(
+    `✅ AI 에세이 제목 저장 성공: ${savedEssay.title}`,
+  );
+
+  console.log(
+    `✅ AI 연결 문장 저장 성공: ${savedItems.length}개`,
+  );
+
+  return savedEssay;
+}

@@ -119,3 +119,66 @@ export async function uploadMissionImage({
     };
   }
 }
+
+const SIGNED_URL_EXPIRES_IN = 60 * 60;
+
+/**
+ * Storage 경로 하나를 화면에서 사용할 URL로 변환한다.
+ * 기본 유효 시간: 1시간
+ */
+export async function getRecordPhotoUrl(
+  storagePath: string,
+  expiresIn: number = SIGNED_URL_EXPIRES_IN,
+): Promise<string> {
+  if (!storagePath.trim()) {
+    throw new Error("storagePath가 필요합니다.");
+  }
+
+  const { data, error } = await supabase.storage
+    .from("record-photos")
+    .createSignedUrl(storagePath, expiresIn);
+
+  if (error) {
+    console.error("getRecordPhotoUrl Error:", error);
+    throw error;
+  }
+
+  if (!data?.signedUrl) {
+    throw new Error("사진 URL을 생성하지 못했습니다.");
+  }
+
+  return data.signedUrl;
+}
+
+/**
+ * 여러 Storage 경로를 한 번에 URL로 변환한다.
+ */
+export async function getRecordPhotoUrls(
+  storagePaths: string[],
+  expiresIn: number = SIGNED_URL_EXPIRES_IN,
+) {
+  const validPaths = storagePaths.filter(
+    (path) =>
+      typeof path === "string" &&
+      path.trim().length > 0,
+  );
+
+  if (validPaths.length === 0) {
+    return [];
+  }
+
+  const { data, error } = await supabase.storage
+    .from("record-photos")
+    .createSignedUrls(validPaths, expiresIn);
+
+  if (error) {
+    console.error("getRecordPhotoUrls Error:", error);
+    throw error;
+  }
+
+  return (data ?? []).map((item) => ({
+    storagePath: item.path,
+    signedUrl: item.signedUrl,
+    error: item.error,
+  }));
+}
