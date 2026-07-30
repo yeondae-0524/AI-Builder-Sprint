@@ -28,10 +28,10 @@ const SHEET_CLOSE_POSITION = SCREEN_HEIGHT * 0.6;
 const FILTERS = ["가까운 기록", "최근 기록", "내 취향", "새로운 분야", "산책"];
 
 const BUBBLES = [
-  { id: 1, x: "26%", y: "22%", place: "연남동 카페 봄날", mission: "조용한 카페에서 30분 독서", time: "2일 전", nick: "소리의 탐험가", emotion: "차분함", note: "창가 자리에서 책 읽으니 딴 세상 같았어요.", likes: 12 },
-  { id: 2, x: "58%", y: "35%", place: "경의선 숲길", mission: "공원 산책하며 계절 사진 찍기", time: "1일 전", nick: "산책러", emotion: "상쾌함", note: "노을 질 때가 진짜 예뻐요.", likes: 8 },
-  { id: 3, x: "40%", y: "55%", place: "망원동 책방", mission: "동네 책방에서 한 페이지 읽기", time: "3시간 전", nick: "책방순례자", emotion: "설렘", note: "사장님이 추천해주신 책이 취향저격.", likes: 21, multi: true, count: 3 },
-  { id: 4, x: "70%", y: "62%", place: "홍대 거리", mission: "버스킹 공연 5분 이상 감상하기", time: "5시간 전", nick: "귀호강", emotion: "즐거움", note: "우연히 들은 버스킹인데 목소리가 좋았어요.", likes: 15 },
+  { id: 1, place: "연남동 카페 봄날", mission: "조용한 카페에서 30분 독서", time: "2일 전", nick: "소리의 탐험가", emotion: "차분함", note: "창가 자리에서 책 읽으니 딴 세상 같았어요.", likes: 12, photo: "https://images.unsplash.com/photo-1493857671505-72967e2e2760?w=200&h=200&fit=crop" },
+  { id: 2, place: "경의선 숲길", mission: "공원 산책하며 계절 사진 찍기", time: "1일 전", nick: "산책러", emotion: "상쾌함", note: "노을 질 때가 진짜 예뻐요.", likes: 8, photo: "https://images.unsplash.com/photo-1441974231531-c6227db76b6e?w=200&h=200&fit=crop" },
+  { id: 3, place: "망원동 책방", mission: "동네 책방에서 한 페이지 읽기", time: "3시간 전", nick: "책방순례자", emotion: "설렘", note: "사장님이 추천해주신 책이 취향저격.", likes: 21, multi: true, count: 3, photo: "https://images.unsplash.com/photo-1495446815901-a7297e633e8d?w=200&h=200&fit=crop" },
+  { id: 4, place: "홍대 거리", mission: "버스킹 공연 5분 이상 감상하기", time: "5시간 전", nick: "귀호강", emotion: "즐거움", note: "우연히 들은 버스킹인데 목소리가 좋았어요.", likes: 15, photo: "https://images.unsplash.com/photo-1493225457124-a3eb161ffa5f?w=200&h=200&fit=crop" },
 ];
 
 const MAP_BLOCKS = [
@@ -140,6 +140,8 @@ export default function DiscoverScreen() {
           id: b.id,
           lat: 35.1795543 + (i - 2) * 0.003,
           lng: 129.0756416 + (i - 1.5) * 0.003,
+          photo: b.photo,
+          count: b.multi ? b.count : undefined,
         }))}
         onMarkerPress={(id) => {
           const bubble = BUBBLES.find((b) => b.id === id);

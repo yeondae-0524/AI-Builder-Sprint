@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import { StyleSheet } from "react-native";
 import { WebView } from "react-native-webview";
 
@@ -7,6 +8,8 @@ type MapMarker = {
   id: string | number;
   lat: number;
   lng: number;
+  photo?: string;
+  count?: number;
 };
 
 type Props = {
@@ -18,7 +21,8 @@ type Props = {
 };
 
 export function KakaoMapView({ latitude, longitude, markers = [], onMarkerPress, style }: Props) {
-  const html = `
+  const html = useMemo(
+    () => `
     <!doctype html>
     <html lang="ko">
       <head>
@@ -46,13 +50,50 @@ export function KakaoMapView({ latitude, longitude, markers = [], onMarkerPress,
               });
 
               const markers = ${JSON.stringify(markers)};
+
               markers.forEach(function (m) {
-                const marker = new kakao.maps.Marker({
+                const content = document.createElement('div');
+                content.style.width = '48px';
+                content.style.height = '48px';
+                content.style.borderRadius = '24px';
+                content.style.border = '3px solid #ffffff';
+                content.style.boxShadow = '0 2px 6px rgba(0,0,0,0.25)';
+                content.style.backgroundColor = '#E4E6EA';
+                content.style.backgroundSize = 'cover';
+                content.style.backgroundPosition = 'center';
+                content.style.cursor = 'pointer';
+                content.style.position = 'relative';
+
+                if (m.photo) {
+                  content.style.backgroundImage = "url('" + m.photo + "')";
+                }
+
+                if (m.count) {
+                  const badge = document.createElement('div');
+                  badge.textContent = '+' + m.count;
+                  badge.style.position = 'absolute';
+                  badge.style.bottom = '-4px';
+                  badge.style.right = '-4px';
+                  badge.style.backgroundColor = '#3D5AFE';
+                  badge.style.color = '#ffffff';
+                  badge.style.fontSize = '10px';
+                  badge.style.fontWeight = '700';
+                  badge.style.borderRadius = '9px';
+                  badge.style.padding = '1px 5px';
+                  badge.style.border = '2px solid #ffffff';
+                  content.appendChild(badge);
+                }
+
+                content.addEventListener('click', function () {
+                  window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'markerPress', id: m.id }));
+                });
+
+                new kakao.maps.CustomOverlay({
                   map: map,
                   position: new kakao.maps.LatLng(m.lat, m.lng),
-                });
-                kakao.maps.event.addListener(marker, 'click', function () {
-                  window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'markerPress', id: m.id }));
+                  content: content,
+                  xAnchor: 0.5,
+                  yAnchor: 0.5,
                 });
               });
 
@@ -62,7 +103,9 @@ export function KakaoMapView({ latitude, longitude, markers = [], onMarkerPress,
         </script>
       </body>
     </html>
-  `;
+  `,
+    [latitude, longitude, JSON.stringify(markers)]
+  );
 
   return (
     <WebView
