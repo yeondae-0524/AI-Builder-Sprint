@@ -14,11 +14,7 @@ import {
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-
-// ─────────────────────────────────────────────
-// 디자인 색상
-// 피그마 ZIP에 들어 있던 색상을 그대로 사용
-// ─────────────────────────────────────────────
+import { supabase } from "../../lib/supabase";
 
 const COLORS = {
   primary: "#3D5AFE",
@@ -35,53 +31,380 @@ const COLORS = {
   sunday: "#EF4444",
 };
 
-// ─────────────────────────────────────────────
-// 임시 캘린더 데이터
-// 나중에 백엔드 API 데이터로 교체
-// ─────────────────────────────────────────────
-
-// 2026년 7월 1일은 수요일이므로 빈칸 3개
-const CALENDAR_DATA = {
-  startDay: 3,
-  totalDays: 31,
-  today: 29,
-
-  // 경험 기록 완료 날짜
-  completedDays: [5, 9, 12, 16, 19, 23],
-
-  // 미션은 시작했지만 기록하지 않은 날짜
-  startedDays: [26],
-};
-
-// 피그마 디자인에 사용된 사진
-// 현재는 온라인 이미지이며 나중에 실제 사용자 사진 URL로 교체
-const CALENDAR_PHOTOS = [
-  "https://images.unsplash.com/photo-1414124488080-0188dcbb8834?w=400&h=400&fit=crop&auto=format",
-  "https://images.unsplash.com/photo-1774356148397-d5dfe91253c2?w=400&h=400&fit=crop&auto=format",
-  "https://images.unsplash.com/photo-1558210834-473f430c09ac?w=400&h=400&fit=crop&auto=format",
-  "https://images.unsplash.com/photo-1780342745241-c4bb07a0a198?w=400&h=400&fit=crop&auto=format",
-  "https://images.unsplash.com/photo-1583236753515-7e06aae56395?w=400&h=400&fit=crop&auto=format",
-  "https://images.unsplash.com/photo-1771857607729-181ea40ca5c5?w=400&h=400&fit=crop&auto=format",
-];
-
 const WEEK_DAYS = ["일", "월", "화", "수", "목", "금", "토"];
 const SCREEN_HEIGHT = Dimensions.get("window").height;
 const SHEET_CLOSED_POSITION = SCREEN_HEIGHT;
+const DAY_IN_MS = 24 * 60 * 60 * 1000;
 
 type CalendarCell = number | null;
+
+type Journey = {
+  id: string;
+  title: string;
+  duration_days: number;
+  target_record_count: number;
+  start_date: string;
+  end_date: string;
+  status: string;
+};
+
+type CalendarRecord = {
+  id: string;
+  mission_attempt_id: string | null;
+  recorded_at: string;
+  emotion: string | null;
+  content: string | null;
+  missionTitle: string;
+  photoUrl: string | null;
+};
+
+type StartedMission = {
+  id: string;
+  started_at: string;
+  missionTitle: string;
+};
+
+function toDateKey(date: Date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+
+  return `${year}-${month}-${day}`;
+}
+
+function parseDateKey(dateKey: string) {
+  const [year, month, day] = dateKey.split("-").map(Number);
+  return new Date(year, month - 1, day);
+}
+
+function getLocalDayFromTimestamp(timestamp: string) {
+  return new Date(timestamp).getDate();
+}
 
 export default function CalendarScreen() {
   const router = useRouter();
 
+  const today = new Date();
+  const todayStart = new Date(
+    today.getFullYear(),
+    today.getMonth(),
+    today.getDate(),
+  );
+  const todayKey = toDateKey(todayStart);
+
+  const [visibleMonth, setVisibleMonth] = useState(
+    () => new Date(today.getFullYear(), today.getMonth(), 1),
+  );
   const [selectedDay, setSelectedDay] = useState<number | null>(null);
+  const [records, setRecords] = useState<CalendarRecord[]>([]);
+  const [startedMissions, setStartedMissions] = useState<StartedMission[]>([]);
+  const [journey, setJourney] = useState<Journey | null>(null);
+  const [journeyRecordCount, setJourneyRecordCount] = useState(0);
+  const [isLoading, setIsLoading] = useState(true);
 
   const sheetTranslateY = useRef(
     new Animated.Value(SHEET_CLOSED_POSITION),
   ).current;
-
   const dragStartPosition = useRef(0);
-
   const isSheetOpen = selectedDay !== null;
+
+  const visibleYear = visibleMonth.getFullYear();
+  const visibleMonthIndex = visibleMonth.getMonth();
+  const totalDays = new Date(
+    visibleYear,
+    visibleMonthIndex + 1,
+    0,
+  ).getDate();
+  const startDay = new Date(
+    visibleYear,
+    visibleMonthIndex,
+    1,
+  ).getDay();
+
+  const monthStart = new Date(visibleYear, visibleMonthIndex, 1);
+  const nextMonthStart = new Date(visibleYear, visibleMonthIndex + 1, 1);
+  const monthStartKey = toDateKey(monthStart);
+  const nextMonthStartKey = toDateKey(nextMonthStart);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    const loadCalendarData = async () => {
+      setIsLoading(true);
+
+      const {
+        data: { user },
+        error: userError,
+      } = await supabase.auth.getUser();
+
+      if (!isMounted) {
+        return;
+      }
+
+      if (userError || !user) {
+        console.error(
+          "사용자 정보 불러오기 실패:",
+          userError?.message,
+        );
+        setIsLoading(false);
+        return;
+      }
+
+      const [journeyResult, recordsResult, startedResult] =
+        await Promise.all([
+          supabase
+            .from("journeys")
+            .select(
+              "id, title, duration_days, target_record_count, start_date, end_date, status",
+            )
+            .eq("user_id", user.id)
+            .lte("start_date", todayKey)
+            .gte("end_date", todayKey)
+            .order("start_date", { ascending: false })
+            .limit(1)
+            .maybeSingle(),
+
+          supabase
+            .from("records")
+            .select(
+              "id, mission_attempt_id, recorded_at, emotion, content",
+            )
+            .eq("user_id", user.id)
+            .gte("recorded_at", monthStartKey)
+            .lt("recorded_at", nextMonthStartKey)
+            .order("recorded_at", { ascending: true }),
+
+          supabase
+            .from("mission_attempts")
+            .select("id, mission_id, started_at")
+            .eq("user_id", user.id)
+            .not("started_at", "is", null)
+            .is("completed_at", null)
+            .gte("started_at", monthStart.toISOString())
+            .lt("started_at", nextMonthStart.toISOString()),
+        ]);
+
+      if (!isMounted) {
+        return;
+      }
+
+      if (journeyResult.error) {
+        console.error(
+          "진행 중인 여정 조회 실패:",
+          journeyResult.error.message,
+        );
+      }
+
+      if (recordsResult.error) {
+        console.error(
+          "캘린더 기록 조회 실패:",
+          recordsResult.error.message,
+        );
+      }
+
+      if (startedResult.error) {
+        console.error(
+          "진행 중인 미션 조회 실패:",
+          startedResult.error.message,
+        );
+      }
+
+      const currentJourney =
+        (journeyResult.data as Journey | null) ?? null;
+      const rawRecords = recordsResult.data ?? [];
+      const rawStartedMissions = startedResult.data ?? [];
+
+      let currentJourneyRecordCount = 0;
+
+      if (currentJourney) {
+        const { count, error: countError } = await supabase
+          .from("records")
+          .select("id", { count: "exact", head: true })
+          .eq("user_id", user.id)
+          .eq("journey_id", currentJourney.id);
+
+        if (countError) {
+          console.error(
+            "여정 기록 수 조회 실패:",
+            countError.message,
+          );
+        } else {
+          currentJourneyRecordCount = count ?? 0;
+        }
+      }
+
+      const recordAttemptIds = Array.from(
+        new Set(
+          rawRecords
+            .map((record) => record.mission_attempt_id)
+            .filter((id): id is string => Boolean(id)),
+        ),
+      );
+
+      const attemptIdToMissionId = new Map<string, string>();
+
+      if (recordAttemptIds.length > 0) {
+        const { data: attempts, error: attemptsError } =
+          await supabase
+            .from("mission_attempts")
+            .select("id, mission_id")
+            .in("id", recordAttemptIds);
+
+        if (attemptsError) {
+          console.error(
+            "기록 미션 연결 조회 실패:",
+            attemptsError.message,
+          );
+        } else {
+          (attempts ?? []).forEach((attempt) => {
+            attemptIdToMissionId.set(
+              attempt.id,
+              attempt.mission_id,
+            );
+          });
+        }
+      }
+
+      const missionIds = Array.from(
+        new Set([
+          ...Array.from(attemptIdToMissionId.values()),
+          ...rawStartedMissions
+            .map((attempt) => attempt.mission_id)
+            .filter((id): id is string => Boolean(id)),
+        ]),
+      );
+
+      const missionTitleById = new Map<string, string>();
+
+      if (missionIds.length > 0) {
+        const { data: missions, error: missionsError } =
+          await supabase
+            .from("missions")
+            .select("id, title")
+            .in("id", missionIds);
+
+        if (missionsError) {
+          console.error(
+            "미션 이름 조회 실패:",
+            missionsError.message,
+          );
+        } else {
+          (missions ?? []).forEach((mission) => {
+            missionTitleById.set(mission.id, mission.title);
+          });
+        }
+      }
+
+      const recordIds = rawRecords.map((record) => record.id);
+      const photoPathByRecordId = new Map<string, string>();
+      const signedUrlByPath = new Map<string, string>();
+
+      if (recordIds.length > 0) {
+        const { data: photos, error: photosError } =
+          await supabase
+            .from("record_photos")
+            .select("record_id, storage_path, sort_order, is_cover")
+            .in("record_id", recordIds)
+            .order("sort_order", { ascending: true });
+
+        if (photosError) {
+          console.error(
+            "기록 사진 정보 조회 실패:",
+            photosError.message,
+          );
+        } else {
+          (photos ?? []).forEach((photo) => {
+            const currentPath = photoPathByRecordId.get(
+              photo.record_id,
+            );
+
+            if (!currentPath || photo.is_cover) {
+              photoPathByRecordId.set(
+                photo.record_id,
+                photo.storage_path,
+              );
+            }
+          });
+
+          const photoPaths = Array.from(
+            new Set(photoPathByRecordId.values()),
+          );
+
+          if (photoPaths.length > 0) {
+            const { data: signedPhotos, error: signedError } =
+              await supabase.storage
+                .from("record-photos")
+                .createSignedUrls(photoPaths, 60 * 60);
+
+            if (signedError) {
+              console.error(
+                "사진 URL 생성 실패:",
+                signedError.message,
+              );
+            } else {
+              (signedPhotos ?? []).forEach((photo) => {
+                if (photo.signedUrl) {
+                  signedUrlByPath.set(
+                    photo.path,
+                    photo.signedUrl,
+                  );
+                }
+              });
+            }
+          }
+        }
+      }
+
+      const normalizedRecords: CalendarRecord[] = rawRecords.map(
+        (record) => {
+          const missionId = record.mission_attempt_id
+            ? attemptIdToMissionId.get(record.mission_attempt_id)
+            : undefined;
+          const photoPath = photoPathByRecordId.get(record.id);
+
+          return {
+            id: record.id,
+            mission_attempt_id: record.mission_attempt_id,
+            recorded_at: record.recorded_at,
+            emotion: record.emotion,
+            content: record.content,
+            missionTitle:
+              (missionId
+                ? missionTitleById.get(missionId)
+                : undefined) ?? "기록한 경험",
+            photoUrl: photoPath
+              ? signedUrlByPath.get(photoPath) ?? null
+              : null,
+          };
+        },
+      );
+
+      const normalizedStartedMissions: StartedMission[] =
+        rawStartedMissions.map((attempt) => ({
+          id: attempt.id,
+          started_at: attempt.started_at,
+          missionTitle:
+            missionTitleById.get(attempt.mission_id) ??
+            "진행 중인 미션",
+        }));
+
+      if (!isMounted) {
+        return;
+      }
+
+      setJourney(currentJourney);
+      setJourneyRecordCount(currentJourneyRecordCount);
+      setRecords(normalizedRecords);
+      setStartedMissions(normalizedStartedMissions);
+      setIsLoading(false);
+    };
+
+    loadCalendarData();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [monthStartKey, nextMonthStartKey, todayKey]);
 
   useEffect(() => {
     if (!isSheetOpen) {
@@ -122,35 +445,27 @@ export default function CalendarScreen() {
   const panResponder = useRef(
     PanResponder.create({
       onStartShouldSetPanResponder: () => true,
-
       onMoveShouldSetPanResponder: (_event, gestureState) =>
         Math.abs(gestureState.dy) > 3,
-
       onPanResponderGrant: () => {
         sheetTranslateY.stopAnimation((currentPosition) => {
           dragStartPosition.current = currentPosition;
         });
       },
-
       onPanResponderMove: (_event, gestureState) => {
         const nextPosition =
           dragStartPosition.current + gestureState.dy;
-
-        // 위쪽으로는 더 올라가지 않고 아래쪽으로만 움직이게 제한
         const limitedPosition = Math.max(
           0,
           Math.min(nextPosition, SHEET_CLOSED_POSITION),
         );
-
         sheetTranslateY.setValue(limitedPosition);
       },
-
       onPanResponderRelease: (_event, gestureState) => {
         const currentPosition = Math.max(
           0,
           dragStartPosition.current + gestureState.dy,
         );
-
         const shouldClose =
           currentPosition > 110 || gestureState.vy > 0.7;
 
@@ -160,47 +475,84 @@ export default function CalendarScreen() {
           restoreSheet();
         }
       },
-
-      onPanResponderTerminate: () => {
-        restoreSheet();
-      },
-
+      onPanResponderTerminate: restoreSheet,
       onPanResponderTerminationRequest: () => false,
     }),
   ).current;
 
-  // 시작 요일 앞에 빈칸을 넣고, 그 뒤에 1~31일을 배치
   const calendarCells: CalendarCell[] = [
-    ...Array<null>(CALENDAR_DATA.startDay).fill(null),
-    ...Array.from(
-      { length: CALENDAR_DATA.totalDays },
-      (_, index) => index + 1,
-    ),
+    ...Array<null>(startDay).fill(null),
+    ...Array.from({ length: totalDays }, (_, index) => index + 1),
   ];
 
-  const selectedDayIsCompleted =
-    selectedDay !== null &&
-    CALENDAR_DATA.completedDays.includes(selectedDay);
-
-  const selectedPhotoIndex =
+  const selectedDateKey =
     selectedDay === null
-      ? -1
-      : CALENDAR_DATA.completedDays.indexOf(selectedDay);
+      ? null
+      : toDateKey(
+          new Date(visibleYear, visibleMonthIndex, selectedDay),
+        );
+
+  const selectedRecord =
+    selectedDateKey === null
+      ? null
+      : records.find(
+          (record) => record.recorded_at === selectedDateKey,
+        ) ?? null;
+
+  const selectedStartedMission =
+    selectedDay === null
+      ? null
+      : startedMissions.find(
+          (mission) =>
+            getLocalDayFromTimestamp(mission.started_at) ===
+            selectedDay,
+        ) ?? null;
+
+  const completedDays = new Set(
+    records.map((record) => parseDateKey(record.recorded_at).getDate()),
+  );
+  const startedDays = new Set(
+    startedMissions.map((mission) =>
+      getLocalDayFromTimestamp(mission.started_at),
+    ),
+  );
+
+  const journeyTarget = journey?.target_record_count ?? 0;
+  const remainingRecords = Math.max(
+    journeyTarget - journeyRecordCount,
+    0,
+  );
+  const progressPercentage = (
+    journeyTarget > 0
+      ? `${Math.min(
+          (journeyRecordCount / journeyTarget) * 100,
+          100,
+        )}%`
+      : "0%"
+  ) as `${number}%`;
+  const dDay = journey
+    ? Math.max(
+        0,
+        Math.ceil(
+          (parseDateKey(journey.end_date).getTime() -
+            todayStart.getTime()) /
+            DAY_IN_MS,
+        ),
+      )
+    : null;
 
   const handleDayPress = (day: number) => {
-    const isFuture = day > CALENDAR_DATA.today;
+    const date = new Date(visibleYear, visibleMonthIndex, day);
 
-    if (isFuture) {
+    if (date.getTime() > todayStart.getTime()) {
       return;
     }
 
-    // 현재 선택된 날짜를 다시 누르면 시트를 아래로 내려 닫기
     if (selectedDay === day) {
       closeSheet();
       return;
     }
 
-    // 닫혀 있던 시트를 다시 아래쪽에서 시작하게 설정
     if (selectedDay === null) {
       sheetTranslateY.setValue(SHEET_CLOSED_POSITION);
     }
@@ -208,10 +560,18 @@ export default function CalendarScreen() {
     setSelectedDay(day);
   };
 
+  const moveMonth = (offset: number) => {
+    setSelectedDay(null);
+    sheetTranslateY.setValue(SHEET_CLOSED_POSITION);
+    setVisibleMonth(
+      new Date(visibleYear, visibleMonthIndex + offset, 1),
+    );
+  };
+
   const handleRecordDetail = () => {
     Alert.alert(
       "기록 상세",
-      "기록 상세 화면은 백엔드와 상세 페이지를 연결한 뒤 구현할 예정입니다.",
+      "기록 상세 화면은 상세 페이지를 만든 뒤 연결하면 됩니다.",
     );
   };
 
@@ -224,9 +584,7 @@ export default function CalendarScreen() {
 
   const handleGoToMission = () => {
     setSelectedDay(null);
-
-    // 홈 탭으로 이동
-    router.push("/");
+    router.push("/(tabs)");
   };
 
   return (
@@ -236,7 +594,6 @@ export default function CalendarScreen() {
           showsVerticalScrollIndicator={false}
           contentContainerStyle={styles.scrollContent}
         >
-          {/* 진행 현황 카드 */}
           <View style={styles.progressCard}>
             <View style={styles.progressHeader}>
               <View>
@@ -245,56 +602,72 @@ export default function CalendarScreen() {
                 </Text>
 
                 <Text style={styles.journeyTitle}>
-                  14일의 여정
+                  {isLoading
+                    ? "불러오는 중..."
+                    : journey?.title ?? "진행 중인 여정이 없어요"}
                 </Text>
               </View>
 
               <View style={styles.dDayBox}>
-                <Text style={styles.dDayCaption}>
-                  종료까지
-                </Text>
-
+                <Text style={styles.dDayCaption}>종료까지</Text>
                 <Text style={styles.dDayText}>
-                  D-5
+                  {dDay === null ? "--" : `D-${dDay}`}
                 </Text>
               </View>
             </View>
 
             <View style={styles.progressInfoRow}>
               <Text style={styles.progressDescription}>
-                7번 중 4번의 경험을 기록했어요
+                {journey
+                  ? `${journeyTarget}번 중 ${journeyRecordCount}번의 경험을 기록했어요`
+                  : "새 여정을 시작하면 진행 상황이 표시돼요"}
               </Text>
 
               <Text style={styles.progressCount}>
-                4/7
+                {journey
+                  ? `${journeyRecordCount}/${journeyTarget}`
+                  : "0/0"}
               </Text>
             </View>
 
             <View style={styles.progressBarBackground}>
-              <View style={styles.progressBarFill} />
+              <View
+                style={[
+                  styles.progressBarFill,
+                  { width: progressPercentage },
+                ]}
+              />
             </View>
 
             <View style={styles.essayNotice}>
               <Text style={styles.essayNoticeText}>
-                에세이 완성까지{" "}
-                <Text style={styles.essayNoticeStrong}>
-                  3번
-                </Text>
-                {" "}더 남았어요
+                {journey ? (
+                  <>
+                    에세이 완성까지{" "}
+                    <Text style={styles.essayNoticeStrong}>
+                      {remainingRecords}번
+                    </Text>{" "}
+                    더 남았어요
+                  </>
+                ) : (
+                  "진행할 여정을 먼저 선택해 주세요"
+                )}
               </Text>
             </View>
           </View>
 
-          {/* 월 표시 영역 */}
           <View style={styles.monthHeader}>
             <Text style={styles.monthTitle}>
-              2026년 7월
+              {visibleYear}년 {visibleMonthIndex + 1}월
             </Text>
 
             <View style={styles.monthButtonContainer}>
               <Pressable
-                disabled
-                style={styles.monthButton}
+                onPress={() => moveMonth(-1)}
+                style={({ pressed }) => [
+                  styles.monthButton,
+                  pressed && styles.buttonPressed,
+                ]}
               >
                 <Ionicons
                   name="chevron-back"
@@ -304,8 +677,11 @@ export default function CalendarScreen() {
               </Pressable>
 
               <Pressable
-                disabled
-                style={styles.monthButton}
+                onPress={() => moveMonth(1)}
+                style={({ pressed }) => [
+                  styles.monthButton,
+                  pressed && styles.buttonPressed,
+                ]}
               >
                 <Ionicons
                   name="chevron-forward"
@@ -316,7 +692,6 @@ export default function CalendarScreen() {
             </View>
           </View>
 
-          {/* 요일 */}
           <View style={styles.weekRow}>
             {WEEK_DAYS.map((day) => {
               const dayColor =
@@ -327,16 +702,8 @@ export default function CalendarScreen() {
                     : COLORS.textMuted;
 
               return (
-                <View
-                  key={day}
-                  style={styles.weekCell}
-                >
-                  <Text
-                    style={[
-                      styles.weekText,
-                      { color: dayColor },
-                    ]}
-                  >
+                <View key={day} style={styles.weekCell}>
+                  <Text style={[styles.weekText, { color: dayColor }]}>
                     {day}
                   </Text>
                 </View>
@@ -344,7 +711,6 @@ export default function CalendarScreen() {
             })}
           </View>
 
-          {/* 날짜 */}
           <View style={styles.calendarGrid}>
             {calendarCells.map((day, index) => {
               if (day === null) {
@@ -356,23 +722,20 @@ export default function CalendarScreen() {
                 );
               }
 
-              const isCompleted =
-                CALENDAR_DATA.completedDays.includes(day);
-
-              const isStarted =
-                CALENDAR_DATA.startedDays.includes(day);
-
-              const isToday =
-                day === CALENDAR_DATA.today;
-
-              const isFuture =
-                day > CALENDAR_DATA.today;
-
-              const isSelected =
-                selectedDay === day;
-
-              const photoIndex =
-                CALENDAR_DATA.completedDays.indexOf(day);
+              const date = new Date(
+                visibleYear,
+                visibleMonthIndex,
+                day,
+              );
+              const dateKey = toDateKey(date);
+              const dayRecord = records.find(
+                (record) => record.recorded_at === dateKey,
+              );
+              const isCompleted = completedDays.has(day);
+              const isStarted = startedDays.has(day) && !isCompleted;
+              const isToday = dateKey === todayKey;
+              const isFuture = date.getTime() > todayStart.getTime();
+              const isSelected = selectedDay === day;
 
               return (
                 <Pressable
@@ -388,31 +751,36 @@ export default function CalendarScreen() {
                     <View
                       style={[
                         styles.completedImageWrapper,
-                        isSelected &&
-                          styles.selectedImageWrapper,
+                        !dayRecord?.photoUrl && {
+                          alignItems: "center",
+                          justifyContent: "center",
+                          backgroundColor: COLORS.primaryLight,
+                        },
+                        isSelected && styles.selectedImageWrapper,
                       ]}
                     >
-                      <Image
-                        source={{
-                          uri: CALENDAR_PHOTOS[photoIndex],
-                        }}
-                        style={styles.completedImage}
-                      />
+                      {dayRecord?.photoUrl ? (
+                        <Image
+                          source={{ uri: dayRecord.photoUrl }}
+                          style={styles.completedImage}
+                        />
+                      ) : (
+                        <Ionicons
+                          name="checkmark"
+                          size={18}
+                          color={COLORS.primary}
+                        />
+                      )}
                     </View>
                   ) : isStarted ? (
                     <View style={styles.startedDayCircle}>
-                      <Text style={styles.startedDayText}>
-                        {day}
-                      </Text>
+                      <Text style={styles.startedDayText}>{day}</Text>
                     </View>
                   ) : (
                     <View
                       style={[
                         styles.normalDayCircle,
-
-                        isToday &&
-                          styles.todayCircle,
-
+                        isToday && styles.todayCircle,
                         isSelected &&
                           !isToday &&
                           styles.selectedDayCircle,
@@ -421,9 +789,7 @@ export default function CalendarScreen() {
                       <Text
                         style={[
                           styles.normalDayText,
-
-                          isToday &&
-                            styles.todayText,
+                          isToday && styles.todayText,
                         ]}
                       >
                         {day}
@@ -431,69 +797,59 @@ export default function CalendarScreen() {
                     </View>
                   )}
 
-                  {isCompleted && (
-                    <View style={styles.completedDot} />
-                  )}
+                  {isCompleted && <View style={styles.completedDot} />}
                 </Pressable>
               );
             })}
           </View>
 
-          {/* 플로팅 탭 바에 가리지 않도록 여백 확보 */}
           <View style={styles.bottomSpace} />
         </ScrollView>
 
-        {/* 날짜 선택 시 나타나는 하단 시트 */}
         {selectedDay !== null && (
           <Animated.View
             style={[
               styles.bottomSheet,
               {
-                transform: [
-                  {
-                    translateY: sheetTranslateY,
-                  },
-                ],
+                transform: [{ translateY: sheetTranslateY }],
               },
             ]}
           >
-          <View
-            style={styles.sheetHandleArea}
-            {...panResponder.panHandlers}
-          >
-            <View style={styles.sheetHandle} />
-          </View>
+            <View
+              style={styles.sheetHandleArea}
+              {...panResponder.panHandlers}
+            >
+              <View style={styles.sheetHandle} />
+            </View>
 
-            {selectedDayIsCompleted ? (
+            {selectedRecord ? (
               <View style={styles.recordContent}>
                 <Text style={styles.recordDate}>
-                  2026년 7월 {selectedDay}일
+                  {visibleYear}년 {visibleMonthIndex + 1}월{" "}
+                  {selectedDay}일
                 </Text>
 
                 <Text style={styles.recordTitle}>
-                  조용한 카페에서 30분 독서
+                  {selectedRecord.missionTitle}
                 </Text>
 
-                {selectedPhotoIndex >= 0 && (
+                {selectedRecord.photoUrl && (
                   <Image
-                    source={{
-                      uri: CALENDAR_PHOTOS[
-                        selectedPhotoIndex
-                      ],
-                    }}
+                    source={{ uri: selectedRecord.photoUrl }}
                     style={styles.recordImage}
                   />
                 )}
 
-                <View style={styles.emotionTag}>
-                  <Text style={styles.emotionTagText}>
-                    편안했어요
-                  </Text>
-                </View>
+                {selectedRecord.emotion && (
+                  <View style={styles.emotionTag}>
+                    <Text style={styles.emotionTagText}>
+                      {selectedRecord.emotion}
+                    </Text>
+                  </View>
+                )}
 
                 <Text style={styles.recordDescription}>
-                  카페 창가 자리가 비어 있었다. 30분 동안
-                  읽기만 했는데 이상하게 마음이 가벼워졌다.
+                  {selectedRecord.content || "작성한 기록이 없어요."}
                 </Text>
 
                 <View style={styles.recordButtonRow}>
@@ -516,26 +872,38 @@ export default function CalendarScreen() {
                       pressed && styles.buttonPressed,
                     ]}
                   >
-                    <Text style={styles.editButtonText}>
-                      수정
-                    </Text>
+                    <Text style={styles.editButtonText}>수정</Text>
                   </Pressable>
                 </View>
               </View>
+            ) : selectedStartedMission ? (
+              <View style={styles.emptyContent}>
+                <Text style={styles.emptyEmoji}>🌱</Text>
+                <Text style={styles.emptyTitle}>진행 중인 미션</Text>
+                <Text style={styles.emptyDescription}>
+                  {selectedStartedMission.missionTitle}
+                </Text>
+                <Pressable
+                  onPress={handleGoToMission}
+                  style={({ pressed }) => [
+                    styles.emptyButton,
+                    pressed && styles.buttonPressed,
+                  ]}
+                >
+                  <Text style={styles.emptyButtonText}>
+                    미션 계속하기
+                  </Text>
+                </Pressable>
+              </View>
             ) : (
               <View style={styles.emptyContent}>
-                <Text style={styles.emptyEmoji}>
-                  🌱
-                </Text>
-
+                <Text style={styles.emptyEmoji}>🌱</Text>
                 <Text style={styles.emptyTitle}>
                   아직 채워진 하루가 없어요
                 </Text>
-
                 <Text style={styles.emptyDescription}>
                   오늘 작은 경험 하나를 시작해볼까요?
                 </Text>
-
                 <Pressable
                   onPress={handleGoToMission}
                   style={({ pressed }) => [
@@ -550,7 +918,7 @@ export default function CalendarScreen() {
               </View>
             )}
           </Animated.View>
-        )}  
+        )}
       </View>
     </SafeAreaView>
   );
