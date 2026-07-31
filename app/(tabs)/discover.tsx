@@ -1,9 +1,12 @@
+import { Ionicons } from "@expo/vector-icons";
+import { useRouter } from "expo-router";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
   Animated,
   Dimensions,
   Keyboard,
+  Modal,
   PanResponder,
   Platform,
   Pressable,
@@ -18,6 +21,7 @@ import { useMission } from "../../contexts/mission-context";
 
 const BL = "#3D5AFE";
 const BLL = "#EEF1FF";
+const PINK = "#EC4899";
 const T0 = "#0F0F0F";
 const T1 = "#5C5F6A";
 const T2 = "#9EA3AE";
@@ -31,9 +35,10 @@ const DEFAULT_CENTER = { lat: 35.1795543, lng: 129.0756416 };
 
 const FILTERS = ["가까운 기록", "최근 기록", "내 취향", "새로운 분야", "산책"];
 
+// TODO: place.service.ts 완성되면 이 하드코딩 데이터를 실제 기록 조회로 교체
 const BUBBLES = [
   {
-    id: 1,
+    id: "bubble-1",
     place: "연남동 카페 봄날",
     lat: 35.1795543,
     lng: 129.0806416,
@@ -43,10 +48,11 @@ const BUBBLES = [
     emotion: "차분함",
     note: "창가 자리에서 책 읽으니 딴 세상 같았어요.",
     likes: 12,
+    category: "휴식",
     photo: "https://images.unsplash.com/photo-1493857671505-72967e2e2760?w=200&h=200&fit=crop",
   },
   {
-    id: 2,
+    id: "bubble-2",
     place: "경의선 숲길",
     lat: 35.1825543,
     lng: 129.0756416,
@@ -56,10 +62,11 @@ const BUBBLES = [
     emotion: "상쾌함",
     note: "노을 질 때가 진짜 예뻐요.",
     likes: 8,
+    category: "산책",
     photo: "https://images.unsplash.com/photo-1441974231531-c6227db76b6e?w=200&h=200&fit=crop",
   },
   {
-    id: 3,
+    id: "bubble-3",
     place: "망원동 책방",
     lat: 35.1765543,
     lng: 129.0716416,
@@ -71,10 +78,11 @@ const BUBBLES = [
     likes: 21,
     multi: true,
     count: 3,
+    category: "배움",
     photo: "https://images.unsplash.com/photo-1495446815901-a7297e633e8d?w=200&h=200&fit=crop",
   },
   {
-    id: 4,
+    id: "bubble-4",
     place: "홍대 거리",
     lat: 35.1815543,
     lng: 129.0806416,
@@ -84,24 +92,42 @@ const BUBBLES = [
     emotion: "즐거움",
     note: "우연히 들은 버스킹인데 목소리가 좋았어요.",
     likes: 15,
+    category: "감상",
     photo: "https://images.unsplash.com/photo-1493225457124-a3eb161ffa5f?w=200&h=200&fit=crop",
   },
 ];
 
 export default function DiscoverScreen() {
+  const router = useRouter();
+  const { shareMissionToHome } = useMission();
+
   const [activeFilter, setActiveFilter] = useState("가까운 기록");
   const [activeBubble, setActiveBubble] = useState(null);
   const [sheetBubble, setSheetBubble] = useState(null);
   const [liked, setLiked] = useState([]);
   const [searchQuery, setSearchQuery] = useState("");
   const [mapCenter, setMapCenter] = useState(DEFAULT_CENTER);
-
-  const { mainMission, setMainMission } = useMission();
+  const [shareModalVisible, setShareModalVisible] = useState(false);
+  const [shareContent, setShareContent] = useState("");
 
   const sheetTranslateY = useRef(new Animated.Value(SHEET_CLOSE_POSITION)).current;
   const dragStart = useRef(0);
 
-  // 검색어와 장소 이름이 일치하는 것들
+  const glowAnim = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(glowAnim, { toValue: 1, duration: 1100, useNativeDriver: true }),
+        Animated.timing(glowAnim, { toValue: 0, duration: 1100, useNativeDriver: true }),
+      ])
+    );
+    loop.start();
+    return () => loop.stop();
+  }, []);
+  const glowScale = glowAnim.interpolate({ inputRange: [0, 1], outputRange: [1, 1.35] });
+  const glowOpacity = glowAnim.interpolate({ inputRange: [0, 1], outputRange: [0.55, 0] });
+  const btnScale = glowAnim.interpolate({ inputRange: [0, 1], outputRange: [1, 1.08] });
+
   const searchResults = useMemo(() => {
     if (!searchQuery.trim()) return [];
     return BUBBLES.filter((b) => b.place.includes(searchQuery.trim()));
@@ -164,22 +190,29 @@ export default function DiscoverScreen() {
     })
   ).current;
 
-  const webDragStyle =
-    Platform.OS === "web" ? { touchAction: "none", cursor: "grab" } : undefined;
+  const webDragStyle = Platform.OS === "web" ? { touchAction: "none", cursor: "grab" } : undefined;
 
   const handleTryMission = () => {
     if (!sheetBubble) return;
-    setMainMission({
-      id: `bubble-${sheetBubble.id}`,
+
+    shareMissionToHome({
+      id: sheetBubble.id,
       title: sheetBubble.mission,
       desc: sheetBubble.note,
+      instructions: sheetBubble.note,
+      recommendationReason: `${sheetBubble.nick}님이 "${sheetBubble.emotion}"을 느낀 곳이에요`,
       time: "20분",
       dist: "-",
       cost: "-",
-      cat: sheetBubble.emotion,
+      cat: sheetBubble.category,
+      requiredItems: [],
+      placeLat: sheetBubble.lat,
+      placeLng: sheetBubble.lng,
+      placeName: sheetBubble.place,
     });
-    Alert.alert("메인 미션으로 설정했어요", "홈 탭에서 확인할 수 있어요.");
+
     closeSheet();
+    router.push("/");
   };
 
   const handleSelectSearchResult = (bubble) => {
@@ -187,6 +220,13 @@ export default function DiscoverScreen() {
     setActiveBubble(bubble);
     setSearchQuery("");
     Keyboard.dismiss();
+  };
+
+  const handleShareSubmit = () => {
+    // TODO: place.service / records.service 연동 후 실제 저장 로직 연결
+    Alert.alert("준비 중이에요", "장소 공유 기능은 백엔드 연동 후 활성화돼요.");
+    setShareContent("");
+    setShareModalVisible(false);
   };
 
   return (
@@ -224,7 +264,6 @@ export default function DiscoverScreen() {
           </Pressable>
         </View>
 
-        {/* 검색 결과 드롭다운 */}
         {searchQuery.trim().length > 0 && (
           <View style={styles.searchDropdown}>
             {searchResults.length > 0 ? (
@@ -295,23 +334,50 @@ export default function DiscoverScreen() {
             </View>
             <Text style={styles.note}>"{sheetBubble.note}"</Text>
 
-            {mainMission?.id === `bubble-${sheetBubble.id}` ? (
-              <View style={styles.pinnedBadge}>
-                <Text style={{ color: BL, fontSize: 12, fontWeight: "700" }}>✓ 메인 미션으로 설정됨</Text>
-              </View>
-            ) : (
-              <View style={{ flexDirection: "row", gap: 8, marginTop: 8 }}>
-                <Pressable style={styles.primaryBtn} onPress={handleTryMission}>
-                  <Text style={{ color: WH, fontSize: 13, fontWeight: "700" }}>나도 해볼래요</Text>
-                </Pressable>
-                <Pressable style={styles.secondaryBtn}>
-                  <Text style={{ color: T1, fontSize: 13 }}>저장</Text>
-                </Pressable>
-              </View>
-            )}
+            <View style={{ flexDirection: "row", gap: 8, marginTop: 8 }}>
+              <Pressable style={styles.primaryBtn} onPress={handleTryMission}>
+                <Text style={{ color: WH, fontSize: 13, fontWeight: "700" }}>나도 해볼래요</Text>
+              </Pressable>
+              <Pressable style={styles.secondaryBtn}>
+                <Text style={{ color: T1, fontSize: 13 }}>저장</Text>
+              </Pressable>
+            </View>
           </View>
         </Animated.View>
       )}
+
+      <View style={styles.fabWrap} pointerEvents="box-none">
+        <Animated.View
+          style={[styles.fabGlow, { transform: [{ scale: glowScale }], opacity: glowOpacity }]}
+        />
+        <Animated.View style={{ transform: [{ scale: btnScale }] }}>
+          <Pressable style={styles.fabBtn} onPress={() => setShareModalVisible(true)}>
+            <Ionicons name="search" size={17} color={WH} />
+          </Pressable>
+        </Animated.View>
+      </View>
+
+      <Modal visible={shareModalVisible} transparent animationType="slide" onRequestClose={() => setShareModalVisible(false)}>
+        <View style={styles.shareOverlay}>
+          <View style={styles.shareSheet}>
+            <Text style={styles.shareTitle}>이 장소를 공유해요</Text>
+            <TextInput
+              value={shareContent}
+              onChangeText={setShareContent}
+              placeholder="어떤 경험이었는지 적어보세요"
+              placeholderTextColor={T2}
+              multiline
+              style={styles.shareInput}
+            />
+            <Pressable style={styles.shareSubmitBtn} onPress={handleShareSubmit}>
+              <Text style={styles.shareSubmitText}>공유하기</Text>
+            </Pressable>
+            <Pressable onPress={() => setShareModalVisible(false)} style={{ alignItems: "center", marginTop: 10 }}>
+              <Text style={{ color: T2, fontSize: 12 }}>취소</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -361,5 +427,44 @@ const styles = StyleSheet.create({
   note: { fontSize: 13, color: T1, lineHeight: 20, marginBottom: 16 },
   primaryBtn: { flex: 1, backgroundColor: BL, borderRadius: 12, paddingVertical: 12, alignItems: "center" },
   secondaryBtn: { backgroundColor: "#F3F4F6", borderRadius: 12, paddingVertical: 12, paddingHorizontal: 14, alignItems: "center" },
-  pinnedBadge: { marginTop: 8, backgroundColor: BLL, borderRadius: 10, paddingVertical: 10, alignItems: "center" },
+
+  fabWrap: {
+    position: "absolute",
+    right: 30,
+    bottom: 66,
+    width: 40,
+    height: 40,
+    alignItems: "center",
+    justifyContent: "center",
+    zIndex: 20,
+  },
+  fabGlow: {
+    position: "absolute",
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: PINK,
+  },
+  fabBtn: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: PINK,
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: 2,
+    borderColor: WH,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 5,
+    elevation: 6,
+  },
+
+  shareOverlay: { flex: 1, backgroundColor: "rgba(0,0,0,0.45)", justifyContent: "flex-end" },
+  shareSheet: { backgroundColor: WH, borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 20 },
+  shareTitle: { fontSize: 16, fontWeight: "700", color: T0, marginBottom: 14 },
+  shareInput: { minHeight: 90, backgroundColor: "#F7F8FA", borderRadius: 12, padding: 12, fontSize: 13, color: T0, textAlignVertical: "top", marginBottom: 16 },
+  shareSubmitBtn: { backgroundColor: PINK, borderRadius: 14, paddingVertical: 14, alignItems: "center" },
+  shareSubmitText: { color: WH, fontSize: 14, fontWeight: "700" },
 });

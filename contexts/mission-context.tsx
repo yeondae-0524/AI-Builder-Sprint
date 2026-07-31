@@ -11,18 +11,47 @@ export type Mission = {
   star?: boolean;
 };
 
+export type SharedMission = {
+  id: string;
+  title: string;
+  desc: string;
+  instructions: string;
+  recommendationReason: string;
+  time: string;
+  dist: string;
+  cost: string;
+  cat: string;
+  requiredItems: string[];
+  placeId?: string;
+  placeLat?: number;
+  placeLng?: number;
+  placeName?: string;
+};
+
 type MissionContextType = {
   mainMission: Mission | null;
   setMainMission: (mission: Mission) => void;
+  pendingSharedMission: SharedMission | null;
+  shareMissionToHome: (mission: SharedMission) => void;
+  clearPendingSharedMission: () => void;
 };
 
 const MissionContext = createContext<MissionContextType | undefined>(undefined);
 
 export function MissionProvider({ children }: { children: ReactNode }) {
   const [mainMission, setMainMission] = useState<Mission | null>(null);
+  const [pendingSharedMission, setPendingSharedMission] = useState<SharedMission | null>(null);
 
   return (
-    <MissionContext.Provider value={{ mainMission, setMainMission }}>
+    <MissionContext.Provider
+      value={{
+        mainMission,
+        setMainMission,
+        pendingSharedMission,
+        shareMissionToHome: (mission) => setPendingSharedMission(mission),
+        clearPendingSharedMission: () => setPendingSharedMission(null),
+      }}
+    >
       {children}
     </MissionContext.Provider>
   );
