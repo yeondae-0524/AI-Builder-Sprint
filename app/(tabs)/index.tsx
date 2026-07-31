@@ -32,6 +32,7 @@ import { WebView } from "react-native-webview";
 
 import { KakaoMapView } from "../../components/KakaoMapView";
 import { useMission } from "../../contexts/mission-context";
+import { normalizeMissionGuide } from "../../lib/mission-guide-normalizer";
 import { supabase } from "../../lib/supabase";
 import {
   Mission as BackendMission,
@@ -201,6 +202,7 @@ type ExtendedBackendMission = Partial<BackendMission> & {
   longitude?: number | string | null;
   distance_km?: number | string | null;
   distance?: number | string | null;
+  requires_place?: boolean | null;
   requiresPlace?: boolean | null;
   location_type?: string | null;
   locationType?: string | null;
@@ -231,6 +233,8 @@ type CompletedRecord = {
   visibility: RecordVisibility | "nickname";
   recordedAt: string;
   photoUrls: string[];
+  locationLat: number | null;
+  locationLng: number | null;
 };
 
 type MissionListItem = {
@@ -254,6 +258,79 @@ const DEFAULT_FILTERS: RecommendationFilters = {
 };
 
 const MAX_RECORD_PHOTOS = 5;
+
+type SupabaseErrorLike = {
+  code?: string | null;
+  message?: string | null;
+};
+
+function sleep(milliseconds: number) {
+  return new Promise<void>((resolve) => {
+    setTimeout(resolve, milliseconds);
+  });
+}
+
+function isJwtIssuedAtFutureError(error: unknown) {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+
+  const candidate = error as SupabaseErrorLike;
+  const code = String(candidate.code ?? "");
+  const message = String(candidate.message ?? "").toLowerCase();
+
+  return (
+    message.includes("jwt issued at future") ||
+    (code === "PGRST303" && message.includes("jwt"))
+  );
+}
+
+async function refreshSupabaseSession() {
+  // 기기와 서버의 시간이 아주 조금 어긋난 경우를 고려해 잠깐 기다린 뒤 갱신한다.
+  await sleep(1200);
+
+  const { data, error } = await supabase.auth.refreshSession();
+
+  if (error) {
+    throw error;
+  }
+
+  if (!data.session) {
+    throw new Error(
+      "로그인 세션을 갱신하지 못했습니다. 기기의 날짜와 시간을 자동으로 맞춘 뒤 다시 로그인해주세요.",
+    );
+  }
+
+  return data.session;
+}
+
+async function withJwtRetry<T>(
+  operation: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    if (!isJwtIssuedAtFutureError(error)) {
+      throw error;
+    }
+
+    await refreshSupabaseSession();
+    return operation();
+  }
+}
+
+async function retrySupabaseResultOnJwt<
+  T extends { error?: unknown },
+>(operation: () => PromiseLike<T>): Promise<T> {
+  let result = await operation();
+
+  if (result.error && isJwtIssuedAtFutureError(result.error)) {
+    await refreshSupabaseSession();
+    result = await operation();
+  }
+
+  return result;
+}
 
 const EMOTIONS: Array<{
   label: string;
@@ -926,6 +1003,45 @@ function inferAtHomeMission(
   );
 }
 
+function inferFlexibleMission(
+  mission: ExtendedBackendMission,
+  isAtHome: boolean,
+  placeName: string | null | undefined,
+) {
+  if (isAtHome) {
+    return false;
+  }
+
+  const locationType = String(
+    mission.location_type ?? mission.locationType ?? "",
+  )
+    .trim()
+    .toLowerCase();
+
+  const normalizedPlaceName = normalizeComparableText(placeName);
+  const explicitRequiresPlace =
+    mission.requires_place ?? mission.requiresPlace;
+  const hasSpecificPlaceData =
+    (Boolean(placeName) && !isGenericPlaceName(placeName)) ||
+    Boolean(mission.place_id) ||
+    mission.place_lat != null ||
+    mission.latitude != null;
+
+  return (
+    (explicitRequiresPlace === false &&
+      !hasSpecificPlaceData) ||
+    [
+      "flexible",
+      "anywhere",
+      "location_flexible",
+      "free_location",
+      "no_fixed_place",
+    ].includes(locationType) ||
+    normalizedPlaceName === "어디서나가능" ||
+    normalizedPlaceName === "어디서나"
+  );
+}
+
 function isGenericPlaceName(value: string | null | undefined) {
   const normalized = String(value ?? "")
     .replace(/\s+/g, "")
@@ -951,6 +1067,14 @@ function hasActualPlace(mission: HomeMission) {
     !isGenericPlaceName(mission.placeName) &&
     isFiniteNumber(mission.placeLat) &&
     isFiniteNumber(mission.placeLng)
+  );
+}
+
+function hasUsableMissionLocation(mission: HomeMission) {
+  return (
+    mission.isAtHome === true ||
+    mission.isLocationFlexible === true ||
+    hasActualPlace(mission)
   );
 }
 
@@ -1345,20 +1469,20 @@ async function fetchPlaceCandidates({
 }): Promise<PlaceCandidate[]> {
   let rows: any[] = [];
 
-  const extendedResult = await supabase
+  const extendedResult = await retrySupabaseResultOnJwt(() => supabase
     .from("places")
     .select(
       "id, name, latitude, longitude, address, address_name, road_address_name, category, category_name, district, gu",
     )
-    .limit(500);
+    .limit(500));
 
   if (!extendedResult.error) {
     rows = extendedResult.data ?? [];
   } else {
-    const basicResult = await supabase
+    const basicResult = await retrySupabaseResultOnJwt(() => supabase
       .from("places")
       .select("id, name, latitude, longitude")
-      .limit(500);
+      .limit(500));
 
     if (basicResult.error) {
       console.warn("실제 장소 목록 조회 실패:", basicResult.error);
@@ -1487,20 +1611,20 @@ async function hydrateMissionPlaces(
   }
 
   let data: any[] = [];
-  const extendedResult = await supabase
+  const extendedResult = await retrySupabaseResultOnJwt(() => supabase
     .from("places")
     .select(
       "id, name, latitude, longitude, address, address_name, road_address_name, district, gu",
     )
-    .in("id", placeIds);
+    .in("id", placeIds));
 
   if (!extendedResult.error) {
     data = extendedResult.data ?? [];
   } else {
-    const basicResult = await supabase
+    const basicResult = await retrySupabaseResultOnJwt(() => supabase
       .from("places")
       .select("id, name, latitude, longitude")
-      .in("id", placeIds);
+      .in("id", placeIds));
 
     if (basicResult.error) {
       console.warn("추천 장소 좌표 보완 실패:", basicResult.error);
@@ -1592,6 +1716,20 @@ function assignActualPlaces(
         };
       }
 
+      if (mission.isLocationFlexible) {
+        return {
+          ...mission,
+          placeName: "어디서나 가능",
+          dist: "어디서나 가능",
+          placeId: undefined,
+          placeLat: undefined,
+          placeLng: undefined,
+          placeAddress: undefined,
+          districtName: undefined,
+          isLocationFlexible: true,
+        };
+      }
+
       if (hasActualPlace(mission)) {
         if (mission.placeId) {
           usedPlaceIds.add(mission.placeId);
@@ -1665,37 +1803,50 @@ function isGenericRecommendationReason(value: string) {
   );
 }
 
-function getConciseRecommendationReason(value: string) {
-  const normalized = value.replace(/\s+/g, " ").trim();
+function normalizeRecommendationReason(value: string) {
+  const fallback =
+    "지금의 취향과 상황에 잘 맞는 경험이라 추천드려요.";
 
-  if (!normalized) {
-    return "지금의 취향과 상황에 잘 맞는 경험이에요.";
-  }
-
-  const firstSentence =
-    normalized
-      .split(/[.!?。！？]+/)
-      .map((item) => item.trim())
-      .find(Boolean) ?? normalized;
-
-  const withoutTitlePrefix = firstSentence.replace(
-    /^[‘'“"][^’'”"]+[’'”"](?:은|는|이|가)\s*/,
-    "",
-  );
-
-  if (withoutTitlePrefix.length <= 34) {
-    return withoutTitlePrefix;
-  }
-
-  const firstClause = withoutTitlePrefix
-    .split(/[,，]/)[0]
+  const normalized = value
+    .replace(/\s+/g, " ")
+    .replace(/(?:\.{3,}|…+)/g, "")
     .trim();
 
-  if (firstClause.length >= 10 && firstClause.length <= 34) {
-    return firstClause;
+  if (!normalized) {
+    return fallback;
   }
 
-  return `${withoutTitlePrefix.slice(0, 34).trim()}…`;
+  const withoutTitlePrefix = normalized
+    .replace(
+      /^[‘'“"][^’'”"]+[’'”"](?:은|는|이|가)\s*/,
+      "",
+    )
+    .replace(/[.!?。！？]+$/g, "")
+    .trim();
+
+  if (!withoutTitlePrefix) {
+    return fallback;
+  }
+
+  const polished = withoutTitlePrefix
+    .replace(/하기\s*좋음$/u, "하기 좋아요")
+    .replace(/하기\s*좋다$/u, "하기 좋아요")
+    .replace(/에\s*적합함$/u, "에 잘 맞아요")
+    .replace(/에\s*적합하다$/u, "에 잘 맞아요")
+    .replace(/도움이\s*됨$/u, "도움이 돼요")
+    .replace(/도움이\s*된다$/u, "도움이 돼요")
+    .replace(/추천함$/u, "추천드려요")
+    .replace(/추천한다$/u, "추천드려요");
+
+  if (
+    /(요|죠|세요|까요|니다|예요|이에요|드려요|좋아요|맞아요|돼요)$/u.test(
+      polished,
+    )
+  ) {
+    return `${polished}.`;
+  }
+
+  return `${polished}. 이런 점에서 이 미션을 추천드려요.`;
 }
 
 function buildMissionSpecificRecommendationReason({
@@ -1770,9 +1921,14 @@ function mapBackendMission(
       "",
   ).trim();
 
-  const instructions = isKoreanMissionText(rawInstructions)
+  const instructionSource = isKoreanMissionText(rawInstructions)
     ? rawInstructions
     : desc || "미션 안내에 따라 경험을 진행해보세요.";
+
+  const instructions = normalizeMissionGuide(
+    instructionSource,
+    desc,
+  );
 
   const rawRecommendationReasonCandidate = String(
     backendMission.recommendation_reason ??
@@ -1843,13 +1999,17 @@ function mapBackendMission(
     backendMission.requiresPlace;
 
   const isLocationFlexible =
-    !isAtHome &&
-    (explicitRequiresPlace === false ||
-      (explicitRequiresPlace == null &&
-        !rawPlaceName &&
-        !backendMission.place_id &&
-        backendMission.place_lat == null &&
-        backendMission.latitude == null));
+    inferFlexibleMission(
+      backendMission,
+      isAtHome,
+      rawPlaceName,
+    ) ||
+    (!isAtHome &&
+      explicitRequiresPlace == null &&
+      !rawPlaceName &&
+      !backendMission.place_id &&
+      backendMission.place_lat == null &&
+      backendMission.latitude == null);
 
   const placeLat =
     toFiniteNumber(placeOverride?.latitude) ??
@@ -1890,10 +2050,12 @@ function mapBackendMission(
 
   const placeName = isAtHome
     ? "내 방"
-    : rawPlaceName;
+    : isLocationFlexible
+      ? "어디서나 가능"
+      : rawPlaceName;
 
   const recommendationReason =
-    getConciseRecommendationReason(
+    normalizeRecommendationReason(
       !isGenericRecommendationReason(
         rawRecommendationReason,
       )
@@ -1921,25 +2083,39 @@ function mapBackendMission(
     time,
     dist: isAtHome
       ? "내 방"
-      : distance !== null
-        ? `${distance.toFixed(1)}km`
-        : "거리 정보 없음",
+      : isLocationFlexible
+        ? "어디서나 가능"
+        : distance !== null
+          ? `${distance.toFixed(1)}km`
+          : "거리 정보 없음",
     cost,
     cat: category,
     requiredItems: normalizeRequiredItems(
       backendMission,
     ),
     placeId:
-      placeOverride?.id ??
-      backendMission.place_id ??
-      undefined,
+      isAtHome || isLocationFlexible
+        ? undefined
+        : placeOverride?.id ??
+          backendMission.place_id ??
+          undefined,
     placeLat:
-      isAtHome ? undefined : placeLat ?? undefined,
+      isAtHome || isLocationFlexible
+        ? undefined
+        : placeLat ?? undefined,
     placeLng:
-      isAtHome ? undefined : placeLng ?? undefined,
+      isAtHome || isLocationFlexible
+        ? undefined
+        : placeLng ?? undefined,
     placeName,
-    placeAddress,
-    districtName,
+    placeAddress:
+      isAtHome || isLocationFlexible
+        ? undefined
+        : placeAddress,
+    districtName:
+      isAtHome || isLocationFlexible
+        ? undefined
+        : districtName,
     isAtHome,
     isLocationFlexible,
     isFallback: !isUuid(id),
@@ -1998,6 +2174,10 @@ function missionMatchesFilters(
     ) {
       return false;
     }
+  }
+
+  if (mission.isLocationFlexible) {
+    return true;
   }
 
   if (center && !mission.isAtHome) {
@@ -2140,6 +2320,20 @@ function applyLocationPresentation(
       placeAddress: undefined,
       districtName: undefined,
       isLocationFlexible: false,
+    };
+  }
+
+  if (mission.isLocationFlexible) {
+    return {
+      ...mission,
+      placeName: "어디서나 가능",
+      dist: "어디서나 가능",
+      placeId: undefined,
+      placeLat: undefined,
+      placeLng: undefined,
+      placeAddress: undefined,
+      districtName: undefined,
+      isLocationFlexible: true,
     };
   }
 
@@ -2636,6 +2830,122 @@ function LocationPickerMap({
   );
 }
 
+
+function RecordLocationPickerMap({
+  center,
+  pickedLocation,
+  onSelect,
+}: {
+  center: Coordinate;
+  pickedLocation: Coordinate | null;
+  onSelect: (coordinate: Coordinate) => void;
+}) {
+  const html = useMemo(
+    () => `
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <style>
+    html, body, #map { width: 100%; height: 100%; margin: 0; padding: 0; }
+    #loading {
+      position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+      background: #f7f8fa; color: #5c5f6a; font-family: sans-serif; font-size: 13px; z-index: 10;
+    }
+  </style>
+</head>
+<body>
+  <div id="loading">지도를 불러오는 중이에요</div>
+  <div id="map"></div>
+  <script src="https://dapi.kakao.com/v2/maps/sdk.js?appkey=${KAKAO_JS_KEY}&autoload=false"></script>
+  <script>
+    kakao.maps.load(function () {
+      document.getElementById('loading').style.display = 'none';
+
+      const initial = new kakao.maps.LatLng(${center.lat}, ${center.lng});
+      const map = new kakao.maps.Map(document.getElementById('map'), {
+        center: initial,
+        level: 4,
+      });
+
+      let marker = null;
+      const initialPicked = ${JSON.stringify(pickedLocation)};
+
+      const makeMarker = (latLng) => {
+        if (!marker) {
+          marker = new kakao.maps.Marker({
+            map,
+            position: latLng,
+            draggable: true,
+          });
+
+          kakao.maps.event.addListener(marker, 'dragend', function () {
+            const position = marker.getPosition();
+            window.ReactNativeWebView.postMessage(JSON.stringify({
+              type: 'recordLocation',
+              lat: position.getLat(),
+              lng: position.getLng(),
+            }));
+          });
+        } else {
+          marker.setPosition(latLng);
+        }
+
+        map.panTo(latLng);
+      };
+
+      if (initialPicked && Number.isFinite(initialPicked.lat) && Number.isFinite(initialPicked.lng)) {
+        makeMarker(new kakao.maps.LatLng(initialPicked.lat, initialPicked.lng));
+      }
+
+      kakao.maps.event.addListener(map, 'click', function (mouseEvent) {
+        makeMarker(mouseEvent.latLng);
+        window.ReactNativeWebView.postMessage(JSON.stringify({
+          type: 'recordLocation',
+          lat: mouseEvent.latLng.getLat(),
+          lng: mouseEvent.latLng.getLng(),
+        }));
+      });
+    });
+  </script>
+</body>
+</html>`,
+    [center.lat, center.lng, pickedLocation?.lat, pickedLocation?.lng],
+  );
+
+  return (
+    <WebView
+      key={`${center.lat.toFixed(5)}-${center.lng.toFixed(5)}-${pickedLocation?.lat?.toFixed(5) ?? "none"}-${pickedLocation?.lng?.toFixed(5) ?? "none"}`}
+      originWhitelist={["*"]}
+      source={{ html }}
+      javaScriptEnabled
+      domStorageEnabled
+      mixedContentMode="always"
+      onMessage={(event) => {
+        try {
+          const message = JSON.parse(event.nativeEvent.data) as {
+            type?: string;
+            lat?: number;
+            lng?: number;
+          };
+
+          if (
+            message.type === "recordLocation" &&
+            isFiniteNumber(message.lat) &&
+            isFiniteNumber(message.lng)
+          ) {
+            onSelect({ lat: message.lat, lng: message.lng });
+          }
+        } catch {
+          // 지도 내부의 다른 메시지는 무시합니다.
+        }
+      }}
+      style={styles.recordLocationPickerMap}
+    />
+  );
+}
+
 export default function HomeScreen() {
   const [missions, setMissions] =
     useState<HomeMission[]>([]);
@@ -2662,6 +2972,8 @@ export default function HomeScreen() {
     useState<SheetSection>("recommended");
   const [selectedItemKey, setSelectedItemKey] =
     useState<string | null>(null);
+  const [homeMissionPanelOpen, setHomeMissionPanelOpen] =
+    useState(false);
 
   const [appliedFilters, setAppliedFilters] =
     useState<RecommendationFilters>(DEFAULT_FILTERS);
@@ -2707,6 +3019,8 @@ export default function HomeScreen() {
   const [recordPhotos, setRecordPhotos] = useState<
     ImagePicker.ImagePickerAsset[]
   >([]);
+  const [recordLocation, setRecordLocation] =
+    useState<Coordinate | null>(null);
   const [recordSaving, setRecordSaving] =
     useState(false);
   const [recordDetail, setRecordDetail] =
@@ -2727,15 +3041,14 @@ export default function HomeScreen() {
   const dragStartPosition = useRef(
     COLLAPSED_POSITION,
   );
-  const selectedCardAnimation = useRef(
-    new Animated.Value(0),
-  ).current;
-  const selectedCardClosing = useRef(false);
   const sectionIndicator = useRef(
     new Animated.Value(SECTION_INDEX.recommended),
   ).current;
   const sectionContentAnimation = useRef(
     new Animated.Value(1),
+  ).current;
+  const homeCardAnimation = useRef(
+    new Animated.Value(0),
   ).current;
 
   useEffect(() => {
@@ -2862,14 +3175,14 @@ export default function HomeScreen() {
         if (filters.categories.length === 0 && interests.length === 0) {
           const {
             data: { user },
-          } = await supabase.auth.getUser();
+          } = await retrySupabaseResultOnJwt(() => supabase.auth.getUser());
 
           if (user) {
-            const { data: profile } = await supabase
+            const { data: profile } = await retrySupabaseResultOnJwt(() => supabase
               .from("profiles")
               .select("interests")
               .eq("id", user.id)
-              .maybeSingle();
+              .maybeSingle());
 
             const rawInterests = normalizeStringArray(
               profile?.interests,
@@ -2921,9 +3234,15 @@ export default function HomeScreen() {
             timeOption?.backendValue ?? "상관없음",
           cost:
             costOption?.backendValue ?? "무료/유료",
-          locationType: "실제 장소 또는 내 방",
-          actualPlaceRequired: true,
-          flexiblePlaceAllowed: false,
+          locationType: "실제 장소, 내 방 또는 어디서나 가능",
+          actualPlaceRequired: false,
+          flexiblePlaceAllowed: true,
+          allowedLocationTypes: [
+            "fixed",
+            "home",
+            "flexible",
+          ],
+          flexibleMissionLimit: 3,
           availablePlaces: availablePlaces.slice(0, 100).map((place) => ({
             id: place.id,
             name: place.name,
@@ -2998,9 +3317,9 @@ export default function HomeScreen() {
           includeRecommendationReason: true,
           recommendationReasonRequired: true,
           recommendationReasonInstruction:
-            "각 미션마다 가장 핵심적인 추천 이유 하나만 recommendation_reason 필드에 15~30자 길이의 짧은 한국어 한 문장으로 작성해주세요. 미션마다 서로 다른 이유를 쓰고 같은 문장을 반복하지 마세요.",
+            "각 미션마다 가장 핵심적인 추천 이유 하나만 recommendation_reason 필드에 가능하면 한 줄 분량의 짧은 한국어 한 문장으로 작성해주세요. 반드시 '~해요.', '~좋아요.', '~추천드려요.'처럼 높임말 완결형으로 끝내고, 말줄임표나 미완성 표현을 쓰지 마세요. 미션마다 서로 다른 이유를 쓰고 같은 문장을 반복하지 마세요.",
           generationInstruction:
-            `제목, 설명, 미션 안내, 추천 이유를 모두 자연스러운 한국어로 작성하세요. 카테고리를 상관없음으로 선택했을 때는 사용자의 초기 관심 카테고리를 약 60% 비중으로 우선하되, 관심사 밖의 카테고리도 반드시 섞으세요. 가능한 경우 최소 4개 이상의 서로 다른 카테고리를 포함하고 같은 카테고리는 최대 2개까지만 포함하세요. 장소 정보는 availablePlaces에 포함된 실제 장소의 이름과 ID를 사용하거나, 집에서 하는 미션이면 정확히 '내 방'만 사용하세요. '자유 장소', '지역 내 어디서나', '현재 위치 주변의 편한 장소' 같은 가상의 장소 표현은 절대 만들지 마세요. 집에서 하는 미션은 전체 10개 중 최대 2개만 포함하세요. 반드시 데이터베이스에 저장된 UUID 미션만 반환하세요. ${
+            `제목, 설명, 미션 안내, 추천 이유를 모두 자연스러운 한국어로 작성하세요. 추천 이유는 가능하면 한 줄 분량으로 짧게 쓰되 반드시 높임말 완결형으로 끝내고 말줄임표를 사용하지 마세요. 카테고리를 상관없음으로 선택했을 때는 사용자의 초기 관심 카테고리를 약 60% 비중으로 우선하되, 관심사 밖의 카테고리도 반드시 섞으세요. 가능한 경우 최소 4개 이상의 서로 다른 카테고리를 포함하고 같은 카테고리는 최대 2개까지만 포함하세요. 장소 유형은 세 가지입니다. 특정 장소 미션은 availablePlaces에 포함된 실제 장소의 이름과 ID를 사용하세요. 집에서 하는 미션은 place_name을 정확히 '내 방'으로 쓰고 requires_place를 false로 설정하세요. 특정 장소가 필요 없는 미션은 place_name을 정확히 '어디서나 가능'으로 쓰고 requires_place를 false로 설정하세요. '자유 장소', '지역 내 어디서나', '현재 위치 주변의 편한 장소' 같은 다른 표현은 사용하지 마세요. 집 미션은 전체 10개 중 최대 2개, 어디서나 가능 미션은 최대 3개만 포함하세요. 반드시 데이터베이스에 저장된 UUID 미션만 반환하세요. ${
               avoidCurrent
                 ? "직전 추천에 나온 미션과 장소는 가능한 한 제외하고 새로운 조합을 반환하세요."
                 : ""
@@ -3020,12 +3339,12 @@ export default function HomeScreen() {
 
         try {
           const { data, error } =
-            await supabase.functions.invoke(
+            await retrySupabaseResultOnJwt(() => supabase.functions.invoke(
               "clever-task",
               {
                 body: requestBody,
               },
-            );
+            ));
 
           if (error) {
             throw error;
@@ -3055,9 +3374,11 @@ export default function HomeScreen() {
 
         try {
           const databaseMissions =
-            await getRecommendedMissions(
-              120,
-              completedCount,
+            await withJwtRetry(() =>
+              getRecommendedMissions(
+                120,
+                completedCount,
+              ),
             );
 
           databaseCandidates = databaseMissions
@@ -3091,7 +3412,7 @@ export default function HomeScreen() {
         );
 
         const filtered = placedCandidates.filter((mission) =>
-          hasActualPlace(mission) &&
+          hasUsableMissionLocation(mission) &&
           missionMatchesFilters(
             mission,
             filters,
@@ -3147,7 +3468,7 @@ export default function HomeScreen() {
       const {
         data: { user },
         error: userError,
-      } = await supabase.auth.getUser();
+      } = await retrySupabaseResultOnJwt(() => supabase.auth.getUser());
 
       if (userError) {
         throw userError;
@@ -3167,7 +3488,7 @@ export default function HomeScreen() {
       const {
         data: journeyData,
         error: journeyError,
-      } = await supabase
+      } = await retrySupabaseResultOnJwt(() => supabase
         .from("journeys")
         .select("id, start_date, end_date")
         .eq("user_id", user.id)
@@ -3176,7 +3497,7 @@ export default function HomeScreen() {
         .gte("end_date", todayKey)
         .order("created_at", { ascending: false })
         .limit(1)
-        .maybeSingle();
+        .maybeSingle());
 
       if (journeyError) {
         throw journeyError;
@@ -3202,7 +3523,7 @@ export default function HomeScreen() {
       const {
         data: attemptRows,
         error: attemptsError,
-      } = await supabase
+      } = await retrySupabaseResultOnJwt(() => supabase
         .from("mission_attempts")
         .select(
           "id, journey_id, mission_id, place_id, status, created_at",
@@ -3214,7 +3535,7 @@ export default function HomeScreen() {
           "started",
           "completed",
         ])
-        .order("created_at", { ascending: false });
+        .order("created_at", { ascending: false }));
 
       if (attemptsError) {
         throw attemptsError;
@@ -3250,10 +3571,10 @@ export default function HomeScreen() {
 
       if (placeIds.length > 0) {
         const { data: placeRows, error: placeError } =
-          await supabase
+          await retrySupabaseResultOnJwt(() => supabase
             .from("places")
             .select("id, name, latitude, longitude")
-            .in("id", placeIds);
+            .in("id", placeIds));
 
         if (placeError) {
           console.warn("장소 정보 조회 실패:", placeError);
@@ -3272,7 +3593,9 @@ export default function HomeScreen() {
       const missionPairs = await Promise.all(
         missionIds.map(async (missionId) => {
           try {
-            const mission = await getMissionById(missionId);
+            const mission = await withJwtRetry(() =>
+              getMissionById(missionId),
+            );
             const attemptWithPlace = attempts.find(
               (row) =>
                 String(row.mission_id) === missionId &&
@@ -3347,7 +3670,7 @@ export default function HomeScreen() {
 
       if (completedAttemptIds.length > 0) {
         const { data: recordRows, error: recordError } =
-          await supabase
+          await retrySupabaseResultOnJwt(() => supabase
             .from("records")
             .select(`
               id,
@@ -3356,6 +3679,8 @@ export default function HomeScreen() {
               emotion,
               visibility,
               recorded_at,
+              location_latitude,
+              location_longitude,
               record_photos (
                 storage_path,
                 sort_order,
@@ -3364,7 +3689,7 @@ export default function HomeScreen() {
             `)
             .eq("user_id", user.id)
             .in("mission_attempt_id", completedAttemptIds)
-            .order("recorded_at", { ascending: false });
+            .order("recorded_at", { ascending: false }));
 
         if (recordError) {
           throw recordError;
@@ -3401,9 +3726,9 @@ export default function HomeScreen() {
                 }
 
                 const { data, error } =
-                  await supabase.storage
+                  await retrySupabaseResultOnJwt(() => supabase.storage
                     .from("record-photos")
-                    .createSignedUrl(storagePath, 3600);
+                    .createSignedUrl(storagePath, 3600));
 
                 if (error) {
                   console.warn(
@@ -3429,6 +3754,8 @@ export default function HomeScreen() {
               | "nickname",
             recordedAt: String(record.recorded_at),
             photoUrls,
+            locationLat: toFiniteNumber(record.location_latitude),
+            locationLng: toFiniteNumber(record.location_longitude),
           });
         }
       }
@@ -3516,6 +3843,13 @@ export default function HomeScreen() {
       /(내 방|내 집|집에서|집 안|방에서|자택)/.test(
         `${sharedTitle} ${sharedDescription} ${sharedInstructions}`,
       );
+    const sharedIsLocationFlexible =
+      !sharedIsAtHome &&
+      (shared.isLocationFlexible === true ||
+        shared.requiresPlace === false ||
+        shared.requires_place === false ||
+        normalizeComparableText(shared.placeName) ===
+          "어디서나가능");
 
     const missionToAdd: HomeMission = {
       id: String(shared.id),
@@ -3529,7 +3863,9 @@ export default function HomeScreen() {
             category: sharedCategory,
             placeName: sharedIsAtHome
               ? "내 방"
-              : shared.placeName,
+              : sharedIsLocationFlexible
+                ? "어디서나 가능"
+                : shared.placeName,
             time: String(shared.time ?? "시간 자유"),
             cost:
               shared.cost === "무료" ||
@@ -3546,7 +3882,9 @@ export default function HomeScreen() {
       time: String(shared.time ?? "시간 자유"),
       dist: sharedIsAtHome
         ? "내 방"
-        : String(shared.dist ?? "거리 정보 없음"),
+        : sharedIsLocationFlexible
+          ? "어디서나 가능"
+          : String(shared.dist ?? "거리 정보 없음"),
       cost:
         shared.cost === "무료" ||
         shared.cost === "유료" ||
@@ -3559,17 +3897,25 @@ export default function HomeScreen() {
       )
         ? shared.requiredItems
         : [],
-      placeId: shared.placeId,
-      placeLat: sharedIsAtHome
-        ? undefined
-        : toFiniteNumber(shared.placeLat) ?? undefined,
-      placeLng: sharedIsAtHome
-        ? undefined
-        : toFiniteNumber(shared.placeLng) ?? undefined,
+      placeId:
+        sharedIsAtHome || sharedIsLocationFlexible
+          ? undefined
+          : shared.placeId,
+      placeLat:
+        sharedIsAtHome || sharedIsLocationFlexible
+          ? undefined
+          : toFiniteNumber(shared.placeLat) ?? undefined,
+      placeLng:
+        sharedIsAtHome || sharedIsLocationFlexible
+          ? undefined
+          : toFiniteNumber(shared.placeLng) ?? undefined,
       placeName: sharedIsAtHome
         ? "내 방"
-        : shared.placeName,
+        : sharedIsLocationFlexible
+          ? "어디서나 가능"
+          : shared.placeName,
       isAtHome: sharedIsAtHome,
+      isLocationFlexible: sharedIsLocationFlexible,
       isFallback: !isUuid(String(shared.id)),
     };
 
@@ -3588,15 +3934,13 @@ export default function HomeScreen() {
     setSelectedItemKey(
       `recommended:${missionToAdd.id}`,
     );
-    selectedCardAnimation.setValue(1);
-    moveSheet(0);
+    moveSheet(COLLAPSED_POSITION);
     clearPendingSharedMission();
   }, [
     clearPendingSharedMission,
     moveSheet,
     pendingSharedMission,
     sectionIndicator,
-    selectedCardAnimation,
   ]);
 
   const activeItems = useMemo<MissionListItem[]>(
@@ -3733,7 +4077,7 @@ export default function HomeScreen() {
       useNativeDriver: true,
     }).start(() => {
       setSelectedItemKey(null);
-      selectedCardAnimation.setValue(0);
+      setHomeMissionPanelOpen(false);
       setSheetSection(next);
       sectionContentAnimation.setValue(0);
 
@@ -3846,50 +4190,49 @@ export default function HomeScreen() {
 
   const selectListItem = (item: MissionListItem) => {
     if (selectedItemKey === item.key) {
-      moveSheet(0);
+      if (item.mission.isAtHome) {
+        setHomeMissionPanelOpen(true);
+      }
+      moveSheet(COLLAPSED_POSITION);
       return;
     }
 
     LayoutAnimation.configureNext(
       LayoutAnimation.Presets.easeInEaseOut,
     );
-    selectedCardClosing.current = false;
-    selectedCardAnimation.stopAnimation();
-    selectedCardAnimation.setValue(0);
-    setSelectedItemKey(item.key);
-    moveSheet(0);
 
-    requestAnimationFrame(() => {
-      Animated.spring(selectedCardAnimation, {
-        toValue: 1,
-        useNativeDriver: true,
-        damping: 20,
-        stiffness: 180,
-        mass: 0.85,
-        overshootClamping: true,
-      }).start();
-    });
+    if (item.mission.isAtHome) {
+      homeCardAnimation.stopAnimation();
+      homeCardAnimation.setValue(0);
+      setHomeMissionPanelOpen(true);
+    } else {
+      homeCardAnimation.setValue(0);
+      setHomeMissionPanelOpen(false);
+    }
+
+    setSelectedItemKey(item.key);
+    moveSheet(COLLAPSED_POSITION);
+  };
+
+  const openHomeMissionPanel = () => {
+    homeCardAnimation.stopAnimation();
+    homeCardAnimation.setValue(0);
+    setSelectedItemKey(null);
+    setHomeMissionPanelOpen(true);
+    moveSheet(COLLAPSED_POSITION);
   };
 
   const closeSelectedItem = () => {
-    if (!selectedItemKey || selectedCardClosing.current) {
+    if (!selectedItemKey && !homeMissionPanelOpen) {
       return;
     }
 
-    selectedCardClosing.current = true;
-    selectedCardAnimation.stopAnimation();
-
-    Animated.timing(selectedCardAnimation, {
-      toValue: 0,
-      duration: 180,
-      useNativeDriver: true,
-    }).start(() => {
-      LayoutAnimation.configureNext(
-        LayoutAnimation.Presets.easeInEaseOut,
-      );
-      setSelectedItemKey(null);
-      selectedCardClosing.current = false;
-    });
+    LayoutAnimation.configureNext(
+      LayoutAnimation.Presets.easeInEaseOut,
+    );
+    homeCardAnimation.setValue(0);
+    setHomeMissionPanelOpen(false);
+    setSelectedItemKey(null);
   };
 
   const handleMarkerPress = (markerId: string | number) => {
@@ -3900,6 +4243,31 @@ export default function HomeScreen() {
 
     if (item) {
       selectListItem(item);
+    }
+  };
+
+  const handleMarkerAction = (markerId: string | number) => {
+    const missionId = String(markerId);
+    const item = currentItems.find(
+      (candidate) => candidate.mission.id === missionId,
+    );
+
+    if (!item) {
+      return;
+    }
+
+    if (item.kind === "recommended") {
+      void handleStartMission(item.mission);
+      return;
+    }
+
+    if (item.kind === "active") {
+      openRecordModal(item.mission);
+      return;
+    }
+
+    if (item.record) {
+      setRecordDetail(item.record);
     }
   };
 
@@ -3959,6 +4327,7 @@ export default function HomeScreen() {
     );
     setConditionVisible(false);
     setSelectedItemKey(null);
+    setHomeMissionPanelOpen(false);
     changeSection("recommended");
 
     await fetchRecommendations({
@@ -3981,6 +4350,7 @@ export default function HomeScreen() {
 
   const refreshRecommendations = async () => {
     setSelectedItemKey(null);
+    setHomeMissionPanelOpen(false);
     await fetchRecommendations({
       filters: appliedFilters,
       center: recommendationCenter,
@@ -4023,7 +4393,7 @@ export default function HomeScreen() {
       const {
         data: { user },
         error: userError,
-      } = await supabase.auth.getUser();
+      } = await retrySupabaseResultOnJwt(() => supabase.auth.getUser());
 
       if (userError) {
         throw userError;
@@ -4038,7 +4408,7 @@ export default function HomeScreen() {
       const {
         data: existingAttempt,
         error: existingError,
-      } = await supabase
+      } = await retrySupabaseResultOnJwt(() => supabase
         .from("mission_attempts")
         .select(
           "id, journey_id, mission_id, place_id, created_at",
@@ -4049,7 +4419,7 @@ export default function HomeScreen() {
         .in("status", ["selected", "started"])
         .order("created_at", { ascending: false })
         .limit(1)
-        .maybeSingle();
+        .maybeSingle());
 
       if (existingError) {
         throw existingError;
@@ -4062,7 +4432,7 @@ export default function HomeScreen() {
         const {
           data: insertedAttempt,
           error: insertError,
-        } = await supabase
+        } = await retrySupabaseResultOnJwt(() => supabase
           .from("mission_attempts")
           .insert({
             user_id: user.id,
@@ -4075,7 +4445,7 @@ export default function HomeScreen() {
           .select(
             "id, journey_id, mission_id, place_id, created_at",
           )
-          .single();
+          .single());
 
         if (insertError) {
           throw insertError;
@@ -4111,6 +4481,7 @@ export default function HomeScreen() {
         [mission.id]: mission,
       }));
       setSelectedItemKey(null);
+      setHomeMissionPanelOpen(false);
       changeSection("active");
       moveSheet(0);
     } catch (error) {
@@ -4179,6 +4550,7 @@ export default function HomeScreen() {
     setRecordVisibility("private");
     setRecordDate(latestDate);
     setRecordPhotos([]);
+    setRecordLocation(null);
   };
 
   const closeRecordModal = (force = false) => {
@@ -4192,6 +4564,7 @@ export default function HomeScreen() {
     setRecordVisibility("private");
     setRecordDate(toDateKey(new Date()));
     setRecordPhotos([]);
+    setRecordLocation(null);
   };
 
   const addRecordPhotos = (
@@ -4341,13 +4714,13 @@ export default function HomeScreen() {
 
         const arrayBuffer = await response.arrayBuffer();
         const { error: uploadError } =
-          await supabase.storage
+          await retrySupabaseResultOnJwt(() => supabase.storage
             .from("record-photos")
             .upload(storagePath, arrayBuffer, {
               contentType,
               cacheControl: "3600",
               upsert: false,
-            });
+            }));
 
         if (uploadError) {
           throw uploadError;
@@ -4356,7 +4729,7 @@ export default function HomeScreen() {
         uploadedPaths.push(storagePath);
       }
 
-      const { error: rowsError } = await supabase
+      const { error: rowsError } = await retrySupabaseResultOnJwt(() => supabase
         .from("record_photos")
         .insert(
           uploadedPaths.map((storagePath, index) => ({
@@ -4365,16 +4738,16 @@ export default function HomeScreen() {
             sort_order: index,
             is_cover: index === 0,
           })),
-        );
+        ));
 
       if (rowsError) {
         throw rowsError;
       }
     } catch (error) {
       if (uploadedPaths.length > 0) {
-        await supabase.storage
+        await retrySupabaseResultOnJwt(() => supabase.storage
           .from("record-photos")
-          .remove(uploadedPaths);
+          .remove(uploadedPaths));
       }
       throw error;
     }
@@ -4422,12 +4795,20 @@ export default function HomeScreen() {
       return;
     }
 
+    if (recordMission.isLocationFlexible && !recordLocation) {
+      Alert.alert(
+        "수행 위치를 선택해주세요",
+        "지도에서 미션을 수행한 위치를 한 번 눌러주세요.",
+      );
+      return;
+    }
+
     try {
       setRecordSaving(true);
       const {
         data: { user },
         error: userError,
-      } = await supabase.auth.getUser();
+      } = await retrySupabaseResultOnJwt(() => supabase.auth.getUser());
 
       if (userError) {
         throw userError;
@@ -4439,7 +4820,7 @@ export default function HomeScreen() {
       const {
         data: createdRecordId,
         error: recordError,
-      } = await supabase.rpc(
+      } = await retrySupabaseResultOnJwt(() => supabase.rpc(
         "complete_mission_with_record_on_date",
         {
           p_mission_attempt_id: attempt.id,
@@ -4448,8 +4829,16 @@ export default function HomeScreen() {
           p_visibility: recordVisibility,
           p_place_id: attempt.placeId,
           p_recorded_at: recordDate,
+          p_location_latitude:
+            recordMission.isLocationFlexible
+              ? recordLocation?.lat ?? null
+              : null,
+          p_location_longitude:
+            recordMission.isLocationFlexible
+              ? recordLocation?.lng ?? null
+              : null,
         },
-      );
+      ));
 
       if (recordError) {
         throw recordError;
@@ -4498,182 +4887,25 @@ export default function HomeScreen() {
     }
   };
 
-  const renderExpandedItem = (item: MissionListItem) => {
-    const { mission } = item;
-
-    return (
-      <Animated.View
-        style={[
-          styles.selectedCard,
-          {
-            opacity: selectedCardAnimation,
-            transform: [
-              {
-                scale: selectedCardAnimation.interpolate({
-                  inputRange: [0, 1],
-                  outputRange: [0.94, 1],
-                }),
-              },
-              {
-                translateY:
-                  selectedCardAnimation.interpolate({
-                    inputRange: [0, 1],
-                    outputRange: [12, 0],
-                  }),
-              },
-            ],
-          },
-        ]}
-      >
-        <View style={styles.selectedCardHeader}>
-          <View style={styles.categoryTag}>
-            <Text style={styles.categoryTagText}>
-              {mission.cat}
-            </Text>
-          </View>
-
-          <Pressable
-            onPress={closeSelectedItem}
-            hitSlop={10}
-            style={({ pressed }) => [
-              styles.closeDetailButton,
-              pressed && styles.pressed,
-            ]}
-          >
-            <Text style={styles.closeDetailButtonText}>
-              닫기
-            </Text>
-          </Pressable>
-        </View>
-
-        <Text style={styles.selectedTitle}>
-          {mission.title}
-        </Text>
-        <View style={styles.instructionBox}>
-          <Text style={styles.instructionLabel}>
-            미션 안내
-          </Text>
-          <Text style={styles.instructionText}>
-            {mission.instructions}
-          </Text>
-        </View>
-
-        {mission.placeName ? (
-          <View style={styles.placeRow}>
-            <Text style={styles.placeIcon}>📍</Text>
-            <Text style={styles.placeText}>
-              {mission.placeName}
-            </Text>
-          </View>
-        ) : null}
-
-        <View style={styles.metricRow}>
-          <View style={styles.metricItem}>
-            <Text style={styles.metricLabel}>
-              예상 시간
-            </Text>
-            <Text style={styles.metricValue}>
-              {mission.time}
-            </Text>
-          </View>
-          <View style={styles.metricItem}>
-            <Text style={styles.metricLabel}>
-              준비물
-            </Text>
-            <Text
-              numberOfLines={2}
-              style={styles.metricValue}
-            >
-              {getPreparationText(mission)}
-            </Text>
-          </View>
-          <View style={styles.metricItem}>
-            <Text style={styles.metricLabel}>비용</Text>
-            <Text style={styles.metricValue}>
-              {mission.cost}
-            </Text>
-          </View>
-        </View>
-
-        <View style={styles.recommendationBox}>
-          <Text style={styles.recommendationLabel}>
-            추천 이유
-          </Text>
-          <Text
-            numberOfLines={1}
-            ellipsizeMode="tail"
-            style={styles.recommendationText}
-          >
-            {getConciseRecommendationReason(
-              mission.recommendationReason,
-            )}
-          </Text>
-        </View>
-
-        {item.kind === "recommended" ? (
-          <Pressable
-            onPress={() =>
-              void handleStartMission(mission)
-            }
-            disabled={startLoadingId === mission.id}
-            style={({ pressed }) => [
-              styles.startLargeButton,
-              pressed && styles.pressed,
-              startLoadingId === mission.id &&
-                styles.buttonDisabled,
-            ]}
-          >
-            {startLoadingId === mission.id ? (
-              <ActivityIndicator color={WH} />
-            ) : (
-              <Text style={styles.startLargeButtonText}>
-                미션 시작하기
-              </Text>
-            )}
-          </Pressable>
-        ) : item.kind === "active" ? (
-          <Pressable
-            onPress={() => openRecordModal(mission)}
-            style={({ pressed }) => [
-              styles.recordLargeButton,
-              pressed && styles.pressed,
-            ]}
-          >
-            <Text style={styles.recordLargeButtonText}>
-              기록하기
-            </Text>
-          </Pressable>
-        ) : (
-          <Pressable
-            onPress={() =>
-              item.record && setRecordDetail(item.record)
-            }
-            style={({ pressed }) => [
-              styles.viewRecordLargeButton,
-              pressed && styles.pressed,
-            ]}
-          >
-            <Text style={styles.viewRecordLargeButtonText}>
-              내가 쓴 기록 보기
-            </Text>
-          </Pressable>
-        )}
-      </Animated.View>
-    );
-  };
-
   const renderCompactItem = (item: MissionListItem) => {
     const { mission } = item;
+    const isSelected = selectedItemKey === item.key;
 
     return (
       <Pressable
         style={({ pressed }) => [
           styles.compactCard,
+          isSelected && styles.compactCardSelected,
           pressed && styles.cardPressed,
         ]}
         onPress={() => selectListItem(item)}
       >
-        <View style={styles.compactThumb}>
+        <View
+          style={[
+            styles.compactThumb,
+            isSelected && styles.compactThumbSelected,
+          ]}
+        >
           <Text style={styles.compactThumbEmoji}>
             {getCategoryEmoji(mission.cat)}
           </Text>
@@ -4717,11 +4949,17 @@ export default function HomeScreen() {
             }}
             style={({ pressed }) => [
               styles.selectButton,
+              isSelected && styles.selectButtonSelected,
               pressed && styles.pressed,
             ]}
           >
-            <Text style={styles.selectButtonText}>
-              선택
+            <Text
+              style={[
+                styles.selectButtonText,
+                isSelected && styles.selectButtonTextSelected,
+              ]}
+            >
+              {isSelected ? "선택됨" : "선택"}
             </Text>
           </Pressable>
         ) : item.kind === "active" ? (
@@ -4764,20 +5002,73 @@ export default function HomeScreen() {
   const selectedItem = currentItems.find(
     (item) => item.key === selectedItemKey,
   );
-  const mapCenter =
-    selectedItem &&
-    isFiniteNumber(selectedItem.mission.placeLat) &&
-    isFiniteNumber(selectedItem.mission.placeLng)
-      ? {
-          lat: selectedItem.mission.placeLat,
-          lng: selectedItem.mission.placeLng,
-        }
-      : recommendationCenter ??
-        userLocation ??
-        DEFAULT_CENTER;
-  const mapMissions = currentItems.map(
-    (item) => item.mission,
+  const displayedItems = selectedItem
+    ? [
+        selectedItem,
+        ...currentItems.filter((item) => item.key !== selectedItem.key),
+      ]
+    : currentItems;
+  const homeItems = currentItems.filter(
+    (item) => item.mission.isAtHome === true,
   );
+  const selectedHomeItem =
+    selectedItem?.mission.isAtHome === true
+      ? selectedItem
+      : null;
+  const homeDockItem = selectedHomeItem ?? homeItems[0] ?? null;
+  const orderedHomeItems = selectedHomeItem
+    ? [
+        selectedHomeItem,
+        ...homeItems.filter(
+          (item) => item.key !== selectedHomeItem.key,
+        ),
+      ]
+    : homeItems;
+
+  useEffect(() => {
+    if (!homeMissionPanelOpen) {
+      homeCardAnimation.setValue(0);
+      return;
+    }
+
+    homeCardAnimation.stopAnimation();
+    homeCardAnimation.setValue(0);
+    Animated.timing(homeCardAnimation, {
+      toValue: 1,
+      duration: 180,
+      useNativeDriver: true,
+    }).start();
+  }, [homeCardAnimation, homeMissionPanelOpen]);
+
+  useEffect(() => {
+    if (homeItems.length === 0 && homeMissionPanelOpen) {
+      setHomeMissionPanelOpen(false);
+    }
+  }, [homeItems.length, homeMissionPanelOpen]);
+
+  const flexibleMissionCoordinate =
+    recommendationLocationMode === "district" &&
+    recommendationDistrict
+      ? BUSAN_DISTRICT_CENTERS[recommendationDistrict]
+      : recommendationCenter ?? userLocation ?? DEFAULT_CENTER;
+
+  const selectedMissionCoordinate =
+    selectedItem?.mission.isLocationFlexible
+      ? flexibleMissionCoordinate
+      : selectedItem &&
+          isFiniteNumber(selectedItem.mission.placeLat) &&
+          isFiniteNumber(selectedItem.mission.placeLng)
+        ? {
+            lat: selectedItem.mission.placeLat,
+            lng: selectedItem.mission.placeLng,
+          }
+        : null;
+
+  const mapCenter =
+    selectedMissionCoordinate ??
+    recommendationCenter ??
+    userLocation ??
+    DEFAULT_CENTER;
   const recordDetailMission = recordDetail
     ? attemptMissions[recordDetail.missionId] ??
       missions.find(
@@ -4790,26 +5081,239 @@ export default function HomeScreen() {
   return (
     <View style={styles.container}>
       <KakaoMapView
-        key={`home-map-${mapCenter.lat.toFixed(5)}-${mapCenter.lng.toFixed(5)}-${selectedItemKey ?? "none"}`}
         latitude={mapCenter.lat}
         longitude={mapCenter.lng}
         userLocation={userLocation}
+        selectedMarkerId={
+          selectedItem && selectedMissionCoordinate
+            ? selectedItem.mission.id
+            : null
+        }
+        focusOffsetY={0}
         style={styles.mapPlaceholder}
-        markers={mapMissions
+        markers={currentItems
           .filter(
-            (mission) =>
-              isFiniteNumber(mission.placeLat) &&
-              isFiniteNumber(mission.placeLng),
+            (item) =>
+              (isFiniteNumber(item.mission.placeLat) &&
+                isFiniteNumber(item.mission.placeLng)) ||
+              (item.key === selectedItemKey &&
+                item.mission.isLocationFlexible === true),
           )
-          .map((mission) => ({
-            id: mission.id,
-            lat: mission.placeLat!,
-            lng: mission.placeLng!,
-            category: mission.cat,
-          }))}
+          .map((item) => {
+            const isFlexible =
+              item.mission.isLocationFlexible === true;
+            const markerCoordinate = isFlexible
+              ? flexibleMissionCoordinate
+              : {
+                  lat: item.mission.placeLat!,
+                  lng: item.mission.placeLng!,
+                };
+
+            return {
+            id: item.mission.id,
+            lat: markerCoordinate.lat,
+            lng: markerCoordinate.lng,
+            category: item.mission.cat,
+            title: item.mission.title,
+            description: item.mission.desc,
+            recommendationReason: normalizeRecommendationReason(
+              item.mission.recommendationReason,
+            ),
+            placeName: item.mission.placeName,
+            locationFlexible: isFlexible,
+            time: item.mission.time,
+            cost: item.mission.cost,
+            preparation: getPreparationText(item.mission),
+            actionLabel:
+              item.kind === "recommended"
+                ? startLoadingId === item.mission.id
+                  ? "시작 중..."
+                  : "미션 시작하기"
+                : item.kind === "active"
+                  ? "기록하기"
+                  : "내 기록 보기",
+            actionVariant:
+              item.kind === "recommended"
+                ? "primary"
+                : item.kind === "active"
+                  ? "pink"
+                  : "green",
+            actionDisabled:
+              item.kind === "recommended" &&
+              startLoadingId === item.mission.id,
+            };
+          })}
         onMarkerPress={handleMarkerPress}
+        onMarkerClose={closeSelectedItem}
+        onMarkerAction={handleMarkerAction}
       />
 
+      {homeDockItem ? (
+        homeMissionPanelOpen ? (
+          <Animated.View
+            style={[
+              styles.homeMissionCard,
+              {
+                opacity: homeCardAnimation,
+                transform: [
+                  {
+                    scale: homeCardAnimation.interpolate({
+                      inputRange: [0, 1],
+                      outputRange: [0.92, 1],
+                    }),
+                  },
+                  {
+                    translateY: homeCardAnimation.interpolate({
+                      inputRange: [0, 1],
+                      outputRange: [-6, 0],
+                    }),
+                  },
+                ],
+              },
+            ]}
+          >
+            <View style={styles.homeMissionPanelHeader}>
+              <View style={styles.homeMissionCardIcon}>
+                <Text style={styles.homeMissionCardIconText}>🏠</Text>
+              </View>
+              <View style={styles.homeMissionCardHeaderText}>
+                <Text style={styles.homeMissionPanelTitle}>
+                  내 방 미션
+                </Text>
+                <Text style={styles.homeMissionPanelCount}>
+                  {homeItems.length}개
+                </Text>
+              </View>
+              <Pressable
+                onPress={closeSelectedItem}
+                hitSlop={10}
+                style={styles.homeMissionCardClose}
+              >
+                <Text style={styles.homeMissionCardCloseText}>×</Text>
+              </Pressable>
+            </View>
+
+            <ScrollView
+              showsVerticalScrollIndicator={false}
+              contentContainerStyle={styles.homeMissionListContent}
+            >
+              {orderedHomeItems.map((homeItem, index) => (
+                <View
+                  key={homeItem.key}
+                  style={[
+                    styles.homeMissionEntry,
+                    index > 0 && styles.homeMissionEntrySeparated,
+                  ]}
+                >
+                  <View style={styles.homeMissionEntryTopRow}>
+                    <Text style={styles.homeMissionCardCategory}>
+                      {homeItem.mission.cat}
+                    </Text>
+                    <Text style={styles.homeMissionEntryIndex}>
+                      {index + 1} / {orderedHomeItems.length}
+                    </Text>
+                  </View>
+
+                  <Text style={styles.homeMissionCardTitle}>
+                    {homeItem.mission.title}
+                  </Text>
+
+                  {homeItem.mission.desc ? (
+                    <Text style={styles.homeMissionCardDescription}>
+                      {homeItem.mission.desc}
+                    </Text>
+                  ) : null}
+
+                  <View style={styles.homeMissionMetrics}>
+                    <View style={styles.homeMissionMetric}>
+                      <Text style={styles.homeMissionMetricLabel}>
+                        예상 시간
+                      </Text>
+                      <Text style={styles.homeMissionMetricValue}>
+                        {homeItem.mission.time}
+                      </Text>
+                    </View>
+                    <View style={styles.homeMissionMetric}>
+                      <Text style={styles.homeMissionMetricLabel}>
+                        준비물
+                      </Text>
+                      <Text style={styles.homeMissionMetricValue}>
+                        {getPreparationText(homeItem.mission)}
+                      </Text>
+                    </View>
+                    <View style={styles.homeMissionMetric}>
+                      <Text style={styles.homeMissionMetricLabel}>
+                        비용
+                      </Text>
+                      <Text style={styles.homeMissionMetricValue}>
+                        {homeItem.mission.cost}
+                      </Text>
+                    </View>
+                  </View>
+
+                  <View style={styles.homeMissionReasonBox}>
+                    <Text style={styles.homeMissionReasonLabel}>
+                      추천 이유
+                    </Text>
+                    <Text style={styles.homeMissionReasonText}>
+                      {normalizeRecommendationReason(
+                        homeItem.mission.recommendationReason,
+                      )}
+                    </Text>
+                  </View>
+
+                  <Pressable
+                    onPress={() =>
+                      handleMarkerAction(homeItem.mission.id)
+                    }
+                    disabled={
+                      homeItem.kind === "recommended" &&
+                      startLoadingId === homeItem.mission.id
+                    }
+                    style={({ pressed }) => [
+                      styles.homeMissionAction,
+                      homeItem.kind === "active" &&
+                        styles.homeMissionActionPink,
+                      homeItem.kind === "record" &&
+                        styles.homeMissionActionGreen,
+                      pressed && styles.pressed,
+                    ]}
+                  >
+                    {homeItem.kind === "recommended" &&
+                    startLoadingId === homeItem.mission.id ? (
+                      <ActivityIndicator color={WH} />
+                    ) : (
+                      <Text style={styles.homeMissionActionText}>
+                        {homeItem.kind === "recommended"
+                          ? "미션 시작하기"
+                          : homeItem.kind === "active"
+                            ? "기록하기"
+                            : "내 기록 보기"}
+                      </Text>
+                    )}
+                  </Pressable>
+                </View>
+              ))}
+            </ScrollView>
+          </Animated.View>
+        ) : (
+          <Pressable
+            onPress={openHomeMissionPanel}
+            style={({ pressed }) => [
+              styles.homeMissionDock,
+              pressed && styles.pressed,
+            ]}
+          >
+            <Text style={styles.homeMissionDockEmoji}>🏠</Text>
+            <View style={styles.homeMissionDockTextWrap}>
+              <Text style={styles.homeMissionDockTitle}>내 방 미션</Text>
+              <Text style={styles.homeMissionDockCount}>
+                {homeItems.length}개
+              </Text>
+            </View>
+          </Pressable>
+        )
+      ) : null}
 
       <Animated.View
         style={[
@@ -4973,12 +5477,10 @@ export default function HomeScreen() {
                 styles.missionScrollContent
               }
             >
-              {currentItems.length > 0 ? (
-                currentItems.map((item) => (
+              {displayedItems.length > 0 ? (
+                displayedItems.map((item) => (
                   <View key={item.key}>
-                    {selectedItemKey === item.key
-                      ? renderExpandedItem(item)
-                      : renderCompactItem(item)}
+                    {renderCompactItem(item)}
                   </View>
                 ))
               ) : (
@@ -5490,13 +5992,69 @@ export default function HomeScreen() {
                 </Pressable>
               </View>
 
-              {recordMission?.placeName ? (
+              {recordMission?.isLocationFlexible ? (
+                <View style={styles.recordLocationSection}>
+                  <View style={styles.recordLocationHeader}>
+                    <View style={styles.recordLocationHeaderText}>
+                      <Text style={styles.recordFieldLabel}>
+                        미션 수행 위치
+                      </Text>
+                      <Text style={styles.recordLocationHelp}>
+                        지도의 원하는 곳을 누르면 그 위치가 기록에 저장돼요.
+                      </Text>
+                    </View>
+                    <Pressable
+                      onPress={() => {
+                        if (userLocation) {
+                          setRecordLocation(userLocation);
+                        } else {
+                          Alert.alert(
+                            "현재 위치를 확인할 수 없어요",
+                            "위치 권한을 허용한 뒤 다시 시도해주세요.",
+                          );
+                        }
+                      }}
+                      style={styles.recordCurrentLocationButton}
+                    >
+                      <Text style={styles.recordCurrentLocationButtonText}>
+                        현재 위치 찍기
+                      </Text>
+                    </Pressable>
+                  </View>
+
+                  <View style={styles.recordLocationMapWrapper}>
+                    <RecordLocationPickerMap
+                      center={
+                        recordLocation ??
+                        userLocation ??
+                        recommendationCenter ??
+                        DEFAULT_CENTER
+                      }
+                      pickedLocation={recordLocation}
+                      onSelect={setRecordLocation}
+                    />
+                  </View>
+
+                  <Text
+                    style={[
+                      styles.recordLocationStatus,
+                      recordLocation &&
+                        styles.recordLocationStatusSelected,
+                    ]}
+                  >
+                    {recordLocation
+                      ? `선택 완료 · ${recordLocation.lat.toFixed(5)}, ${recordLocation.lng.toFixed(5)}`
+                      : "아직 위치를 선택하지 않았어요."}
+                  </Text>
+                </View>
+              ) : recordMission?.placeName ? (
                 <View style={styles.recordPlaceBox}>
                   <Text style={styles.recordPlaceLabel}>
                     이 장소에서의 기록
                   </Text>
                   <Text style={styles.recordPlaceName}>
-                    📍 {recordMission.placeName}
+                    {recordMission.isAtHome ? "🏠" : "📍"}{" "}
+                    {recordMission.placeName}
                   </Text>
                 </View>
               ) : null}
@@ -5855,6 +6413,19 @@ export default function HomeScreen() {
                     </View>
                   </View>
 
+                  {recordDetail.locationLat !== null &&
+                  recordDetail.locationLng !== null ? (
+                    <View style={styles.recordDetailLocationBox}>
+                      <Text style={styles.recordDetailLocationTitle}>
+                        📍 지도에서 선택한 수행 위치
+                      </Text>
+                      <Text style={styles.recordDetailLocationCoordinate}>
+                        {recordDetail.locationLat.toFixed(5)}, {" "}
+                        {recordDetail.locationLng.toFixed(5)}
+                      </Text>
+                    </View>
+                  ) : null}
+
                   {recordDetail.photoUrls.length > 0 ? (
                     <ScrollView
                       horizontal
@@ -5896,6 +6467,249 @@ const styles = StyleSheet.create({
   mapPlaceholder: {
     ...StyleSheet.absoluteFillObject,
     backgroundColor: "#DFE8F0",
+  },
+  homeMissionDock: {
+    position: "absolute",
+    top: 58,
+    right: 14,
+    minHeight: 48,
+    paddingHorizontal: 12,
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: WH,
+    borderWidth: 1,
+    borderColor: "rgba(61,90,254,0.16)",
+    borderRadius: 16,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.15,
+    shadowRadius: 10,
+    elevation: 8,
+    zIndex: 40,
+  },
+  homeMissionDockEmoji: {
+    marginRight: 8,
+    fontSize: 23,
+  },
+  homeMissionDockTextWrap: {
+    alignItems: "flex-start",
+  },
+  homeMissionDockTitle: {
+    fontSize: 11,
+    fontWeight: "800",
+    color: T0,
+  },
+  homeMissionDockCount: {
+    marginTop: 2,
+    fontSize: 10,
+    fontWeight: "700",
+    color: BL,
+  },
+  homeMissionCard: {
+    position: "absolute",
+    top: 54,
+    left: (SCREEN_WIDTH - Math.min(330, SCREEN_WIDTH - 28)) / 2,
+    width: Math.min(330, SCREEN_WIDTH - 28),
+    maxHeight: Math.max(320, SCREEN_HEIGHT - COLLAPSED_VISIBLE_HEIGHT - 76),
+    overflow: "hidden",
+    backgroundColor: WH,
+    borderWidth: 1,
+    borderColor: "rgba(61,90,254,0.20)",
+    borderRadius: 20,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 12 },
+    shadowOpacity: 0.24,
+    shadowRadius: 22,
+    elevation: 18,
+    zIndex: 50,
+  },
+  homeMissionCardContent: {
+    padding: 15,
+  },
+  homeMissionPanelHeader: {
+    minHeight: 66,
+    paddingHorizontal: 15,
+    paddingVertical: 11,
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: WH,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: "rgba(27,31,42,0.10)",
+  },
+  homeMissionPanelTitle: {
+    fontSize: 15,
+    fontWeight: "800",
+    color: T0,
+  },
+  homeMissionPanelCount: {
+    marginTop: 3,
+    fontSize: 10,
+    fontWeight: "700",
+    color: BL,
+  },
+  homeMissionListContent: {
+    paddingHorizontal: 15,
+    paddingBottom: 16,
+  },
+  homeMissionEntry: {
+    paddingTop: 14,
+  },
+  homeMissionEntrySeparated: {
+    marginTop: 16,
+    paddingTop: 18,
+    borderTopWidth: 1,
+    borderTopColor: "rgba(27,31,42,0.10)",
+  },
+  homeMissionEntryTopRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  homeMissionEntryIndex: {
+    fontSize: 10,
+    fontWeight: "700",
+    color: T2,
+  },
+  homeMissionCardHeader: {
+    minHeight: 44,
+    flexDirection: "row",
+    alignItems: "center",
+  },
+  homeMissionCardIcon: {
+    width: 42,
+    height: 42,
+    marginRight: 9,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: BLL,
+    borderRadius: 14,
+  },
+  homeMissionCardIconText: {
+    fontSize: 22,
+  },
+  homeMissionCardHeaderText: {
+    flex: 1,
+  },
+  homeMissionCardCategory: {
+    alignSelf: "flex-start",
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    overflow: "hidden",
+    backgroundColor: BLL,
+    borderRadius: 7,
+    fontSize: 10,
+    fontWeight: "800",
+    color: BL,
+  },
+  homeMissionCardLocation: {
+    marginTop: 4,
+    fontSize: 10,
+    color: T2,
+  },
+  homeMissionCardClose: {
+    width: 32,
+    height: 32,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: BG,
+    borderRadius: 16,
+  },
+  homeMissionCardCloseText: {
+    fontSize: 18,
+    color: T1,
+  },
+  homeMissionCardTitle: {
+    marginTop: 11,
+    fontSize: 18,
+    lineHeight: 25,
+    fontWeight: "800",
+    color: T0,
+  },
+  homeMissionCardDescription: {
+    marginTop: 7,
+    fontSize: 12,
+    lineHeight: 19,
+    color: T1,
+  },
+  homeMissionInstructionBox: {
+    marginTop: 11,
+    padding: 11,
+    backgroundColor: BG,
+    borderRadius: 11,
+  },
+  homeMissionInstructionLabel: {
+    marginBottom: 4,
+    fontSize: 10,
+    fontWeight: "800",
+    color: T2,
+  },
+  homeMissionInstructionText: {
+    fontSize: 12,
+    lineHeight: 19,
+    color: T1,
+  },
+  homeMissionMetrics: {
+    marginTop: 10,
+    flexDirection: "row",
+  },
+  homeMissionMetric: {
+    flex: 1,
+    minWidth: 0,
+    marginRight: 6,
+    padding: 8,
+    backgroundColor: "#FAFAFA",
+    borderRadius: 9,
+  },
+  homeMissionMetricLabel: {
+    fontSize: 9,
+    color: T2,
+  },
+  homeMissionMetricValue: {
+    marginTop: 3,
+    fontSize: 10,
+    lineHeight: 15,
+    fontWeight: "700",
+    color: T0,
+  },
+  homeMissionReasonBox: {
+    marginTop: 10,
+    padding: 10,
+    flexDirection: "row",
+    alignItems: "flex-start",
+    backgroundColor: "#F4F6F8",
+    borderRadius: 10,
+  },
+  homeMissionReasonLabel: {
+    marginRight: 7,
+    fontSize: 10,
+    lineHeight: 16,
+    fontWeight: "800",
+    color: BL,
+  },
+  homeMissionReasonText: {
+    flex: 1,
+    fontSize: 10,
+    lineHeight: 16,
+    color: T1,
+  },
+  homeMissionAction: {
+    minHeight: 44,
+    marginTop: 11,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: BL,
+    borderRadius: 12,
+  },
+  homeMissionActionPink: {
+    backgroundColor: PINK,
+  },
+  homeMissionActionGreen: {
+    backgroundColor: SUCCESS,
+  },
+  homeMissionActionText: {
+    fontSize: 13,
+    fontWeight: "800",
+    color: WH,
   },
   mapConditionButton: {
     position: "absolute",
@@ -6159,12 +6973,15 @@ const styles = StyleSheet.create({
   },
   recommendationBox: {
     flexDirection: "row",
-    alignItems: "center",
+    alignItems: "flex-start",
     marginBottom: 16,
     paddingHorizontal: 13,
     paddingVertical: 11,
     backgroundColor: "#F4F6F8",
     borderRadius: 12,
+  },
+  recommendationBoxPressed: {
+    opacity: 0.78,
   },
   recommendationLabel: {
     marginRight: 7,
@@ -6228,6 +7045,10 @@ const styles = StyleSheet.create({
     borderColor: "rgba(0,0,0,0.06)",
     borderRadius: 15,
   },
+  compactCardSelected: {
+    backgroundColor: "#F8F9FF",
+    borderColor: "rgba(61,90,254,0.48)",
+  },
   compactThumb: {
     width: 58,
     height: 58,
@@ -6236,6 +7057,9 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     backgroundColor: BLL,
     borderRadius: 11,
+  },
+  compactThumbSelected: {
+    backgroundColor: "#E0E7FF",
   },
   compactThumbEmoji: {
     fontSize: 25,
@@ -6305,6 +7129,12 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: "700",
     color: BL,
+  },
+  selectButtonSelected: {
+    backgroundColor: BL,
+  },
+  selectButtonTextSelected: {
+    color: WH,
   },
   recordButton: {
     minWidth: 68,
@@ -6826,6 +7656,56 @@ const styles = StyleSheet.create({
     lineHeight: 16,
     color: T2,
   },
+  recordLocationSection: {
+    marginBottom: 18,
+  },
+  recordLocationHeader: {
+    marginBottom: 10,
+    flexDirection: "row",
+    alignItems: "flex-start",
+  },
+  recordLocationHeaderText: {
+    flex: 1,
+    marginRight: 10,
+  },
+  recordLocationHelp: {
+    marginTop: -4,
+    fontSize: 10,
+    lineHeight: 16,
+    color: T2,
+  },
+  recordCurrentLocationButton: {
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    backgroundColor: BLL,
+    borderRadius: 9,
+  },
+  recordCurrentLocationButtonText: {
+    fontSize: 10,
+    fontWeight: "800",
+    color: BL,
+  },
+  recordLocationMapWrapper: {
+    height: 250,
+    overflow: "hidden",
+    backgroundColor: BG,
+    borderWidth: 1,
+    borderColor: T3,
+    borderRadius: 14,
+  },
+  recordLocationPickerMap: {
+    flex: 1,
+    backgroundColor: BG,
+  },
+  recordLocationStatus: {
+    marginTop: 8,
+    fontSize: 10,
+    color: T2,
+  },
+  recordLocationStatusSelected: {
+    fontWeight: "700",
+    color: BL,
+  },
   recordPlaceBox: {
     marginBottom: 18,
     padding: 13,
@@ -7086,6 +7966,22 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: "700",
     color: BL,
+  },
+  recordDetailLocationBox: {
+    marginBottom: 14,
+    padding: 12,
+    backgroundColor: BLL,
+    borderRadius: 11,
+  },
+  recordDetailLocationTitle: {
+    fontSize: 11,
+    fontWeight: "800",
+    color: BL,
+  },
+  recordDetailLocationCoordinate: {
+    marginTop: 4,
+    fontSize: 10,
+    color: T1,
   },
   recordDetailPhotoScroll: {
     marginBottom: 16,

@@ -1,4 +1,8 @@
 import { supabase } from "../lib/supabase";
+import {
+  isJwtIssuedAtFutureError,
+  refreshSupabaseSession,
+} from "../lib/supabase-auth-retry";
 
 export type Profile = {
   id: string;
@@ -17,15 +21,22 @@ export type UpdateProfileInput = {
   bio?: string | null;
   avatar_url?: string | null;
   activity_region?: string | null;
-  selected_title_id?: string | null;
   interests?: string[];
 };
 
-async function getCurrentUserId(): Promise<string> {
-  const {
+async function getCurrentUser() {
+  let {
     data: { user },
     error,
   } = await supabase.auth.getUser();
+
+  if (error && isJwtIssuedAtFutureError(error)) {
+    await refreshSupabaseSession();
+
+    const retryResult = await supabase.auth.getUser();
+    user = retryResult.data.user;
+    error = retryResult.error;
+  }
 
   if (error) {
     throw error;
@@ -35,58 +46,11 @@ async function getCurrentUserId(): Promise<string> {
     throw new Error("로그인이 필요합니다.");
   }
 
-  return user.id;
+  return user;
 }
 
-function normalizeNullableText(
-  value: string | null | undefined,
-): string | null | undefined {
-  if (value === undefined) {
-    return undefined;
-  }
-
-  if (value === null) {
-    return null;
-  }
-
-  const trimmed = value.trim();
-  return trimmed.length > 0 ? trimmed : null;
-}
-
-function normalizeInterests(
-  interests: string[] | null | undefined,
-): string[] {
-  if (!Array.isArray(interests)) {
-    return [];
-  }
-
-  return Array.from(
-    new Set(
-      interests
-        .map((interest) => interest.trim())
-        .filter((interest) => interest.length > 0),
-    ),
-  );
-}
-
-function normalizeProfile(
-  profile: Omit<Profile, "interests"> & {
-    interests: string[] | null;
-  },
-): Profile {
-  return {
-    ...profile,
-    interests: normalizeInterests(profile.interests),
-  };
-}
-
-/**
- * 현재 로그인한 사용자의 프로필을 조회한다.
- */
-export async function getMyProfile(): Promise<Profile> {
-  const userId = await getCurrentUserId();
-
-  const { data, error } = await supabase
+async function readProfile(userId: string) {
+  return supabase
     .from("profiles")
     .select(
       `
@@ -102,32 +66,31 @@ export async function getMyProfile(): Promise<Profile> {
       `,
     )
     .eq("id", userId)
-    .maybeSingle();
-
-  if (error) {
-    console.error("getMyProfile Error:", error);
-    throw error;
-  }
-
-  if (!data) {
-    throw new Error("프로필을 찾을 수 없습니다.");
-  }
-
-  return normalizeProfile(
-    data as Omit<Profile, "interests"> & {
-      interests: string[] | null;
-    },
-  );
+    .single();
 }
 
-/**
- * 현재 로그인한 사용자의 프로필을 수정한다.
- */
+/** 현재 사용자의 프로필 조회 */
+export async function getMyProfile(): Promise<Profile> {
+  let user = await getCurrentUser();
+  let result = await readProfile(user.id);
+
+  if (result.error && isJwtIssuedAtFutureError(result.error)) {
+    await refreshSupabaseSession();
+    user = await getCurrentUser();
+    result = await readProfile(user.id);
+  }
+
+  if (result.error) {
+    throw result.error;
+  }
+
+  return result.data as Profile;
+}
+
+/** 현재 사용자의 프로필 수정 */
 export async function updateMyProfile(
   input: UpdateProfileInput,
 ): Promise<Profile> {
-  const userId = await getCurrentUserId();
-
   if (
     input.nickname !== undefined &&
     !input.nickname.trim()
@@ -135,84 +98,47 @@ export async function updateMyProfile(
     throw new Error("닉네임을 입력해주세요.");
   }
 
-  const updateData: {
-    nickname?: string;
-    bio?: string | null;
-    avatar_url?: string | null;
-    activity_region?: string | null;
-    selected_title_id?: string | null;
-    interests?: string[];
-    updated_at: string;
-  } = {
-    updated_at: new Date().toISOString(),
+  const updateData: UpdateProfileInput = {
+    ...input,
   };
 
   if (input.nickname !== undefined) {
     updateData.nickname = input.nickname.trim();
   }
 
-  if (input.bio !== undefined) {
-    updateData.bio =
-      normalizeNullableText(input.bio) ?? null;
+  let user = await getCurrentUser();
+
+  const updateOnce = (userId: string) =>
+    supabase
+      .from("profiles")
+      .update(updateData)
+      .eq("id", userId)
+      .select(
+        `
+          id,
+          nickname,
+          bio,
+          avatar_url,
+          activity_region,
+          selected_title_id,
+          interests,
+          created_at,
+          updated_at
+        `,
+      )
+      .single();
+
+  let result = await updateOnce(user.id);
+
+  if (result.error && isJwtIssuedAtFutureError(result.error)) {
+    await refreshSupabaseSession();
+    user = await getCurrentUser();
+    result = await updateOnce(user.id);
   }
 
-  if (input.avatar_url !== undefined) {
-    updateData.avatar_url =
-      normalizeNullableText(input.avatar_url) ?? null;
+  if (result.error) {
+    throw result.error;
   }
 
-  if (input.activity_region !== undefined) {
-    updateData.activity_region =
-      normalizeNullableText(input.activity_region) ??
-      null;
-  }
-
-  if (input.selected_title_id !== undefined) {
-    updateData.selected_title_id =
-      normalizeNullableText(
-        input.selected_title_id,
-      ) ?? null;
-  }
-
-  if (input.interests !== undefined) {
-    updateData.interests = normalizeInterests(
-      input.interests,
-    );
-  }
-
-  const { data, error } = await supabase
-    .from("profiles")
-    .update(updateData)
-    .eq("id", userId)
-    .select(
-      `
-        id,
-        nickname,
-        bio,
-        avatar_url,
-        activity_region,
-        selected_title_id,
-        interests,
-        created_at,
-        updated_at
-      `,
-    )
-    .maybeSingle();
-
-  if (error) {
-    console.error("updateMyProfile Error:", error);
-    throw error;
-  }
-
-  if (!data) {
-    throw new Error(
-      "프로필을 찾을 수 없거나 수정 권한이 없습니다.",
-    );
-  }
-
-  return normalizeProfile(
-    data as Omit<Profile, "interests"> & {
-      interests: string[] | null;
-    },
-  );
+  return result.data as Profile;
 }
