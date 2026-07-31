@@ -6,6 +6,7 @@ import {
   Animated,
   Dimensions,
   Image,
+  Modal,
   PanResponder,
   Pressable,
   ScrollView,
@@ -114,6 +115,19 @@ function parseDateKey(dateKey: string) {
   return new Date(year, month - 1, day);
 }
 
+function addDays(date: Date, days: number) {
+  return new Date(
+    date.getFullYear(),
+    date.getMonth(),
+    date.getDate() + days,
+  );
+}
+
+function formatKoreanDate(dateKey: string) {
+  const date = parseDateKey(dateKey);
+  return `${date.getFullYear()}년 ${date.getMonth() + 1}월 ${date.getDate()}일`;
+}
+
 function getRecordDateKey(
   recordedAt: string | null | undefined,
 ) {
@@ -202,6 +216,15 @@ export default function CalendarScreen() {
   const [isLoading, setIsLoading] = useState(true);
   const [isCreatingJourney, setIsCreatingJourney] = useState(false);
   const [isStoppingJourney, setIsStoppingJourney] = useState(false);
+  const [journeyStartPickerVisible, setJourneyStartPickerVisible] =
+    useState(false);
+  const [pendingJourneyOption, setPendingJourneyOption] =
+    useState<JourneyOption | null>(null);
+  const [selectedJourneyStartKey, setSelectedJourneyStartKey] =
+    useState(todayKey);
+  const [journeyStartMonth, setJourneyStartMonth] = useState(
+    () => new Date(today.getFullYear(), today.getMonth(), 1),
+  );
 
   const sheetTranslateY = useRef(
     new Animated.Value(SHEET_CLOSED_POSITION),
@@ -226,6 +249,56 @@ export default function CalendarScreen() {
   const nextMonthStart = new Date(visibleYear, visibleMonthIndex + 1, 1);
   const monthStartKey = toDateKey(monthStart);
   const nextMonthStartKey = toDateKey(nextMonthStart);
+
+  const journeyStartPickerYear = journeyStartMonth.getFullYear();
+  const journeyStartPickerMonthIndex = journeyStartMonth.getMonth();
+  const journeyStartPickerTotalDays = new Date(
+    journeyStartPickerYear,
+    journeyStartPickerMonthIndex + 1,
+    0,
+  ).getDate();
+  const journeyStartPickerStartDay = new Date(
+    journeyStartPickerYear,
+    journeyStartPickerMonthIndex,
+    1,
+  ).getDay();
+  const journeyStartPickerCells: CalendarCell[] = [
+    ...Array<null>(journeyStartPickerStartDay).fill(null),
+    ...Array.from(
+      { length: journeyStartPickerTotalDays },
+      (_, index) => index + 1,
+    ),
+  ];
+  const earliestJourneyStartDate = pendingJourneyOption
+    ? addDays(todayStart, -(pendingJourneyOption.durationDays - 1))
+    : todayStart;
+  const earliestJourneyStartKey = toDateKey(
+    earliestJourneyStartDate,
+  );
+  const selectedJourneyEndKey = pendingJourneyOption
+    ? toDateKey(
+        addDays(
+          parseDateKey(selectedJourneyStartKey),
+          pendingJourneyOption.durationDays - 1,
+        ),
+      )
+    : selectedJourneyStartKey;
+  const earliestJourneyStartMonth = new Date(
+    earliestJourneyStartDate.getFullYear(),
+    earliestJourneyStartDate.getMonth(),
+    1,
+  );
+  const latestJourneyStartMonth = new Date(
+    todayStart.getFullYear(),
+    todayStart.getMonth(),
+    1,
+  );
+  const canMoveJourneyStartMonthBackward =
+    journeyStartMonth.getTime() >
+    earliestJourneyStartMonth.getTime();
+  const canMoveJourneyStartMonthForward =
+    journeyStartMonth.getTime() <
+    latestJourneyStartMonth.getTime();
 
   useFocusEffect(
     useCallback(() => {
@@ -685,82 +758,130 @@ export default function CalendarScreen() {
     : null;
 
   const handleStartJourney = (option: JourneyOption) => {
-    Alert.alert(
-      `${option.label} 여정 시작`,
-      `오늘부터 ${option.durationDays}일 동안 ${option.targetRecordCount}일의 경험을 기록하면 완주해요. 시작할까요?`,
-      [
-        {
-          text: "취소",
-          style: "cancel",
-        },
-        {
-          text: "시작하기",
-          onPress: async () => {
-            if (isCreatingJourney) {
-              return;
-            }
-
-            setIsCreatingJourney(true);
-
-            try {
-              const {
-                data: { user },
-                error: userError,
-              } = await supabase.auth.getUser();
-
-              if (userError || !user) {
-                Alert.alert(
-                  "여정 시작 실패",
-                  userError?.message ?? "로그인 정보를 확인해 주세요.",
-                );
-                return;
-              }
-
-              // 시작일을 1일 차로 계산하므로 7일 여정은 오늘부터 6일 뒤에 끝납니다.
-              const endDate = new Date(
-                todayStart.getFullYear(),
-                todayStart.getMonth(),
-                todayStart.getDate() + option.durationDays - 1,
-              );
-
-              const { data, error } = await supabase
-                .from("journeys")
-                .insert({
-                  user_id: user.id,
-                  title: option.title,
-                  duration_days: option.durationDays,
-                  target_record_count: option.targetRecordCount,
-                  start_date: todayKey,
-                  end_date: toDateKey(endDate),
-                  status: "active",
-                })
-                .select(
-                  "id, title, duration_days, target_record_count, start_date, end_date, status",
-                )
-                .single();
-
-              if (error || !data) {
-                Alert.alert(
-                  "여정 시작 실패",
-                  error?.message ?? "여정 정보를 저장하지 못했습니다.",
-                );
-                return;
-              }
-
-              setJourney(data as Journey);
-              setJourneyCompletedDayCount(0);
-
-              Alert.alert(
-                "여정 시작",
-                `${option.title}이 오늘부터 시작됐어요.`,
-              );
-            } finally {
-              setIsCreatingJourney(false);
-            }
-          },
-        },
-      ],
+    setPendingJourneyOption(option);
+    setSelectedJourneyStartKey(todayKey);
+    setJourneyStartMonth(
+      new Date(todayStart.getFullYear(), todayStart.getMonth(), 1),
     );
+    setJourneyStartPickerVisible(true);
+  };
+
+  const closeJourneyStartPicker = () => {
+    if (isCreatingJourney) {
+      return;
+    }
+
+    setJourneyStartPickerVisible(false);
+    setPendingJourneyOption(null);
+  };
+
+  const moveJourneyStartMonth = (offset: number) => {
+    const nextMonth = new Date(
+      journeyStartPickerYear,
+      journeyStartPickerMonthIndex + offset,
+      1,
+    );
+
+    if (
+      nextMonth.getTime() <
+        earliestJourneyStartMonth.getTime() ||
+      nextMonth.getTime() >
+        latestJourneyStartMonth.getTime()
+    ) {
+      return;
+    }
+
+    setJourneyStartMonth(nextMonth);
+  };
+
+  const confirmJourneyStart = async () => {
+    if (!pendingJourneyOption || isCreatingJourney) {
+      return;
+    }
+
+    const selectedStartDate = parseDateKey(
+      selectedJourneyStartKey,
+    );
+
+    if (
+      selectedStartDate.getTime() <
+        earliestJourneyStartDate.getTime() ||
+      selectedStartDate.getTime() > todayStart.getTime()
+    ) {
+      Alert.alert(
+        "시작일을 다시 선택해 주세요",
+        "오늘이 여정 기간 안에 포함되도록 표시된 날짜 중에서 골라주세요.",
+      );
+      return;
+    }
+
+    setIsCreatingJourney(true);
+
+    try {
+      const {
+        data: { user },
+        error: userError,
+      } = await supabase.auth.getUser();
+
+      if (userError || !user) {
+        Alert.alert(
+          "여정 시작 실패",
+          userError?.message ?? "로그인 정보를 확인해 주세요.",
+        );
+        return;
+      }
+
+      const endDate = addDays(
+        selectedStartDate,
+        pendingJourneyOption.durationDays - 1,
+      );
+
+      const { data, error } = await supabase
+        .from("journeys")
+        .insert({
+          user_id: user.id,
+          title: pendingJourneyOption.title,
+          duration_days: pendingJourneyOption.durationDays,
+          target_record_count:
+            pendingJourneyOption.targetRecordCount,
+          start_date: selectedJourneyStartKey,
+          end_date: toDateKey(endDate),
+          status: "active",
+        })
+        .select(
+          "id, title, duration_days, target_record_count, start_date, end_date, status",
+        )
+        .single();
+
+      if (error || !data) {
+        Alert.alert(
+          "여정 시작 실패",
+          error?.message ?? "여정 정보를 저장하지 못했습니다.",
+        );
+        return;
+      }
+
+      setJourney(data as Journey);
+      setJourneyCompletedDayCount(0);
+      setVisibleMonth(
+        new Date(
+          selectedStartDate.getFullYear(),
+          selectedStartDate.getMonth(),
+          1,
+        ),
+      );
+      setJourneyStartPickerVisible(false);
+      setPendingJourneyOption(null);
+
+      Alert.alert(
+        "여정 시작",
+        `${pendingJourneyOption.title}이 ${formatKoreanDate(
+          selectedJourneyStartKey,
+        )}부터 시작됐어요.`,
+      );
+    } finally {
+      setIsCreatingJourney(false);
+    }
   };
 
   const handleStopJourney = () => {
@@ -936,8 +1057,8 @@ export default function CalendarScreen() {
                 </Text>
 
                 <Text style={styles.journeyPickerDescription}>
-                  고른 날부터 여정이 시작돼요. 기간의 절반만 기록해도
-                  완주할 수 있어요.
+                  기간을 고른 뒤 여정 시작일을 직접 선택할 수 있어요.
+                  기간의 절반만 기록해도 완주할 수 있어요.
                 </Text>
 
                 <View style={styles.journeyOptionList}>
@@ -1180,6 +1301,228 @@ export default function CalendarScreen() {
 
           <View style={styles.bottomSpace} />
         </ScrollView>
+
+        <Modal
+          visible={journeyStartPickerVisible}
+          transparent
+          animationType="fade"
+          onRequestClose={closeJourneyStartPicker}
+        >
+          <View style={styles.journeyStartModalOverlay}>
+            <Pressable
+              style={styles.journeyStartModalBackdrop}
+              onPress={closeJourneyStartPicker}
+            />
+
+            <View style={styles.journeyStartModalCard}>
+              <View style={styles.journeyStartModalHeader}>
+                <View style={styles.journeyStartModalHeaderText}>
+                  <Text style={styles.journeyStartModalCaption}>
+                    {pendingJourneyOption?.label ?? "여정"} 시작일
+                  </Text>
+                  <Text style={styles.journeyStartModalTitle}>
+                    언제부터 시작할까요?
+                  </Text>
+                  <Text style={styles.journeyStartModalDescription}>
+                    오늘이 여정 기간 안에 포함되도록 표시된 날짜 중에서
+                    시작일을 선택해 주세요.
+                  </Text>
+                </View>
+
+                <Pressable
+                  disabled={isCreatingJourney}
+                  onPress={closeJourneyStartPicker}
+                  style={({ pressed }) => [
+                    styles.journeyStartModalClose,
+                    pressed && styles.buttonPressed,
+                  ]}
+                >
+                  <Ionicons
+                    name="close"
+                    size={18}
+                    color={COLORS.textSub}
+                  />
+                </Pressable>
+              </View>
+
+              <View style={styles.journeyStartPeriodBox}>
+                <View style={styles.journeyStartPeriodItem}>
+                  <Text style={styles.journeyStartPeriodLabel}>
+                    시작일
+                  </Text>
+                  <Text style={styles.journeyStartPeriodValue}>
+                    {formatKoreanDate(selectedJourneyStartKey)}
+                  </Text>
+                </View>
+
+                <Ionicons
+                  name="arrow-forward"
+                  size={16}
+                  color={COLORS.textMuted}
+                />
+
+                <View style={styles.journeyStartPeriodItem}>
+                  <Text style={styles.journeyStartPeriodLabel}>
+                    종료일
+                  </Text>
+                  <Text style={styles.journeyStartPeriodValue}>
+                    {formatKoreanDate(selectedJourneyEndKey)}
+                  </Text>
+                </View>
+              </View>
+
+              <View style={styles.journeyStartMonthHeader}>
+                <Text style={styles.journeyStartMonthTitle}>
+                  {journeyStartPickerYear}년{" "}
+                  {journeyStartPickerMonthIndex + 1}월
+                </Text>
+
+                <View style={styles.journeyStartMonthButtons}>
+                  <Pressable
+                    disabled={!canMoveJourneyStartMonthBackward}
+                    onPress={() => moveJourneyStartMonth(-1)}
+                    style={({ pressed }) => [
+                      styles.journeyStartMonthButton,
+                      !canMoveJourneyStartMonthBackward &&
+                        styles.disabledButton,
+                      pressed && styles.buttonPressed,
+                    ]}
+                  >
+                    <Ionicons
+                      name="chevron-back"
+                      size={17}
+                      color={COLORS.textSub}
+                    />
+                  </Pressable>
+
+                  <Pressable
+                    disabled={!canMoveJourneyStartMonthForward}
+                    onPress={() => moveJourneyStartMonth(1)}
+                    style={({ pressed }) => [
+                      styles.journeyStartMonthButton,
+                      !canMoveJourneyStartMonthForward &&
+                        styles.disabledButton,
+                      pressed && styles.buttonPressed,
+                    ]}
+                  >
+                    <Ionicons
+                      name="chevron-forward"
+                      size={17}
+                      color={COLORS.textSub}
+                    />
+                  </Pressable>
+                </View>
+              </View>
+
+              <View style={styles.journeyStartWeekRow}>
+                {WEEK_DAYS.map((day) => (
+                  <View
+                    key={`journey-start-${day}`}
+                    style={styles.journeyStartWeekCell}
+                  >
+                    <Text
+                      style={[
+                        styles.journeyStartWeekText,
+                        day === "일" && {
+                          color: COLORS.sunday,
+                        },
+                        day === "토" && {
+                          color: COLORS.primary,
+                        },
+                      ]}
+                    >
+                      {day}
+                    </Text>
+                  </View>
+                ))}
+              </View>
+
+              <View style={styles.journeyStartCalendarGrid}>
+                {journeyStartPickerCells.map((day, index) => {
+                  if (day === null) {
+                    return (
+                      <View
+                        key={`journey-start-empty-${index}`}
+                        style={styles.journeyStartCalendarCell}
+                      />
+                    );
+                  }
+
+                  const date = new Date(
+                    journeyStartPickerYear,
+                    journeyStartPickerMonthIndex,
+                    day,
+                  );
+                  const dateKey = toDateKey(date);
+                  const disabled =
+                    date.getTime() <
+                      earliestJourneyStartDate.getTime() ||
+                    date.getTime() > todayStart.getTime();
+                  const selected =
+                    dateKey === selectedJourneyStartKey;
+                  const isToday = dateKey === todayKey;
+
+                  return (
+                    <Pressable
+                      key={`journey-start-${dateKey}`}
+                      disabled={disabled || isCreatingJourney}
+                      onPress={() =>
+                        setSelectedJourneyStartKey(dateKey)
+                      }
+                      style={styles.journeyStartCalendarCell}
+                    >
+                      <View
+                        style={[
+                          styles.journeyStartDayCircle,
+                          selected &&
+                            styles.journeyStartDayCircleSelected,
+                          !selected &&
+                            isToday &&
+                            styles.journeyStartTodayCircle,
+                          disabled &&
+                            styles.journeyStartDayCircleDisabled,
+                        ]}
+                      >
+                        <Text
+                          style={[
+                            styles.journeyStartDayText,
+                            selected &&
+                              styles.journeyStartDayTextSelected,
+                            disabled &&
+                              styles.journeyStartDayTextDisabled,
+                          ]}
+                        >
+                          {day}
+                        </Text>
+                      </View>
+                    </Pressable>
+                  );
+                })}
+              </View>
+
+              <Text style={styles.journeyStartRangeHelp}>
+                선택 가능: {formatKoreanDate(earliestJourneyStartKey)} ~{" "}
+                {formatKoreanDate(todayKey)}
+              </Text>
+
+              <Pressable
+                disabled={isCreatingJourney}
+                onPress={() => void confirmJourneyStart()}
+                style={({ pressed }) => [
+                  styles.journeyStartConfirmButton,
+                  isCreatingJourney && styles.disabledButton,
+                  pressed && styles.buttonPressed,
+                ]}
+              >
+                <Text style={styles.journeyStartConfirmButtonText}>
+                  {isCreatingJourney
+                    ? "여정을 시작하는 중..."
+                    : "이 날짜로 여정 시작하기"}
+                </Text>
+              </Pressable>
+            </View>
+          </View>
+        </Modal>
 
         {selectedDay !== null && (
           <Animated.View
@@ -1779,6 +2122,211 @@ const styles = StyleSheet.create({
 
   bottomSpace: {
     height: 120,
+  },
+
+  // ─────────────────────────────────────────
+  // 여정 시작일 선택 모달
+  // ─────────────────────────────────────────
+
+  journeyStartModalOverlay: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 18,
+  },
+
+  journeyStartModalBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: "rgba(0, 0, 0, 0.45)",
+  },
+
+  journeyStartModalCard: {
+    width: "100%",
+    maxWidth: 430,
+    padding: 18,
+    backgroundColor: COLORS.white,
+    borderRadius: 22,
+  },
+
+  journeyStartModalHeader: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    marginBottom: 14,
+  },
+
+  journeyStartModalHeaderText: {
+    flex: 1,
+    paddingRight: 10,
+  },
+
+  journeyStartModalCaption: {
+    marginBottom: 4,
+    fontSize: 12,
+    fontWeight: "700",
+    color: COLORS.primary,
+  },
+
+  journeyStartModalTitle: {
+    marginBottom: 5,
+    fontSize: 20,
+    fontWeight: "800",
+    color: COLORS.textMain,
+  },
+
+  journeyStartModalDescription: {
+    fontSize: 12,
+    lineHeight: 18,
+    color: COLORS.textSub,
+  },
+
+  journeyStartModalClose: {
+    width: 36,
+    height: 36,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: COLORS.background,
+    borderRadius: 18,
+  },
+
+  journeyStartPeriodBox: {
+    marginBottom: 16,
+    paddingHorizontal: 13,
+    paddingVertical: 12,
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: COLORS.primaryLight,
+    borderRadius: 13,
+  },
+
+  journeyStartPeriodItem: {
+    flex: 1,
+  },
+
+  journeyStartPeriodLabel: {
+    marginBottom: 3,
+    fontSize: 10,
+    color: COLORS.textMuted,
+  },
+
+  journeyStartPeriodValue: {
+    fontSize: 12,
+    fontWeight: "700",
+    color: COLORS.primary,
+  },
+
+  journeyStartMonthHeader: {
+    marginBottom: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+
+  journeyStartMonthTitle: {
+    fontSize: 15,
+    fontWeight: "700",
+    color: COLORS.textMain,
+  },
+
+  journeyStartMonthButtons: {
+    flexDirection: "row",
+    gap: 5,
+  },
+
+  journeyStartMonthButton: {
+    width: 30,
+    height: 30,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: COLORS.background,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: 9,
+  },
+
+  journeyStartWeekRow: {
+    flexDirection: "row",
+    marginBottom: 4,
+  },
+
+  journeyStartWeekCell: {
+    width: "14.285714%",
+    alignItems: "center",
+    paddingVertical: 4,
+  },
+
+  journeyStartWeekText: {
+    fontSize: 10,
+    fontWeight: "600",
+    color: COLORS.textMuted,
+  },
+
+  journeyStartCalendarGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+  },
+
+  journeyStartCalendarCell: {
+    width: "14.285714%",
+    height: 42,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  journeyStartDayCircle: {
+    width: 34,
+    height: 34,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: 17,
+  },
+
+  journeyStartDayCircleSelected: {
+    backgroundColor: COLORS.primary,
+  },
+
+  journeyStartTodayCircle: {
+    borderWidth: 1.5,
+    borderColor: COLORS.primary,
+  },
+
+  journeyStartDayCircleDisabled: {
+    opacity: 0.24,
+  },
+
+  journeyStartDayText: {
+    fontSize: 13,
+    color: COLORS.textMain,
+  },
+
+  journeyStartDayTextSelected: {
+    fontWeight: "800",
+    color: COLORS.white,
+  },
+
+  journeyStartDayTextDisabled: {
+    color: COLORS.textMuted,
+  },
+
+  journeyStartRangeHelp: {
+    marginTop: 8,
+    marginBottom: 14,
+    textAlign: "center",
+    fontSize: 10,
+    color: COLORS.textMuted,
+  },
+
+  journeyStartConfirmButton: {
+    minHeight: 50,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: COLORS.primary,
+    borderRadius: 13,
+  },
+
+  journeyStartConfirmButtonText: {
+    fontSize: 14,
+    fontWeight: "800",
+    color: COLORS.white,
   },
 
   // ─────────────────────────────────────────
