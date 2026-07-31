@@ -1,6 +1,6 @@
 import Ionicons from "@expo/vector-icons/Ionicons";
-import { useRouter } from "expo-router";
-import { useEffect, useRef, useState } from "react";
+import { useFocusEffect, useRouter } from "expo-router";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Alert,
   Animated,
@@ -19,6 +19,8 @@ import { supabase } from "../../lib/supabase";
 const COLORS = {
   primary: "#3D5AFE",
   primaryLight: "#EEF1FF",
+  pink: "#EC4899",
+  pinkLight: "#FCE7F3",
 
   textMain: "#0F0F0F",
   textSub: "#5C5F6A",
@@ -33,6 +35,7 @@ const COLORS = {
 
 const WEEK_DAYS = ["일", "월", "화", "수", "목", "금", "토"];
 const SCREEN_HEIGHT = Dimensions.get("window").height;
+const SCREEN_WIDTH = Dimensions.get("window").width;
 const SHEET_CLOSED_POSITION = SCREEN_HEIGHT;
 const DAY_IN_MS = 24 * 60 * 60 * 1000;
 
@@ -54,8 +57,10 @@ type CalendarRecord = {
   recorded_at: string;
   emotion: string | null;
   content: string | null;
+  visibility: "private" | "anonymous" | "nickname" | null;
   missionTitle: string;
   photoUrl: string | null;
+  photoUrls: string[];
 };
 
 type StartedMission = {
@@ -78,21 +83,21 @@ const JOURNEY_OPTIONS: JourneyOption[] = [
     title: "1주의 여정",
     durationDays: 7,
     targetRecordCount: 4,
-    description: "7일 동안 4번 기록",
+    description: "7일 동안 4일 기록",
   },
   {
     label: "2주",
     title: "2주의 여정",
     durationDays: 14,
     targetRecordCount: 7,
-    description: "14일 동안 7번 기록",
+    description: "14일 동안 7일 기록",
   },
   {
     label: "한 달",
     title: "한 달의 여정",
     durationDays: 30,
     targetRecordCount: 15,
-    description: "30일 동안 15번 기록",
+    description: "30일 동안 15일 기록",
   },
 ];
 
@@ -109,8 +114,70 @@ function parseDateKey(dateKey: string) {
   return new Date(year, month - 1, day);
 }
 
+function getRecordDateKey(
+  recordedAt: string | null | undefined,
+) {
+  if (!recordedAt) {
+    return "";
+  }
+
+  return recordedAt.slice(0, 10);
+}
+
+function getCompletedDayCount(
+  records: Array<{
+    recorded_at?: string | null;
+  }>,
+) {
+  return new Set(
+    records
+      .map((record) =>
+        getRecordDateKey(record.recorded_at),
+      )
+      .filter(Boolean),
+  ).size;
+}
+
 function getLocalDayFromTimestamp(timestamp: string) {
   return new Date(timestamp).getDate();
+}
+
+const EMOTION_INFO: Record<
+  string,
+  { emoji: string; label: string }
+> = {
+  comfortable: { emoji: "😌", label: "편안해요" },
+  joyful: { emoji: "😊", label: "즐거워요" },
+  new: { emoji: "✨", label: "새로워요" },
+  uncomfortable: { emoji: "😣", label: "불편해요" },
+  unsure: { emoji: "🤔", label: "잘 모르겠어요" },
+};
+
+function getEmotionInfo(value: string | null) {
+  if (!value) {
+    return null;
+  }
+
+  return (
+    EMOTION_INFO[value] ?? {
+      emoji: "🙂",
+      label: value,
+    }
+  );
+}
+
+function getVisibilityLabel(
+  value: CalendarRecord["visibility"],
+) {
+  if (value === "anonymous") {
+    return "익명 공유";
+  }
+
+  if (value === "nickname") {
+    return "닉네임 공유";
+  }
+
+  return "나만 보기";
 }
 
 export default function CalendarScreen() {
@@ -131,7 +198,7 @@ export default function CalendarScreen() {
   const [records, setRecords] = useState<CalendarRecord[]>([]);
   const [startedMissions, setStartedMissions] = useState<StartedMission[]>([]);
   const [journey, setJourney] = useState<Journey | null>(null);
-  const [journeyRecordCount, setJourneyRecordCount] = useState(0);
+  const [journeyCompletedDayCount, setJourneyCompletedDayCount] = useState(0);
   const [isLoading, setIsLoading] = useState(true);
   const [isCreatingJourney, setIsCreatingJourney] = useState(false);
   const [isStoppingJourney, setIsStoppingJourney] = useState(false);
@@ -160,10 +227,11 @@ export default function CalendarScreen() {
   const monthStartKey = toDateKey(monthStart);
   const nextMonthStartKey = toDateKey(nextMonthStart);
 
-  useEffect(() => {
-    let isMounted = true;
+  useFocusEffect(
+    useCallback(() => {
+      let isMounted = true;
 
-    const loadCalendarData = async () => {
+      const loadCalendarData = async () => {
       setIsLoading(true);
 
       const {
@@ -202,12 +270,13 @@ export default function CalendarScreen() {
           supabase
             .from("records")
             .select(
-              "id, mission_attempt_id, recorded_at, emotion, content",
+              "id, mission_attempt_id, recorded_at, created_at, emotion, content, visibility",
             )
             .eq("user_id", user.id)
             .gte("recorded_at", monthStartKey)
             .lt("recorded_at", nextMonthStartKey)
-            .order("recorded_at", { ascending: true }),
+            .order("recorded_at", { ascending: true })
+            .order("created_at", { ascending: true }),
 
           supabase
             .from("mission_attempts")
@@ -249,22 +318,29 @@ export default function CalendarScreen() {
       const rawRecords = recordsResult.data ?? [];
       const rawStartedMissions = startedResult.data ?? [];
 
-      let currentJourneyRecordCount = 0;
+      let currentJourneyCompletedDayCount = 0;
 
       if (currentJourney) {
-        const { count, error: countError } = await supabase
+        const {
+          data: journeyRecords,
+          error: journeyRecordsError,
+        } = await supabase
           .from("records")
-          .select("id", { count: "exact", head: true })
+          .select("recorded_at")
           .eq("user_id", user.id)
-          .eq("journey_id", currentJourney.id);
+          .eq("journey_id", currentJourney.id)
+          .order("recorded_at", { ascending: true });
 
-        if (countError) {
+        if (journeyRecordsError) {
           console.error(
-            "여정 기록 수 조회 실패:",
-            countError.message,
+            "여정 기록 날짜 조회 실패:",
+            journeyRecordsError.message,
           );
         } else {
-          currentJourneyRecordCount = count ?? 0;
+          currentJourneyCompletedDayCount =
+            getCompletedDayCount(
+              journeyRecords ?? [],
+            );
         }
       }
 
@@ -331,7 +407,10 @@ export default function CalendarScreen() {
       }
 
       const recordIds = rawRecords.map((record) => record.id);
-      const photoPathByRecordId = new Map<string, string>();
+      const photoPathsByRecordId = new Map<
+        string,
+        string[]
+      >();
       const signedUrlByPath = new Map<string, string>();
 
       if (recordIds.length > 0) {
@@ -340,6 +419,7 @@ export default function CalendarScreen() {
             .from("record_photos")
             .select("record_id, storage_path, sort_order, is_cover")
             .in("record_id", recordIds)
+            .order("is_cover", { ascending: false })
             .order("sort_order", { ascending: true });
 
         if (photosError) {
@@ -349,20 +429,32 @@ export default function CalendarScreen() {
           );
         } else {
           (photos ?? []).forEach((photo) => {
-            const currentPath = photoPathByRecordId.get(
-              photo.record_id,
+            const recordId = String(photo.record_id);
+            const storagePath = String(
+              photo.storage_path ?? "",
             );
 
-            if (!currentPath || photo.is_cover) {
-              photoPathByRecordId.set(
-                photo.record_id,
-                photo.storage_path,
-              );
+            if (!storagePath) {
+              return;
+            }
+
+            const currentPaths =
+              photoPathsByRecordId.get(recordId) ?? [];
+
+            if (!currentPaths.includes(storagePath)) {
+              photoPathsByRecordId.set(recordId, [
+                ...currentPaths,
+                storagePath,
+              ]);
             }
           });
 
           const photoPaths = Array.from(
-            new Set(photoPathByRecordId.values()),
+            new Set(
+              Array.from(
+                photoPathsByRecordId.values(),
+              ).flat(),
+            ),
           );
 
           if (photoPaths.length > 0) {
@@ -395,7 +487,11 @@ export default function CalendarScreen() {
           const missionId = record.mission_attempt_id
             ? attemptIdToMissionId.get(record.mission_attempt_id)
             : undefined;
-          const photoPath = photoPathByRecordId.get(record.id);
+          const photoPaths =
+            photoPathsByRecordId.get(String(record.id)) ?? [];
+          const photoUrls = photoPaths
+            .map((path) => signedUrlByPath.get(path))
+            .filter((url): url is string => Boolean(url));
 
           return {
             id: record.id,
@@ -403,13 +499,17 @@ export default function CalendarScreen() {
             recorded_at: record.recorded_at,
             emotion: record.emotion,
             content: record.content,
+            visibility: record.visibility as
+              | "private"
+              | "anonymous"
+              | "nickname"
+              | null,
             missionTitle:
               (missionId
                 ? missionTitleById.get(missionId)
                 : undefined) ?? "기록한 경험",
-            photoUrl: photoPath
-              ? signedUrlByPath.get(photoPath) ?? null
-              : null,
+            photoUrl: photoUrls[0] ?? null,
+            photoUrls,
           };
         },
       );
@@ -428,18 +528,19 @@ export default function CalendarScreen() {
       }
 
       setJourney(currentJourney);
-      setJourneyRecordCount(currentJourneyRecordCount);
+      setJourneyCompletedDayCount(currentJourneyCompletedDayCount);
       setRecords(normalizedRecords);
       setStartedMissions(normalizedStartedMissions);
       setIsLoading(false);
     };
 
-    loadCalendarData();
+      void loadCalendarData();
 
-    return () => {
-      isMounted = false;
-    };
-  }, [monthStartKey, nextMonthStartKey, todayKey]);
+      return () => {
+        isMounted = false;
+      };
+    }, [monthStartKey, nextMonthStartKey, todayKey]),
+  );
 
   useEffect(() => {
     if (!isSheetOpen) {
@@ -527,12 +628,14 @@ export default function CalendarScreen() {
           new Date(visibleYear, visibleMonthIndex, selectedDay),
         );
 
-  const selectedRecord =
+  const selectedRecords =
     selectedDateKey === null
-      ? null
-      : records.find(
-          (record) => record.recorded_at === selectedDateKey,
-        ) ?? null;
+      ? []
+      : records.filter(
+          (record) =>
+            getRecordDateKey(record.recorded_at) ===
+            selectedDateKey,
+        );
 
   const selectedStartedMission =
     selectedDay === null
@@ -543,8 +646,12 @@ export default function CalendarScreen() {
             selectedDay,
         ) ?? null;
 
-  const completedDays = new Set(
-    records.map((record) => parseDateKey(record.recorded_at).getDate()),
+  const completedDateKeys = new Set(
+    records
+      .map((record) =>
+        getRecordDateKey(record.recorded_at),
+      )
+      .filter(Boolean),
   );
   const startedDays = new Set(
     startedMissions.map((mission) =>
@@ -553,14 +660,15 @@ export default function CalendarScreen() {
   );
 
   const journeyTarget = journey?.target_record_count ?? 0;
-  const remainingRecords = Math.max(
-    journeyTarget - journeyRecordCount,
+  const remainingDays = Math.max(
+    journeyTarget - journeyCompletedDayCount,
     0,
   );
   const progressPercentage = (
     journeyTarget > 0
       ? `${Math.min(
-          (journeyRecordCount / journeyTarget) * 100,
+          (journeyCompletedDayCount / journeyTarget) *
+            100,
           100,
         )}%`
       : "0%"
@@ -579,7 +687,7 @@ export default function CalendarScreen() {
   const handleStartJourney = (option: JourneyOption) => {
     Alert.alert(
       `${option.label} 여정 시작`,
-      `오늘부터 ${option.durationDays}일 동안 ${option.targetRecordCount}번의 경험을 기록하면 완주해요. 시작할까요?`,
+      `오늘부터 ${option.durationDays}일 동안 ${option.targetRecordCount}일의 경험을 기록하면 완주해요. 시작할까요?`,
       [
         {
           text: "취소",
@@ -640,7 +748,7 @@ export default function CalendarScreen() {
               }
 
               setJourney(data as Journey);
-              setJourneyRecordCount(0);
+              setJourneyCompletedDayCount(0);
 
               Alert.alert(
                 "여정 시작",
@@ -689,7 +797,7 @@ export default function CalendarScreen() {
               // journeys만 중단 상태로 변경합니다.
               // records와 record_photos는 삭제하거나 수정하지 않습니다.
               setJourney(null);
-              setJourneyRecordCount(0);
+              setJourneyCompletedDayCount(0);
 
               Alert.alert(
                 "여정이 중단됐어요",
@@ -728,20 +836,6 @@ export default function CalendarScreen() {
     sheetTranslateY.setValue(SHEET_CLOSED_POSITION);
     setVisibleMonth(
       new Date(visibleYear, visibleMonthIndex + offset, 1),
-    );
-  };
-
-  const handleRecordDetail = () => {
-    Alert.alert(
-      "기록 상세",
-      "기록 상세 화면은 상세 페이지를 만든 뒤 연결하면 됩니다.",
-    );
-  };
-
-  const handleEditRecord = () => {
-    Alert.alert(
-      "기록 수정",
-      "기록 수정 화면은 추후 연결할 예정입니다.",
     );
   };
 
@@ -787,12 +881,12 @@ export default function CalendarScreen() {
 
                 <View style={styles.progressInfoRow}>
                   <Text style={styles.progressDescription}>
-                    {journeyTarget}번 중 {journeyRecordCount}번의 경험을
-                    기록했어요
+                    {journeyTarget}일 중 {journeyCompletedDayCount}일의
+                    경험을 기록했어요
                   </Text>
 
                   <Text style={styles.progressCount}>
-                    {journeyRecordCount}/{journeyTarget}
+                    {journeyCompletedDayCount}/{journeyTarget}
                   </Text>
                 </View>
 
@@ -809,7 +903,7 @@ export default function CalendarScreen() {
                   <Text style={styles.essayNoticeText}>
                     에세이 완성까지{" "}
                     <Text style={styles.essayNoticeStrong}>
-                      {remainingRecords}번
+                      {remainingDays}일
                     </Text>{" "}
                     더 남았어요
                   </Text>
@@ -958,10 +1052,17 @@ export default function CalendarScreen() {
                 day,
               );
               const dateKey = toDateKey(date);
-              const dayRecord = records.find(
-                (record) => record.recorded_at === dateKey,
+              const dayRecords = records.filter(
+                (record) =>
+                  getRecordDateKey(record.recorded_at) ===
+                  dateKey,
               );
-              const isCompleted = completedDays.has(day);
+              const dayPhotoUrl =
+                dayRecords.find(
+                  (record) => record.photoUrl,
+                )?.photoUrl ?? null;
+              const isCompleted =
+                completedDateKeys.has(dateKey);
               const isStarted = startedDays.has(day) && !isCompleted;
               const isToday = dateKey === todayKey;
               const isFuture = date.getTime() > todayStart.getTime();
@@ -1028,17 +1129,14 @@ export default function CalendarScreen() {
                     <View
                       style={[
                         styles.completedImageWrapper,
-                        !dayRecord?.photoUrl && {
-                          alignItems: "center",
-                          justifyContent: "center",
-                          backgroundColor: COLORS.primaryLight,
-                        },
+                        !dayPhotoUrl && styles.completedCheckWrapper,
+                        isToday && styles.todayCompletedWrapper,
                         isSelected && styles.selectedImageWrapper,
                       ]}
                     >
-                      {dayRecord?.photoUrl ? (
+                      {dayPhotoUrl ? (
                         <Image
-                          source={{ uri: dayRecord.photoUrl }}
+                          source={{ uri: dayPhotoUrl }}
                           style={styles.completedImage}
                         />
                       ) : (
@@ -1099,60 +1197,110 @@ export default function CalendarScreen() {
               <View style={styles.sheetHandle} />
             </View>
 
-            {selectedRecord ? (
-              <View style={styles.recordContent}>
-                <Text style={styles.recordDate}>
-                  {visibleYear}년 {visibleMonthIndex + 1}월{" "}
-                  {selectedDay}일
-                </Text>
-
-                <Text style={styles.recordTitle}>
-                  {selectedRecord.missionTitle}
-                </Text>
-
-                {selectedRecord.photoUrl && (
-                  <Image
-                    source={{ uri: selectedRecord.photoUrl }}
-                    style={styles.recordImage}
-                  />
-                )}
-
-                {selectedRecord.emotion && (
-                  <View style={styles.emotionTag}>
-                    <Text style={styles.emotionTagText}>
-                      {selectedRecord.emotion}
+            {selectedRecords.length > 0 ? (
+              <ScrollView
+                showsVerticalScrollIndicator={false}
+                contentContainerStyle={
+                  styles.dailyRecordsContent
+                }
+              >
+                <View style={styles.dailyRecordsHeader}>
+                  <View style={styles.dailyRecordsHeaderText}>
+                    <Text style={styles.recordDate}>
+                      {visibleYear}년 {visibleMonthIndex + 1}월{" "}
+                      {selectedDay}일
+                    </Text>
+                    <Text style={styles.dailyRecordsTitle}>
+                      이날의 기록
+                    </Text>
+                    <Text style={styles.dailyRecordsCount}>
+                      {selectedRecords.length}개의 경험을 남겼어요
                     </Text>
                   </View>
-                )}
 
-                <Text style={styles.recordDescription}>
-                  {selectedRecord.content || "작성한 기록이 없어요."}
-                </Text>
-
-                <View style={styles.recordButtonRow}>
                   <Pressable
-                    onPress={handleRecordDetail}
+                    onPress={closeSheet}
+                    hitSlop={10}
                     style={({ pressed }) => [
-                      styles.primaryButton,
+                      styles.sheetCloseButton,
                       pressed && styles.buttonPressed,
                     ]}
                   >
-                    <Text style={styles.primaryButtonText}>
-                      기록 자세히 보기
-                    </Text>
-                  </Pressable>
-
-                  <Pressable
-                    onPress={handleEditRecord}
-                    style={({ pressed }) => [
-                      styles.editButton,
-                      pressed && styles.buttonPressed,
-                    ]}
-                  >
-                    <Text style={styles.editButtonText}>수정</Text>
+                    <Ionicons
+                      name="close"
+                      size={18}
+                      color={COLORS.textSub}
+                    />
                   </Pressable>
                 </View>
-              </View>
+
+                {selectedRecords.map((record, index) => {
+                  const emotionInfo = getEmotionInfo(
+                    record.emotion,
+                  );
+
+                  return (
+                    <View
+                      key={record.id}
+                      style={styles.dailyRecordCard}
+                    >
+                      <Text style={styles.recordOrderCaption}>
+                        내가 쓴 기록 {index + 1}
+                      </Text>
+
+                      <Text style={styles.recordTitle}>
+                        {record.missionTitle}
+                      </Text>
+
+                      <View style={styles.recordMetaRow}>
+                        {emotionInfo ? (
+                          <View style={styles.emotionTag}>
+                            <Text style={styles.emotionTagText}>
+                              {emotionInfo.emoji}{" "}
+                              {emotionInfo.label}
+                            </Text>
+                          </View>
+                        ) : null}
+
+                        <View style={styles.visibilityTag}>
+                          <Text
+                            style={styles.visibilityTagText}
+                          >
+                            {getVisibilityLabel(
+                              record.visibility,
+                            )}
+                          </Text>
+                        </View>
+                      </View>
+
+                      {record.photoUrls.length > 0 ? (
+                        <ScrollView
+                          horizontal
+                          pagingEnabled
+                          showsHorizontalScrollIndicator={false}
+                          style={styles.recordPhotoScroll}
+                        >
+                          {record.photoUrls.map((url) => (
+                            <Image
+                              key={url}
+                              source={{ uri: url }}
+                              style={styles.recordImage}
+                              resizeMode="cover"
+                            />
+                          ))}
+                        </ScrollView>
+                      ) : null}
+
+                      <View style={styles.recordTextBox}>
+                        <Text style={styles.recordDescription}>
+                          {record.content ||
+                            "작성한 기록이 없어요."}
+                        </Text>
+                      </View>
+                    </View>
+                  );
+                })}
+              </ScrollView>
             ) : selectedStartedMission ? (
               <View style={styles.emptyContent}>
                 <Text style={styles.emptyEmoji}>🌱</Text>
@@ -1578,17 +1726,32 @@ const styles = StyleSheet.create({
   completedImageWrapper: {
     position: "relative",
     zIndex: 1,
-    width: 34,
-    height: 34,
 
+    width: 36,
+    height: 36,
+
+    alignItems: "center",
+    justifyContent: "center",
     overflow: "hidden",
 
-    borderWidth: 2.5,
-    borderColor: "transparent",
-    borderRadius: 17,
+    backgroundColor: COLORS.white,
+
+    borderWidth: 2,
+    borderColor: "rgba(61, 90, 254, 0.22)",
+    borderRadius: 18,
+  },
+
+  completedCheckWrapper: {
+    backgroundColor: COLORS.primaryLight,
+  },
+
+  todayCompletedWrapper: {
+    borderWidth: 3.5,
+    borderColor: COLORS.primary,
   },
 
   selectedImageWrapper: {
+    borderWidth: 3,
     borderColor: COLORS.primary,
   },
 
@@ -1596,7 +1759,9 @@ const styles = StyleSheet.create({
     width: "100%",
     height: "100%",
 
+    resizeMode: "cover",
     backgroundColor: COLORS.border,
+    borderRadius: 18,
   },
 
   completedDot: {
@@ -1622,6 +1787,8 @@ const styles = StyleSheet.create({
 
   bottomSheet: {
     position: "absolute",
+
+    maxHeight: "82%",
 
     right: 0,
     bottom: 0,
@@ -1660,97 +1827,131 @@ const styles = StyleSheet.create({
     borderRadius: 2,
   },
 
-  recordContent: {
+  dailyRecordsContent: {
     paddingHorizontal: 20,
-    paddingBottom: 20,
+    paddingBottom: 28,
+  },
+
+  dailyRecordsHeader: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    marginBottom: 16,
+  },
+
+  dailyRecordsHeaderText: {
+    flex: 1,
+  },
+
+  sheetCloseButton: {
+    width: 36,
+    height: 36,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: COLORS.background,
+    borderRadius: 18,
   },
 
   recordDate: {
     marginBottom: 4,
-
     fontSize: 11,
     color: COLORS.textMuted,
   },
 
-  recordTitle: {
-    marginBottom: 14,
-
-    fontSize: 16,
-    fontWeight: "700",
+  dailyRecordsTitle: {
+    marginBottom: 3,
+    fontSize: 19,
+    fontWeight: "800",
     color: COLORS.textMain,
   },
 
-  recordImage: {
-    width: "100%",
-    height: 156,
+  dailyRecordsCount: {
+    fontSize: 11,
+    color: COLORS.textMuted,
+  },
 
-    marginBottom: 12,
+  dailyRecordCard: {
+    marginBottom: 14,
+    padding: 16,
+    backgroundColor: COLORS.white,
+    borderWidth: 1,
+    borderColor: "rgba(0, 0, 0, 0.06)",
+    borderRadius: 16,
+  },
 
-    backgroundColor: COLORS.border,
-    borderRadius: 14,
+  recordOrderCaption: {
+    marginBottom: 5,
+    fontSize: 11,
+    fontWeight: "700",
+    color: "#10B981",
+  },
+
+  recordTitle: {
+    marginBottom: 10,
+    fontSize: 17,
+    lineHeight: 24,
+    fontWeight: "800",
+    color: COLORS.textMain,
+  },
+
+  recordMetaRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    marginBottom: 13,
   },
 
   emotionTag: {
     alignSelf: "flex-start",
-
-    marginBottom: 10,
-    paddingHorizontal: 9,
-    paddingVertical: 4,
-
-    backgroundColor: COLORS.primaryLight,
-    borderRadius: 7,
+    marginRight: 7,
+    marginBottom: 3,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    backgroundColor: COLORS.pinkLight,
+    borderRadius: 9,
   },
 
   emotionTagText: {
     fontSize: 11,
     fontWeight: "700",
+    color: COLORS.pink,
+  },
+
+  visibilityTag: {
+    alignSelf: "flex-start",
+    marginBottom: 3,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    backgroundColor: COLORS.primaryLight,
+    borderRadius: 9,
+  },
+
+  visibilityTagText: {
+    fontSize: 11,
+    fontWeight: "700",
     color: COLORS.primary,
   },
 
+  recordPhotoScroll: {
+    marginBottom: 13,
+  },
+
+  recordImage: {
+    width: SCREEN_WIDTH - 72,
+    height: 220,
+    marginRight: 8,
+    backgroundColor: COLORS.border,
+    borderRadius: 15,
+  },
+
+  recordTextBox: {
+    padding: 15,
+    backgroundColor: COLORS.background,
+    borderRadius: 13,
+  },
+
   recordDescription: {
-    marginBottom: 16,
-
-    fontSize: 13,
-    lineHeight: 21,
-    color: COLORS.textSub,
-  },
-
-  recordButtonRow: {
-    flexDirection: "row",
-    gap: 8,
-  },
-
-  primaryButton: {
-    flex: 1,
-
-    alignItems: "center",
-
-    paddingVertical: 12,
-
-    backgroundColor: COLORS.primary,
-    borderRadius: 12,
-  },
-
-  primaryButtonText: {
-    fontSize: 13,
-    fontWeight: "700",
-    color: COLORS.white,
-  },
-
-  editButton: {
-    alignItems: "center",
-
-    paddingHorizontal: 18,
-    paddingVertical: 12,
-
-    backgroundColor: "#F3F4F6",
-    borderRadius: 12,
-  },
-
-  editButtonText: {
-    fontSize: 13,
-    fontWeight: "500",
-    color: COLORS.textSub,
+    fontSize: 14,
+    lineHeight: 23,
+    color: COLORS.textMain,
   },
 
   buttonPressed: {

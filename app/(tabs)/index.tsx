@@ -3612,6 +3612,7 @@ export default function HomeScreen() {
             id: mission.id,
             lat: mission.placeLat!,
             lng: mission.placeLng!,
+            category: mission.cat,
           }))}
         onMarkerPress={handleMarkerPress}
       />
