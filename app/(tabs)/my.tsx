@@ -1,16 +1,24 @@
 import Ionicons from "@expo/vector-icons/Ionicons";
+import * as ImagePicker from "expo-image-picker";
+import { LinearGradient } from "expo-linear-gradient";
 import { useFocusEffect } from "expo-router";
-import { useCallback, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import {
   Alert,
+  Image,
+  KeyboardAvoidingView,
+  Modal,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { supabase } from "../../lib/supabase";
+import { getMyBadges } from "../../services/badge.service";
 import { updateMyProfile } from "../../services/profile.service";
 
 const COLORS = {
@@ -31,7 +39,6 @@ const COLORS = {
 type BadgeLevel = "bronze" | "silver" | "gold" | "prism";
 
 type Badge = {
-  // 실제 user_badges.badge_id 값
   id: string;
   name: string;
   category: string;
@@ -42,17 +49,7 @@ type Badge = {
   color: string;
   backgroundColor: string;
   title?: string;
-};
-
-type BadgeDefinition = Omit<Badge, "id" | "level" | "count"> & {
-  aliases: string[];
-};
-
-type UserBadgeRow = {
-  badge_id: string | number;
-  points: number | null;
-  tier: string | null;
-  updated_at: string | null;
+  titleHistory: string[];
 };
 
 type StatItem = {
@@ -157,9 +154,31 @@ function parseAiKeywords(answer: string) {
     .slice(0, 3);
 }
 
-function normalizeBadgeKey(value: string) {
-  return value.toLowerCase().replace(/[\s_-]/g, "");
-}
+const CATEGORY_COLORS: Record<string, { color: string; backgroundColor: string }> = {
+  "음식": { color: "#D97706", backgroundColor: "#FEF3C7" },
+  "카페 및 디저트": { color: "#92400E", backgroundColor: "#FEF3C7" },
+  "산책": { color: "#166534", backgroundColor: "#DCFCE7" },
+  "배움": { color: "#1D4ED8", backgroundColor: "#DBEAFE" },
+  "감상": { color: COLORS.primary, backgroundColor: COLORS.primaryLight },
+  "활동": { color: "#B45309", backgroundColor: "#FEF3C7" },
+  "휴식": { color: "#4338CA", backgroundColor: "#E0E7FF" },
+  "기타": { color: "#6B7280", backgroundColor: "#F3F4F6" },
+};
+
+const TIER_LABEL_KO: Record<Exclude<BadgeLevel, "prism">, string> = {
+  bronze: "브론즈",
+  silver: "실버",
+  gold: "골드",
+};
+
+const TIER_ORDER: BadgeLevel[] = ["bronze", "silver", "gold", "prism"];
+
+const TIER_NEXT_POINTS: Record<BadgeLevel, number> = {
+  bronze: 3,
+  silver: 7,
+  gold: 15,
+  prism: 30,
+};
 
 function normalizeBadgeLevel(value: unknown): BadgeLevel {
   const level = String(value ?? "bronze").toLowerCase();
@@ -171,108 +190,27 @@ function normalizeBadgeLevel(value: unknown): BadgeLevel {
   return "bronze";
 }
 
-/*
- * 화면에 표시할 뱃지 디자인 카탈로그입니다.
- * aliases 중 하나가 user_badges.badge_id와 일치하면 해당 디자인을 사용합니다.
- * 실제 DB의 badge_id가 다르면 aliases에 그 값을 추가하면 됩니다.
- */
-const BADGE_DEFINITIONS: BadgeDefinition[] = [
-  {
-    aliases: ["1", "walk", "walking", "walk_collector", "산책"],
-    name: "산책 수집가",
-    category: "산책",
-    nextAt: 12,
-    emoji: "🥾",
-    color: "#D97706",
-    backgroundColor: "#FEF3C7",
-  },
-  {
-    aliases: ["2", "sound", "music", "sound_explorer", "음악"],
-    name: "소리 탐험가",
-    category: "음악",
-    nextAt: 0,
-    emoji: "🎵",
-    color: COLORS.primary,
-    backgroundColor: COLORS.primaryLight,
-    title: "소리의 탐험가",
-  },
-  {
-    aliases: ["3", "book", "reading", "book_traveler", "독서"],
-    name: "책방 여행자",
-    category: "독서",
-    nextAt: 8,
-    emoji: "📖",
-    color: "#6B7280",
-    backgroundColor: "#F3F4F6",
-  },
-  {
-    aliases: ["4", "food", "taste", "rest", "휴식"],
-    name: "새로운 맛 발견자",
-    category: "휴식",
-    nextAt: 4,
-    emoji: "🍞",
-    color: "#92400E",
-    backgroundColor: "#FEF3C7",
-  },
-  {
-    aliases: ["5", "observer", "observation", "관찰"],
-    name: "작은 관찰자",
-    category: "관찰",
-    nextAt: 4,
-    emoji: "🔍",
-    color: "#6B7280",
-    backgroundColor: "#F3F4F6",
-  },
-  {
-    aliases: ["6", "local", "discovery", "local_explorer", "발견"],
-    name: "로컬 탐험가",
-    category: "발견",
-    nextAt: 4,
-    emoji: "📍",
-    color: COLORS.primary,
-    backgroundColor: COLORS.primaryLight,
-  },
-];
+function buildTitlesForBadge(
+  name: string,
+  level: BadgeLevel,
+  finalTitle: string | null,
+): string[] {
+  const currentIndex = TIER_ORDER.indexOf(level);
+  const titles: string[] = [];
 
-function createBadgeFromRow(row: UserBadgeRow): Badge {
-  const actualId = String(row.badge_id);
-  const normalizedId = normalizeBadgeKey(actualId);
+  for (let i = 0; i <= currentIndex; i += 1) {
+    const tier = TIER_ORDER[i];
 
-  const definition = BADGE_DEFINITIONS.find((item) =>
-    item.aliases.some((alias) => normalizeBadgeKey(alias) === normalizedId),
-  );
-
-  const level = normalizeBadgeLevel(row.tier);
-  const count = typeof row.points === "number" ? row.points : 0;
-
-  if (!definition) {
-    console.warn("화면 정의가 없는 뱃지:", actualId);
-
-    return {
-      id: actualId,
-      name: "새로운 뱃지",
-      category: "기타",
-      level,
-      count,
-      nextAt: level === "prism" ? 0 : count + 1,
-      emoji: "🏅",
-      color: COLORS.primary,
-      backgroundColor: COLORS.primaryLight,
-    };
+    if (tier === "prism") {
+      if (finalTitle) {
+        titles.push(finalTitle);
+      }
+    } else {
+      titles.push(`${TIER_LABEL_KO[tier]} ${name}`);
+    }
   }
 
-  return {
-    id: actualId,
-    name: definition.name,
-    category: definition.category,
-    level,
-    count,
-    nextAt: level === "prism" ? 0 : definition.nextAt,
-    emoji: definition.emoji,
-    color: definition.color,
-    backgroundColor: definition.backgroundColor,
-    title: definition.title,
-  };
+  return titles;
 }
 
 const LEVEL_LABEL: Record<BadgeLevel, string> = {
@@ -345,8 +283,48 @@ function LevelTag({
   );
 }
 
+function BadgeCard({ badge, onPress }: { badge: Badge; onPress: () => void }) {
+  const isPrism = badge.level === "prism";
+
+  return (
+    <Pressable
+      onPress={onPress}
+      style={({ pressed }) => [styles.badgeCard, pressed && styles.pressed]}
+    >
+      {isPrism ? (
+        <LinearGradient
+          colors={["#C4B5FD", "#FBCFE8", "#BAE6FD", "#FDE68A", "#C4B5FD"]}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          style={styles.badgeCardInner}
+        >
+          <Text style={styles.badgeEmoji}>{badge.emoji}</Text>
+          <Text style={[styles.badgeLevel, { color: "#5B21B6" }]}>{LEVEL_LABEL[badge.level]}</Text>
+          <Text numberOfLines={2} style={[styles.badgeName, { color: "#4C1D95", fontWeight: "700" }]}>
+            {badge.name}
+          </Text>
+        </LinearGradient>
+      ) : (
+        <View
+          style={[
+            styles.badgeCardInner,
+            { backgroundColor: badge.backgroundColor, borderWidth: 1.5, borderColor: "transparent" },
+          ]}
+        >
+          <Text style={styles.badgeEmoji}>{badge.emoji}</Text>
+          <Text style={[styles.badgeLevel, { color: badge.color }]}>{LEVEL_LABEL[badge.level]}</Text>
+          <Text numberOfLines={2} style={styles.badgeName}>
+            {badge.name}
+          </Text>
+        </View>
+      )}
+    </Pressable>
+  );
+}
+
 export default function MyScreen() {
   const [nickname, setNickname] = useState("사용자");
+  const [avatarUrl, setAvatarUrl] = useState<string | null>(null);
   const [isUserLoading, setIsUserLoading] = useState(true);
 
   const [journey, setJourney] = useState<ActiveJourney | null>(null);
@@ -356,9 +334,15 @@ export default function MyScreen() {
   const [discoveredInterests, setDiscoveredInterests] = useState<string[]>([]);
   const [isAiInterestLoading, setIsAiInterestLoading] = useState(true);
 
-  const [selectedTitleId, setSelectedTitleId] = useState<string | null>(null);
+  const [selectedTitle, setSelectedTitle] = useState<string | null>(null);
   const [earnedBadges, setEarnedBadges] = useState<Badge[]>([]);
   const [selectedBadge, setSelectedBadge] = useState<Badge | null>(null);
+
+  const [profileModalVisible, setProfileModalVisible] = useState(false);
+  const [draftNickname, setDraftNickname] = useState("");
+  const [draftAvatarUri, setDraftAvatarUri] = useState<string | null>(null);
+  const [draftTitle, setDraftTitle] = useState<string | null>(null);
+  const [profileSaving, setProfileSaving] = useState(false);
 
   const [stats, setStats] = useState<StatItem[]>([
     { label: "완료 미션", value: "0" },
@@ -399,7 +383,8 @@ export default function MyScreen() {
               `
               nickname,
               interests,
-              selected_title_id
+              avatar_url,
+              selected_title
               `,
             )
             .eq("id", user.id)
@@ -410,18 +395,15 @@ export default function MyScreen() {
 
             setNickname(user.user_metadata.nickname ?? "사용자");
             setInitialInterests([]);
-            setSelectedTitleId(null);
+            setAvatarUrl(null);
+            setSelectedTitle(null);
           } else {
             setNickname(
               profileData.nickname ?? user.user_metadata.nickname ?? "사용자",
             );
             setInitialInterests(normalizeStringArray(profileData.interests));
-            setSelectedTitleId(
-              profileData.selected_title_id === null ||
-                profileData.selected_title_id === undefined
-                ? null
-                : String(profileData.selected_title_id),
-            );
+            setAvatarUrl(profileData.avatar_url ?? null);
+            setSelectedTitle(profileData.selected_title ?? null);
           }
 
           const now = new Date();
@@ -472,18 +454,9 @@ export default function MyScreen() {
               .eq("user_id", user.id)
               .eq("status", "completed"),
 
-            supabase
-              .from("user_badges")
-              .select(
-                `
-                badge_id,
-                points,
-                tier,
-                updated_at
-                `,
-              )
-              .eq("user_id", user.id)
-              .order("updated_at", { ascending: false }),
+            getMyBadges()
+              .then((data) => ({ data, error: null as null }))
+              .catch((error) => ({ data: [] as Awaited<ReturnType<typeof getMyBadges>>, error })),
 
             supabase
               .from("journeys")
@@ -519,7 +492,7 @@ export default function MyScreen() {
           ].filter(Boolean);
 
           queryErrors.forEach((error) => {
-            console.error("MY 데이터 조회 실패:", error?.message);
+            console.error("MY 데이터 조회 실패:", (error as Error)?.message);
           });
 
           const records = (recordsResult.data ?? []) as MyRecord[];
@@ -538,27 +511,44 @@ export default function MyScreen() {
 
           setJourneyRecordCount(journeyCompletedDayCount);
 
-          const userBadgeRows = (badgesResult.data ?? []) as UserBadgeRow[];
-          const uniqueBadgeRows = new Map<string, UserBadgeRow>();
+          const myBadgeRows = badgesResult.data ?? [];
 
-          userBadgeRows.forEach((row) => {
-            const badgeId = String(row.badge_id);
+          const earnedBadgeList: Badge[] = myBadgeRows
+            .filter((row) => row.tier !== "LOCKED")
+            .map((row) => {
+              const level = normalizeBadgeLevel(row.tier);
+              const palette =
+                CATEGORY_COLORS[row.badge_id] ??
+                { color: COLORS.primary, backgroundColor: COLORS.primaryLight };
 
-            // updated_at 내림차순으로 조회했으므로 같은 뱃지는 첫 행만 사용합니다.
-            if (!uniqueBadgeRows.has(badgeId)) {
-              uniqueBadgeRows.set(badgeId, row);
-            }
-          });
+              const titleHistory = buildTitlesForBadge(
+                row.badge.name,
+                level,
+                row.badge.title,
+              );
 
-          const earnedBadgeList = Array.from(uniqueBadgeRows.values()).map(
-            createBadgeFromRow,
-          );
+              return {
+                id: row.badge_id,
+                name: row.badge.name,
+                category: row.badge_id,
+                level,
+                count: row.points,
+                nextAt: level === "prism" ? 0 : TIER_NEXT_POINTS[level],
+                emoji: row.badge.icon,
+                color: palette.color,
+                backgroundColor: palette.backgroundColor,
+                title: titleHistory[titleHistory.length - 1],
+                titleHistory,
+              };
+            });
 
           setEarnedBadges(earnedBadgeList);
 
           const recordIds = records.map((record) => record.id);
           const discoveredPlaceCount = new Set(
-            records.map((record) => record.place_id).filter(Boolean),
+            records
+              .map((record) => record.place_id)
+              .filter((placeId): placeId is string => Boolean(placeId)),
           ).size;
 
           let receivedLikesCount = 0;
@@ -722,14 +712,94 @@ ${experienceText}
         ? "D-DAY"
         : `D-${journeyDday}`;
 
-  const selectedTitle =
-    earnedBadges.find((badge) => badge.id === selectedTitleId)?.title ?? null;
+  const titleOptions = useMemo(
+    () => Array.from(new Set(earnedBadges.flatMap((badge) => badge.titleHistory))),
+    [earnedBadges],
+  );
+
+  const handlePickAvatar = async () => {
+    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+
+    if (!permission.granted) {
+      Alert.alert("사진 권한이 필요해요", "프로필 사진을 바꾸려면 사진 접근을 허용해주세요.");
+      return;
+    }
+
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ["images"],
+      quality: 0.85,
+      allowsEditing: true,
+      aspect: [1, 1],
+    });
+
+    if (!result.canceled) {
+      setDraftAvatarUri(result.assets[0].uri);
+    }
+  };
 
   const handleProfileEdit = () => {
-    Alert.alert(
-      "프로필 수정",
-      "프로필 이미지와 닉네임을 수정하는 화면은 추후 연결할 예정입니다.",
-    );
+    setDraftNickname(nickname);
+    setDraftAvatarUri(null);
+    setDraftTitle(selectedTitle);
+    setProfileModalVisible(true);
+  };
+
+  const handleSaveProfile = async () => {
+    if (!draftNickname.trim()) {
+      Alert.alert("닉네임을 입력해주세요", "닉네임은 비워둘 수 없어요.");
+      return;
+    }
+
+    setProfileSaving(true);
+    try {
+      let newAvatarUrl = avatarUrl;
+
+      if (draftAvatarUri) {
+        const {
+          data: { user },
+        } = await supabase.auth.getUser();
+
+        if (user) {
+          const response = await fetch(draftAvatarUri);
+          const arrayBuffer = await response.arrayBuffer();
+          const path = `${user.id}/avatar-${Date.now()}.jpg`;
+
+          const { error: uploadError } = await supabase.storage
+            .from("profile-photos")
+            .upload(path, arrayBuffer, {
+              contentType: "image/jpeg",
+              upsert: true,
+            });
+
+          if (uploadError) {
+            throw uploadError;
+          }
+
+          const { data: publicUrlData } = supabase.storage
+            .from("profile-photos")
+            .getPublicUrl(path);
+
+          newAvatarUrl = publicUrlData.publicUrl;
+        }
+      }
+
+      await updateMyProfile({
+        nickname: draftNickname.trim(),
+        avatar_url: newAvatarUrl ?? undefined,
+        selected_title: draftTitle,
+      } as any);
+
+      setNickname(draftNickname.trim());
+      setAvatarUrl(newAvatarUrl);
+      setSelectedTitle(draftTitle);
+      setProfileModalVisible(false);
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "프로필을 저장하지 못했습니다.";
+      Alert.alert("프로필 저장 실패", message);
+    } finally {
+      setProfileSaving(false);
+    }
   };
 
   const handleSettingPress = (setting: SettingItem) => {
@@ -747,10 +817,10 @@ ${experienceText}
 
     try {
       await updateMyProfile({
-        selected_title_id: badge.id,
-      });
+        selected_title: badge.title,
+      } as any);
 
-      setSelectedTitleId(badge.id);
+      setSelectedTitle(badge.title);
 
       Alert.alert(
         "대표 칭호 설정",
@@ -894,7 +964,7 @@ ${experienceText}
               ]}
             >
               <Text style={styles.equipTitleButtonText}>
-                {selectedTitleId === selectedBadge.id
+                {selectedTitle === selectedBadge.title
                   ? "현재 대표 칭호"
                   : "대표 칭호로 설정"}
               </Text>
@@ -916,7 +986,11 @@ ${experienceText}
         {/* 프로필 */}
         <View style={styles.profileSection}>
           <View style={styles.profileImage}>
-            <Text style={styles.profileEmoji}>🧑</Text>
+            {avatarUrl ? (
+              <Image source={{ uri: avatarUrl }} style={styles.avatarImage} />
+            ) : (
+              <Text style={styles.profileEmoji}>🧑</Text>
+            )}
           </View>
 
           <View style={styles.profileTextArea}>
@@ -1046,41 +1120,13 @@ ${experienceText}
 
           {earnedBadges.length > 0 ? (
             <View style={styles.badgeGrid}>
-              {earnedBadges.map((badge) => {
-                const isPrism = badge.level === "prism";
-
-                return (
-                  <Pressable
-                    key={badge.id}
-                    onPress={() => setSelectedBadge(badge)}
-                    style={({ pressed }) => [
-                      styles.badgeCard,
-                      {
-                        backgroundColor: badge.backgroundColor,
-                        borderColor: isPrism
-                          ? COLORS.primary
-                          : "transparent",
-                      },
-                      pressed && styles.pressed,
-                    ]}
-                  >
-                    <Text style={styles.badgeEmoji}>{badge.emoji}</Text>
-                    <Text
-                      style={[
-                        styles.badgeLevel,
-                        {
-                          color: badge.color,
-                        },
-                      ]}
-                    >
-                      {LEVEL_LABEL[badge.level]}
-                    </Text>
-                    <Text numberOfLines={2} style={styles.badgeName}>
-                      {badge.name}
-                    </Text>
-                  </Pressable>
-                );
-              })}
+              {earnedBadges.map((badge) => (
+                <BadgeCard
+                  key={badge.id}
+                  badge={badge}
+                  onPress={() => setSelectedBadge(badge)}
+                />
+              ))}
             </View>
           ) : (
             <View style={styles.emptyBadgeArea}>
@@ -1143,6 +1189,123 @@ ${experienceText}
 
         <View style={styles.bottomSpace} />
       </ScrollView>
+
+      <Modal
+        visible={profileModalVisible}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setProfileModalVisible(false)}
+      >
+        <KeyboardAvoidingView
+          style={styles.profileModalOverlay}
+          behavior={Platform.OS === "ios" ? "padding" : undefined}
+        >
+          <Pressable
+            style={styles.profileModalBackdrop}
+            onPress={() => setProfileModalVisible(false)}
+          />
+          <View style={styles.profileModalCard}>
+            <View style={styles.profileModalHandle} />
+            <ScrollView
+              showsVerticalScrollIndicator={false}
+              keyboardShouldPersistTaps="handled"
+              contentContainerStyle={styles.profileModalContent}
+            >
+              <Text style={styles.profileModalTitle}>프로필 수정</Text>
+
+              <Pressable onPress={handlePickAvatar} style={styles.avatarPicker}>
+                {draftAvatarUri || avatarUrl ? (
+                  <Image
+                    source={{ uri: draftAvatarUri ?? avatarUrl ?? undefined }}
+                    style={styles.avatarPickerImage}
+                  />
+                ) : (
+                  <Text style={styles.profileEmoji}>🧑</Text>
+                )}
+                <View style={styles.avatarEditBadge}>
+                  <Ionicons name="camera" size={14} color={COLORS.white} />
+                </View>
+              </Pressable>
+
+              <Text style={styles.profileModalLabel}>닉네임</Text>
+              <TextInput
+                value={draftNickname}
+                onChangeText={setDraftNickname}
+                placeholder="닉네임을 입력해주세요"
+                placeholderTextColor={COLORS.textMuted}
+                style={styles.profileModalInput}
+                maxLength={20}
+              />
+
+              <Text style={styles.profileModalLabel}>대표 칭호</Text>
+              {titleOptions.length > 0 ? (
+                <View style={styles.titleOptionWrap}>
+                  <Pressable
+                    onPress={() => setDraftTitle(null)}
+                    style={[
+                      styles.titleOptionChip,
+                      draftTitle === null && styles.titleOptionChipSelected,
+                    ]}
+                  >
+                    <Text
+                      style={[
+                        styles.titleOptionText,
+                        draftTitle === null && styles.titleOptionTextSelected,
+                      ]}
+                    >
+                      없음
+                    </Text>
+                  </Pressable>
+                  {titleOptions.map((titleOption) => (
+                    <Pressable
+                      key={titleOption}
+                      onPress={() => setDraftTitle(titleOption)}
+                      style={[
+                        styles.titleOptionChip,
+                        draftTitle === titleOption && styles.titleOptionChipSelected,
+                      ]}
+                    >
+                      <Text
+                        style={[
+                          styles.titleOptionText,
+                          draftTitle === titleOption && styles.titleOptionTextSelected,
+                        ]}
+                      >
+                        {titleOption}
+                      </Text>
+                    </Pressable>
+                  ))}
+                </View>
+              ) : (
+                <Text style={styles.interestNotice}>
+                  아직 획득한 칭호가 없어요. 미션을 완료해서 뱃지를 모아보세요.
+                </Text>
+              )}
+
+              <Pressable
+                onPress={() => void handleSaveProfile()}
+                disabled={profileSaving}
+                style={({ pressed }) => [
+                  styles.profileSaveButton,
+                  pressed && styles.pressed,
+                  profileSaving && { opacity: 0.6 },
+                ]}
+              >
+                <Text style={styles.profileSaveButtonText}>
+                  {profileSaving ? "저장 중..." : "저장하기"}
+                </Text>
+              </Pressable>
+
+              <Pressable
+                onPress={() => setProfileModalVisible(false)}
+                style={{ alignItems: "center", marginTop: 12 }}
+              >
+                <Text style={{ color: COLORS.textMuted, fontSize: 12 }}>취소</Text>
+              </Pressable>
+            </ScrollView>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -1162,8 +1325,6 @@ const styles = StyleSheet.create({
     opacity: 0.7,
   },
 
-  /* 프로필 */
-
   profileSection: {
     flexDirection: "row",
     alignItems: "center",
@@ -1180,6 +1341,12 @@ const styles = StyleSheet.create({
     borderWidth: 2,
     borderColor: COLORS.primaryLight,
     borderRadius: 34,
+    overflow: "hidden",
+  },
+
+  avatarImage: {
+    width: "100%",
+    height: "100%",
   },
 
   profileEmoji: {
@@ -1213,8 +1380,6 @@ const styles = StyleSheet.create({
     color: COLORS.textSub,
   },
 
-  /* 공통 태그 */
-
   levelTag: {
     alignSelf: "flex-start",
     paddingHorizontal: 8,
@@ -1226,8 +1391,6 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontWeight: "700",
   },
-
-  /* 진행 카드 */
 
   journeyCard: {
     marginBottom: 14,
@@ -1275,8 +1438,6 @@ const styles = StyleSheet.create({
     borderRadius: 3,
   },
 
-  /* 통계 */
-
   statsGrid: {
     flexDirection: "row",
     flexWrap: "wrap",
@@ -1309,8 +1470,6 @@ const styles = StyleSheet.create({
     color: COLORS.textMuted,
   },
 
-  /* 공통 섹션 */
-
   sectionCard: {
     marginBottom: 14,
     padding: 15,
@@ -1326,8 +1485,6 @@ const styles = StyleSheet.create({
     fontWeight: "700",
     color: COLORS.textMain,
   },
-
-  /* 취향 */
 
   interestGroup: {
     marginBottom: 10,
@@ -1379,8 +1536,6 @@ const styles = StyleSheet.create({
     color: COLORS.textMuted,
   },
 
-  /* 뱃지 목록 */
-
   badgeGrid: {
     flexDirection: "row",
     flexWrap: "wrap",
@@ -1392,12 +1547,16 @@ const styles = StyleSheet.create({
     minHeight: 100,
     marginHorizontal: "1.5%",
     marginBottom: 10,
+  },
+
+  badgeCardInner: {
+    flex: 1,
     paddingHorizontal: 7,
     paddingVertical: 13,
     alignItems: "center",
     justifyContent: "center",
-    borderWidth: 1.5,
     borderRadius: 14,
+    overflow: "hidden",
   },
 
   badgeEmoji: {
@@ -1436,8 +1595,6 @@ const styles = StyleSheet.create({
     fontSize: 11,
     color: COLORS.textMuted,
   },
-
-  /* 설정 */
 
   settingsCard: {
     marginBottom: 14,
@@ -1509,8 +1666,6 @@ const styles = StyleSheet.create({
   bottomSpace: {
     height: 120,
   },
-
-  /* 뱃지 상세 */
 
   badgeDetailContent: {
     paddingHorizontal: 20,
@@ -1621,6 +1776,146 @@ const styles = StyleSheet.create({
   equipTitleButtonText: {
     fontSize: 14,
     fontWeight: "700",
+    color: COLORS.white,
+  },
+
+  profileModalOverlay: {
+    flex: 1,
+    justifyContent: "flex-end",
+  },
+
+  profileModalBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: "rgba(0,0,0,0.44)",
+  },
+
+  profileModalCard: {
+    maxHeight: "85%",
+    backgroundColor: COLORS.white,
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+  },
+
+  profileModalHandle: {
+    alignSelf: "center",
+    width: 42,
+    height: 5,
+    marginTop: 10,
+    backgroundColor: "#D7D9DE",
+    borderRadius: 3,
+  },
+
+  profileModalContent: {
+    paddingHorizontal: 20,
+    paddingTop: 17,
+    paddingBottom: 34,
+    alignItems: "center",
+  },
+
+  profileModalTitle: {
+    alignSelf: "flex-start",
+    marginBottom: 18,
+    fontSize: 18,
+    fontWeight: "800",
+    color: COLORS.textMain,
+  },
+
+  avatarPicker: {
+    width: 88,
+    height: 88,
+    marginBottom: 20,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#DCE3FF",
+    borderRadius: 44,
+    overflow: "hidden",
+  },
+
+  avatarPickerImage: {
+    width: "100%",
+    height: "100%",
+  },
+
+  avatarEditBadge: {
+    position: "absolute",
+    right: -2,
+    bottom: -2,
+    width: 28,
+    height: 28,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: COLORS.primary,
+    borderRadius: 14,
+    borderWidth: 2,
+    borderColor: COLORS.white,
+  },
+
+  profileModalLabel: {
+    alignSelf: "flex-start",
+    marginBottom: 9,
+    fontSize: 13,
+    fontWeight: "700",
+    color: COLORS.textMain,
+  },
+
+  profileModalInput: {
+    width: "100%",
+    height: 48,
+    marginBottom: 18,
+    paddingHorizontal: 14,
+    fontSize: 14,
+    color: COLORS.textMain,
+    backgroundColor: COLORS.background,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: 12,
+  },
+
+  titleOptionWrap: {
+    width: "100%",
+    flexDirection: "row",
+    flexWrap: "wrap",
+    marginBottom: 20,
+  },
+
+  titleOptionChip: {
+    marginRight: 8,
+    marginBottom: 8,
+    paddingHorizontal: 13,
+    paddingVertical: 8,
+    backgroundColor: COLORS.background,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: 18,
+  },
+
+  titleOptionChipSelected: {
+    backgroundColor: COLORS.primaryLight,
+    borderColor: COLORS.primary,
+  },
+
+  titleOptionText: {
+    fontSize: 12,
+    color: COLORS.textSub,
+  },
+
+  titleOptionTextSelected: {
+    fontWeight: "700",
+    color: COLORS.primary,
+  },
+
+  profileSaveButton: {
+    width: "100%",
+    minHeight: 52,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: COLORS.primary,
+    borderRadius: 14,
+  },
+
+  profileSaveButtonText: {
+    fontSize: 15,
+    fontWeight: "800",
     color: COLORS.white,
   },
 });

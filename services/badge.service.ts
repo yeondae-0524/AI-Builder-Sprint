@@ -11,6 +11,7 @@ export type Badge = {
   id: string;
   name: string;
   icon: string;
+  title: string | null;
   description: string | null;
   created_at: string | null;
 };
@@ -68,9 +69,7 @@ function normalizeTier(value: unknown): BadgeTier {
   return "LOCKED";
 }
 
-function getNextTier(
-  points: number,
-): {
+function getNextTier(points: number): {
   nextTier: Exclude<BadgeTier, "LOCKED"> | null;
   nextTierPoints: number | null;
   pointsToNextTier: number;
@@ -79,8 +78,7 @@ function getNextTier(
     return {
       nextTier: "BRONZE",
       nextTierPoints: TIER_THRESHOLDS.BRONZE,
-      pointsToNextTier:
-        TIER_THRESHOLDS.BRONZE - points,
+      pointsToNextTier: TIER_THRESHOLDS.BRONZE - points,
     };
   }
 
@@ -88,8 +86,7 @@ function getNextTier(
     return {
       nextTier: "SILVER",
       nextTierPoints: TIER_THRESHOLDS.SILVER,
-      pointsToNextTier:
-        TIER_THRESHOLDS.SILVER - points,
+      pointsToNextTier: TIER_THRESHOLDS.SILVER - points,
     };
   }
 
@@ -97,8 +94,7 @@ function getNextTier(
     return {
       nextTier: "GOLD",
       nextTierPoints: TIER_THRESHOLDS.GOLD,
-      pointsToNextTier:
-        TIER_THRESHOLDS.GOLD - points,
+      pointsToNextTier: TIER_THRESHOLDS.GOLD - points,
     };
   }
 
@@ -106,8 +102,7 @@ function getNextTier(
     return {
       nextTier: "PRISM",
       nextTierPoints: TIER_THRESHOLDS.PRISM,
-      pointsToNextTier:
-        TIER_THRESHOLDS.PRISM - points,
+      pointsToNextTier: TIER_THRESHOLDS.PRISM - points,
     };
   }
 
@@ -118,9 +113,6 @@ function getNextTier(
   };
 }
 
-/**
- * 모든 배지 정의를 조회한다.
- */
 export async function getBadges(): Promise<Badge[]> {
   const { data, error } = await supabase
     .from("badges")
@@ -129,6 +121,7 @@ export async function getBadges(): Promise<Badge[]> {
         id,
         name,
         icon,
+        title,
         description,
         created_at
       `,
@@ -146,97 +139,72 @@ export async function getBadges(): Promise<Badge[]> {
   return (data ?? []) as Badge[];
 }
 
-/**
- * 현재 사용자의 전체 배지 목록을 조회한다.
- *
- * user_badges 행이 아직 없는 배지도
- * points 0, tier LOCKED 상태로 함께 반환한다.
- */
 export async function getMyBadges(): Promise<UserBadge[]> {
   const userId = await getCurrentUserId();
 
-  const [badgesResult, userBadgesResult] =
-    await Promise.all([
-      supabase
-        .from("badges")
-        .select(
-          `
-            id,
-            name,
-            icon,
-            description,
-            created_at
-          `,
-        )
-        .order("created_at", {
-          ascending: true,
-          nullsFirst: true,
-        }),
+  const [badgesResult, userBadgesResult] = await Promise.all([
+    supabase
+      .from("badges")
+      .select(
+        `
+          id,
+          name,
+          icon,
+          title,
+          description,
+          created_at
+        `,
+      )
+      .order("created_at", {
+        ascending: true,
+        nullsFirst: true,
+      }),
 
-      supabase
-        .from("user_badges")
-        .select(
-          `
-            id,
-            user_id,
-            badge_id,
-            points,
-            tier,
-            updated_at
-          `,
-        )
-        .eq("user_id", userId),
-    ]);
+    supabase
+      .from("user_badges")
+      .select(
+        `
+          id,
+          user_id,
+          badge_id,
+          points,
+          tier,
+          updated_at
+        `,
+      )
+      .eq("user_id", userId),
+  ]);
 
   if (badgesResult.error) {
-    console.error(
-      "getMyBadges badges Error:",
-      badgesResult.error,
-    );
+    console.error("getMyBadges badges Error:", badgesResult.error);
     throw badgesResult.error;
   }
 
   if (userBadgesResult.error) {
-    console.error(
-      "getMyBadges user_badges Error:",
-      userBadgesResult.error,
-    );
+    console.error("getMyBadges user_badges Error:", userBadgesResult.error);
     throw userBadgesResult.error;
   }
 
   const userBadgeByBadgeId = new Map(
-    (userBadgesResult.data ?? []).map(
-      (row) => [String(row.badge_id), row],
-    ),
+    (userBadgesResult.data ?? []).map((row) => [String(row.badge_id), row]),
   );
 
-  return (badgesResult.data ?? []).map(
-    (badge) => {
-      const userBadge =
-        userBadgeByBadgeId.get(String(badge.id));
+  return (badgesResult.data ?? []).map((badge) => {
+    const userBadge = userBadgeByBadgeId.get(String(badge.id));
 
-      return {
-        id: userBadge
-          ? String(userBadge.id)
-          : null,
-        user_id: userId,
-        badge_id: String(badge.id),
-        points: userBadge?.points ?? 0,
-        tier: normalizeTier(userBadge?.tier),
-        updated_at:
-          userBadge?.updated_at ?? null,
-        badge: badge as Badge,
-      };
-    },
-  );
+    return {
+      id: userBadge ? String(userBadge.id) : null,
+      user_id: userId,
+      badge_id: String(badge.id),
+      points: userBadge?.points ?? 0,
+      tier: normalizeTier(userBadge?.tier),
+      updated_at: userBadge?.updated_at ?? null,
+      badge: badge as Badge,
+    };
+  });
 }
 
-/**
- * 현재 사용자의 배지와 다음 등급까지의 진행도를 조회한다.
- */
-export async function getMyBadgeProgress(): Promise<
-  BadgeProgress[]
-> {
+export async function getMyBadgeProgress(): Promise<BadgeProgress[]> {
   const badges = await getMyBadges();
 
   return badges.map((badge) => ({
@@ -245,33 +213,19 @@ export async function getMyBadgeProgress(): Promise<
   }));
 }
 
-/**
- * 현재 사용자가 잠금 해제한 배지만 조회한다.
- */
-export async function getMyUnlockedBadges(): Promise<
-  UserBadge[]
-> {
+export async function getMyUnlockedBadges(): Promise<UserBadge[]> {
   const badges = await getMyBadges();
 
-  return badges.filter(
-    (badge) => badge.tier !== "LOCKED",
-  );
+  return badges.filter((badge) => badge.tier !== "LOCKED");
 }
 
-/**
- * 특정 배지의 현재 사용자 상태를 조회한다.
- */
-export async function getMyBadgeById(
-  badgeId: string,
-): Promise<UserBadge> {
+export async function getMyBadgeById(badgeId: string): Promise<UserBadge> {
   if (!badgeId.trim()) {
     throw new Error("badgeId가 필요합니다.");
   }
 
   const badges = await getMyBadges();
-  const badge = badges.find(
-    (item) => item.badge_id === badgeId,
-  );
+  const badge = badges.find((item) => item.badge_id === badgeId);
 
   if (!badge) {
     throw new Error("배지를 찾을 수 없습니다.");

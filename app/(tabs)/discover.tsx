@@ -651,7 +651,7 @@ export default function DiscoverScreen() {
         <Animated.View style={[styles.fabGlow, { transform: [{ scale: glowScale }], opacity: glowOpacity }]} />
         <Animated.View style={{ transform: [{ scale: btnScale }] }}>
           <Pressable style={styles.fabBtn} onPress={openPicker}>
-            <Ionicons name="search" size={26} color={WH} />
+            <Ionicons name="create-outline" size={26} color={WH} />
           </Pressable>
         </Animated.View>
       </View>
