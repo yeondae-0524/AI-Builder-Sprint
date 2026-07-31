@@ -18,6 +18,7 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
+import { supabase } from "../../lib/supabase";
 import {
   createEssayDraft,
   EssayDashboardData,
@@ -93,6 +94,67 @@ const EMOTION_LABELS: Record<string, string> = {
 };
 
 type DetailMode = "view" | "edit" | "versions";
+
+type SupabaseErrorLike = {
+  code?: string | null;
+  message?: string | null;
+};
+
+function sleep(milliseconds: number) {
+  return new Promise<void>((resolve) => {
+    setTimeout(resolve, milliseconds);
+  });
+}
+
+function isJwtIssuedAtFutureError(error: unknown) {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+
+  const candidate = error as SupabaseErrorLike;
+  const code = String(candidate.code ?? "");
+  const message = String(candidate.message ?? "").toLowerCase();
+
+  return (
+    message.includes("jwt issued at future") ||
+    (code === "PGRST303" && message.includes("jwt"))
+  );
+}
+
+async function refreshSupabaseSession() {
+  // 기기와 서버의 시간이 아주 조금 어긋난 경우를 고려해 잠깐 기다린 뒤 갱신한다.
+  await sleep(1200);
+
+  const { data, error } = await supabase.auth.refreshSession();
+
+  if (error) {
+    throw error;
+  }
+
+  if (!data.session) {
+    throw new Error(
+      "로그인 세션을 갱신하지 못했습니다. 기기의 날짜와 시간을 자동으로 맞춘 뒤 다시 로그인해주세요.",
+    );
+  }
+
+  return data.session;
+}
+
+async function withJwtRetry<T>(
+  operation: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    if (!isJwtIssuedAtFutureError(error)) {
+      throw error;
+    }
+
+    await refreshSupabaseSession();
+    return operation();
+  }
+}
+
 
 function getErrorMessage(error: unknown, fallback: string) {
   if (error instanceof Error && error.message.trim()) {
@@ -219,9 +281,23 @@ export default function EssayScreen() {
   const loadDashboard = useCallback(async (showLoading = true) => {
     try {
       if (showLoading) setScreenLoading(true);
-      const data = await getEssayDashboardData();
+      const data = await withJwtRetry(() => getEssayDashboardData());
       setDashboard(data);
     } catch (error) {
+      const details = error as {
+        code?: unknown;
+        message?: unknown;
+        details?: unknown;
+        hint?: unknown;
+      };
+
+      console.error("에세이 불러오기 실패:", {
+        code: details?.code,
+        message: details?.message,
+        details: details?.details,
+        hint: details?.hint,
+      });
+
       Alert.alert(
         "에세이 불러오기 실패",
         getErrorMessage(error, "에세이 정보를 불러오지 못했습니다."),
@@ -241,7 +317,7 @@ export default function EssayScreen() {
     try {
       setDetailLoading(true);
       const essayId = typeof summary === "string" ? summary : summary.id;
-      const detail = await getEssayById(essayId);
+      const detail = await withJwtRetry(() => getEssayById(essayId));
       setSelectedEssay(detail);
       setActiveVersionNo(detail.versions[0]?.versionNo ?? 1);
       setDetailMode(
@@ -261,7 +337,7 @@ export default function EssayScreen() {
 
   const reloadSelectedEssay = async () => {
     if (!selectedEssay) return;
-    const detail = await getEssayById(selectedEssay.id);
+    const detail = await withJwtRetry(() => getEssayById(selectedEssay.id));
     setSelectedEssay(detail);
     setEditTitle(detail.title);
     setEditContent(detail.content);
@@ -317,7 +393,7 @@ export default function EssayScreen() {
           onPress: async () => {
             try {
               setCreateLoading(true);
-              const essayId = await createEssayDraft(journey.id);
+              const essayId = await withJwtRetry(() => createEssayDraft(journey.id));
               await loadDashboard(false);
               await openEssay(essayId);
             } catch (error) {
@@ -343,7 +419,7 @@ export default function EssayScreen() {
 
     try {
       setVersionGenerating(true);
-      await generateEssayVersion(selectedEssay.id, "balanced");
+      await withJwtRetry(() => generateEssayVersion(selectedEssay.id, "balanced"));
       await reloadSelectedEssay();
       await loadDashboard(false);
     } catch (error) {
@@ -362,7 +438,7 @@ export default function EssayScreen() {
     try {
       setStyleModalVisible(false);
       setVersionGenerating(true);
-      await generateEssayVersion(selectedEssay.id, selectedStyle);
+      await withJwtRetry(() => generateEssayVersion(selectedEssay.id, selectedStyle));
       await reloadSelectedEssay();
       await loadDashboard(false);
     } catch (error) {
@@ -388,8 +464,8 @@ export default function EssayScreen() {
           onPress: async () => {
             try {
               setVersionSelecting(true);
-              await selectEssayVersion(selectedEssay.id, versionNo);
-              const detail = await getEssayById(selectedEssay.id);
+              await withJwtRetry(() => selectEssayVersion(selectedEssay.id, versionNo));
+              const detail = await withJwtRetry(() => getEssayById(selectedEssay.id));
               setSelectedEssay(detail);
               setEditTitle(detail.title);
               setEditContent(detail.content);
@@ -421,11 +497,11 @@ export default function EssayScreen() {
 
     try {
       setEditSaving(true);
-      await saveEssayDraft(selectedEssay.id, {
+      await withJwtRetry(() => saveEssayDraft(selectedEssay.id, {
         title: editTitle,
         content: editContent,
-      });
-      const detail = await getEssayById(selectedEssay.id);
+      }));
+      const detail = await withJwtRetry(() => getEssayById(selectedEssay.id));
       setSelectedEssay(detail);
       setEditTitle(detail.title);
       setEditContent(detail.content);
@@ -454,8 +530,8 @@ export default function EssayScreen() {
           text: "공개하기",
           onPress: async () => {
             try {
-              await publishEssay(selectedEssay.id);
-              const detail = await getEssayById(selectedEssay.id);
+              await withJwtRetry(() => publishEssay(selectedEssay.id));
+              const detail = await withJwtRetry(() => getEssayById(selectedEssay.id));
               setSelectedEssay(detail);
               await loadDashboard(false);
               Alert.alert("공개 완료", "에세이가 공개됐어요.");
