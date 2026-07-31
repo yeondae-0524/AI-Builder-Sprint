@@ -27,12 +27,12 @@ import {
   View,
 } from "react-native";
 
+import { KakaoMapView } from "../../components/KakaoMapView";
 import { supabase } from "../../lib/supabase";
 import {
   Mission as BackendMission,
   getRecommendedMissions,
 } from "../../services/challenge.service";
-import { KakaoMapView } from "./_kakao-map";
 
 const BL = "#3D5AFE";
 const BLL = "#EEF1FF";
