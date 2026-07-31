@@ -2,7 +2,7 @@ import { Ionicons } from "@expo/vector-icons";
 import * as ImagePicker from "expo-image-picker";
 import * as Location from "expo-location";
 import { useRouter } from "expo-router";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Alert,
   Animated,
@@ -42,10 +42,13 @@ const T3 = "#E4E6EA";
 const WH = "#FFFFFF";
 const BG = "#F7F8FA";
 
+const KAKAO_REST_API_KEY = "c10a1b62f7bbf1d90e0ff60bb94bdadd";
+
 const SCREEN_HEIGHT = Dimensions.get("window").height;
 const SHEET_CLOSE_POSITION = SCREEN_HEIGHT * 0.6;
 const MAX_PHOTOS = 5;
 const PICK_RADIUS_M = 100;
+const SEARCH_RESULT_RADIUS_KM = 0.5;
 
 const DEFAULT_CENTER = { lat: 35.1795543, lng: 129.0756416 };
 
@@ -55,6 +58,14 @@ const CATEGORIES = ["음식", "카페 및 디저트", "산책", "배움", "감�
 
 type EmotionValue = "comfortable" | "joyful" | "new" | "uncomfortable" | "unsure";
 type RecordVisibility = "private" | "anonymous";
+
+type KakaoPlace = {
+  id: string;
+  place_name: string;
+  address_name: string;
+  x: string; // lng
+  y: string; // lat
+};
 
 const EMOTIONS: Array<{ label: string; value: EmotionValue; emoji: string }> = [
   { label: "편안해요", value: "comfortable", emoji: "😌" },
@@ -121,6 +132,8 @@ export default function DiscoverScreen() {
   const [sheetBubble, setSheetBubble] = useState(null);
   const [liked, setLiked] = useState([]);
   const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<KakaoPlace[]>([]);
+  const [searching, setSearching] = useState(false);
   const [userLocation, setUserLocation] = useState<{ lat: number; lng: number } | null>(null);
   const [mapCenter, setMapCenter] = useState(DEFAULT_CENTER);
   const [tryingMission, setTryingMission] = useState(false);
@@ -141,6 +154,7 @@ export default function DiscoverScreen() {
 
   const sheetTranslateY = useRef(new Animated.Value(SHEET_CLOSE_POSITION)).current;
   const dragStart = useRef(0);
+  const searchDebounce = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const glowAnim = useRef(new Animated.Value(0)).current;
   useEffect(() => {
@@ -188,10 +202,36 @@ export default function DiscoverScreen() {
     init();
   }, []);
 
-  const searchResults = useMemo(() => {
-    if (!searchQuery.trim()) return [];
-    return bubbles.filter((b) => b.place.includes(searchQuery.trim()));
-  }, [searchQuery, bubbles]);
+  // 검색어 입력 → 카카오 장소 검색 (디바운스)
+  useEffect(() => {
+    if (searchDebounce.current) clearTimeout(searchDebounce.current);
+
+    if (!searchQuery.trim()) {
+      setSearchResults([]);
+      return;
+    }
+
+    searchDebounce.current = setTimeout(async () => {
+      setSearching(true);
+      try {
+        const res = await fetch(
+          `https://dapi.kakao.com/v2/local/search/keyword.json?query=${encodeURIComponent(searchQuery.trim())}&size=5`,
+          { headers: { Authorization: `KakaoAK ${KAKAO_REST_API_KEY}` } }
+        );
+        const data = await res.json();
+        setSearchResults(data.documents ?? []);
+      } catch (error) {
+        console.log("장소 검색 실패:", error instanceof Error ? error.message : error);
+        setSearchResults([]);
+      } finally {
+        setSearching(false);
+      }
+    }, 400);
+
+    return () => {
+      if (searchDebounce.current) clearTimeout(searchDebounce.current);
+    };
+  }, [searchQuery]);
 
   useEffect(() => {
     if (activeBubble) {
@@ -264,6 +304,7 @@ export default function DiscoverScreen() {
         placeLat: sheetBubble.lat,
         placeLng: sheetBubble.lng,
         placeName: sheetBubble.place,
+        photoUrl: sheetBubble.photo,
       });
 
       shareMissionToHome({
@@ -320,11 +361,23 @@ export default function DiscoverScreen() {
     ]);
   };
 
-  const handleSelectSearchResult = (bubble) => {
-    setMapCenter({ lat: bubble.lat, lng: bubble.lng });
-    setActiveBubble(bubble);
+  // 검색 결과 선택 → 지도 이동 + 그 주변 기록 다시 불러오기
+  const handleSelectSearchResult = async (place: KakaoPlace) => {
+    const lat = parseFloat(place.y);
+    const lng = parseFloat(place.x);
+
+    setMapCenter({ lat, lng });
     setSearchQuery("");
+    setSearchResults([]);
     Keyboard.dismiss();
+
+    try {
+      const posts = await getNearbyDiscoverPosts(lat, lng, SEARCH_RESULT_RADIUS_KM);
+      setBubbles(posts.length > 0 ? await buildBubbleList(posts) : []);
+    } catch (error) {
+      console.log("주변 기록 조회 실패:", error instanceof Error ? error.message : error);
+      setBubbles([]);
+    }
   };
 
   const openPicker = () => {
@@ -494,17 +547,21 @@ export default function DiscoverScreen() {
 
         {searchQuery.trim().length > 0 && (
           <View style={styles.searchDropdown}>
-            {searchResults.length > 0 ? (
-              searchResults.map((b) => (
+            {searching ? (
+              <Text style={styles.searchEmptyText}>검색 중...</Text>
+            ) : searchResults.length > 0 ? (
+              searchResults.map((place) => (
                 <Pressable
-                  key={b.id}
-                  onPress={() => handleSelectSearchResult(b)}
+                  key={place.id}
+                  onPress={() => handleSelectSearchResult(place)}
                   style={({ pressed }) => [styles.searchResultRow, pressed && { opacity: 0.6 }]}
                 >
                   <View style={styles.searchResultThumb} />
                   <View style={{ flex: 1 }}>
-                    <Text style={styles.searchResultPlace}>{b.place}</Text>
-                    <Text style={styles.searchResultMission}>{b.mission}</Text>
+                    <Text style={styles.searchResultPlace}>{place.place_name}</Text>
+                    <Text style={styles.searchResultMission} numberOfLines={1}>
+                      {place.address_name}
+                    </Text>
                   </View>
                 </Pressable>
               ))
