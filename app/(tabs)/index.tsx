@@ -287,6 +287,8 @@ const COST_OPTIONS: Array<{
   { value: "paid", label: "유료", backendValue: "유료" },
 ];
 
+
+
 const RADIUS_OPTIONS: RadiusKm[] = [1, 3, 5];
 
 // 부산광역시 공식 15개 자치구 + 기장군만 사용한다.
@@ -792,8 +794,6 @@ function haversineDistanceKm(
   return earthRadiusKm * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
-<<<<<<< HEAD
-=======
 
 function containsHangul(value: string | null | undefined) {
   return /[가-힣]/.test(value ?? "");
@@ -812,7 +812,6 @@ function isKoreanMissionText(value: string | null | undefined) {
   return hangulCount > 0 && hangulCount >= latinCount;
 }
 
->>>>>>> d5f6e2b (홈이랑 에세이 수정함)
 function inferAtHomeMission(
   mission: ExtendedBackendMission,
   inferenceText: string,
@@ -4678,6 +4677,7 @@ export default function HomeScreen() {
         onMarkerPress={handleMarkerPress}
       />
 
+
       <Animated.View
         style={[
           styles.sheet,
@@ -6171,6 +6171,8 @@ const styles = StyleSheet.create({
     fontWeight: "700",
     color: BL,
   },
+
+
   locationModeRow: {
     flexDirection: "row",
     marginBottom: 18,
@@ -6178,6 +6180,7 @@ const styles = StyleSheet.create({
     backgroundColor: BG,
     borderRadius: 12,
   },
+
   locationModeButton: {
     flex: 1,
     minHeight: 42,
@@ -6185,6 +6188,7 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     borderRadius: 9,
   },
+
   locationModeButtonSelected: {
     backgroundColor: WH,
     shadowColor: "#000000",
@@ -6193,24 +6197,29 @@ const styles = StyleSheet.create({
     shadowRadius: 5,
     elevation: 2,
   },
+
   locationModeText: {
     fontSize: 12,
     fontWeight: "700",
     color: T2,
   },
+
   locationModeTextSelected: {
     color: BL,
   },
+
   locationSubLabel: {
     marginBottom: 10,
     fontSize: 12,
     fontWeight: "700",
     color: T1,
   },
+
   radiusOptionRow: {
     flexDirection: "row",
     marginBottom: 14,
   },
+
   radiusOptionButton: {
     flex: 1,
     minHeight: 42,
@@ -6222,18 +6231,22 @@ const styles = StyleSheet.create({
     borderColor: T3,
     borderRadius: 10,
   },
+
   radiusOptionButtonSelected: {
     backgroundColor: BLL,
     borderColor: BL,
   },
+
   radiusOptionText: {
     fontSize: 12,
     fontWeight: "700",
     color: T1,
   },
+
   radiusOptionTextSelected: {
     color: BL,
   },
+
   locationAnyBox: {
     alignItems: "center",
     paddingHorizontal: 20,
@@ -6241,22 +6254,26 @@ const styles = StyleSheet.create({
     backgroundColor: BG,
     borderRadius: 14,
   },
+
   locationAnyEmoji: {
     marginBottom: 8,
     fontSize: 28,
   },
+
   locationAnyTitle: {
     marginBottom: 6,
     fontSize: 14,
     fontWeight: "800",
     color: T0,
   },
+
   locationAnyDescription: {
     textAlign: "center",
     fontSize: 11,
     lineHeight: 17,
     color: T2,
   },
+
   conditionModalOverlay: {
     flex: 1,
     justifyContent: "flex-end",
