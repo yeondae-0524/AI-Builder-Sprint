@@ -210,6 +210,8 @@ type ExtendedBackendMission = Partial<BackendMission> & {
 
 type ActiveJourney = {
   id: string;
+  startDate: string;
+  endDate: string;
 };
 
 type StartedAttempt = {
@@ -515,6 +517,79 @@ function toDateKey(date: Date) {
   const month = String(date.getMonth() + 1).padStart(2, "0");
   const day = String(date.getDate()).padStart(2, "0");
   return `${year}-${month}-${day}`;
+}
+
+function parseDateKey(value: string) {
+  const [year, month, day] = value
+    .split("-")
+    .map(Number);
+
+  if (
+    !Number.isInteger(year) ||
+    !Number.isInteger(month) ||
+    !Number.isInteger(day)
+  ) {
+    return null;
+  }
+
+  const date = new Date(year, month - 1, day, 12, 0, 0);
+
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function addDaysToDateKey(value: string, days: number) {
+  const date = parseDateKey(value);
+
+  if (!date) {
+    return value;
+  }
+
+  date.setDate(date.getDate() + days);
+  return toDateKey(date);
+}
+
+function getDateKeysBetween(startDate: string, endDate: string) {
+  if (startDate > endDate) {
+    return [];
+  }
+
+  const dates: string[] = [];
+  let current = startDate;
+
+  for (let index = 0; index < 370 && current <= endDate; index += 1) {
+    dates.push(current);
+    current = addDaysToDateKey(current, 1);
+  }
+
+  return dates;
+}
+
+function formatDateKeyKorean(value: string) {
+  const date = parseDateKey(value);
+
+  if (!date) {
+    return value;
+  }
+
+  return `${date.getFullYear()}. ${date.getMonth() + 1}. ${date.getDate()}`;
+}
+
+function getRecordDateOption(value: string) {
+  const date = parseDateKey(value);
+
+  if (!date) {
+    return {
+      monthDay: value,
+      weekday: "",
+    };
+  }
+
+  return {
+    monthDay: `${date.getMonth() + 1}/${date.getDate()}`,
+    weekday: ["일", "월", "화", "수", "목", "금", "토"][
+      date.getDay()
+    ],
+  };
 }
 
 function formatRecordDate(value: string) {
@@ -2626,6 +2701,9 @@ export default function HomeScreen() {
     useState<EmotionValue | "">("");
   const [recordVisibility, setRecordVisibility] =
     useState<RecordVisibility>("private");
+  const [recordDate, setRecordDate] = useState(
+    toDateKey(new Date()),
+  );
   const [recordPhotos, setRecordPhotos] = useState<
     ImagePicker.ImagePickerAsset[]
   >([]);
@@ -3091,7 +3169,7 @@ export default function HomeScreen() {
         error: journeyError,
       } = await supabase
         .from("journeys")
-        .select("id")
+        .select("id, start_date, end_date")
         .eq("user_id", user.id)
         .eq("status", "active")
         .lte("start_date", todayKey)
@@ -3114,7 +3192,11 @@ export default function HomeScreen() {
         return;
       }
 
-      const journey = { id: String(journeyData.id) };
+      const journey = {
+        id: String(journeyData.id),
+        startDate: String(journeyData.start_date),
+        endDate: String(journeyData.end_date),
+      };
       setActiveJourney(journey);
 
       const {
@@ -3588,6 +3670,23 @@ export default function HomeScreen() {
     [attemptMissions, completedRecords, missions],
   );
 
+  const recordDateOptions = useMemo(() => {
+    if (!recordMission || !activeJourney) {
+      return [];
+    }
+
+    const todayKey = toDateKey(new Date());
+    const latestDate =
+      activeJourney.endDate < todayKey
+        ? activeJourney.endDate
+        : todayKey;
+
+    return getDateKeysBetween(
+      activeJourney.startDate,
+      latestDate,
+    );
+  }, [activeJourney, recordMission]);
+
   const currentItems =
     sheetSection === "active"
       ? activeItems
@@ -4046,10 +4145,30 @@ export default function HomeScreen() {
   };
 
   const openRecordModal = (mission: HomeMission) => {
-    if (!startedAttempts[mission.id]) {
+    const attempt = startedAttempts[mission.id];
+
+    if (!attempt) {
       Alert.alert(
         "미션을 먼저 시작해주세요",
         "미션 시작 후 기록을 남길 수 있어요.",
+      );
+      return;
+    }
+
+    const todayKey = toDateKey(new Date());
+    const earliestDate =
+      activeJourney?.startDate ?? todayKey;
+    const journeyEndDate =
+      activeJourney?.endDate ?? todayKey;
+    const latestDate =
+      journeyEndDate < todayKey
+        ? journeyEndDate
+        : todayKey;
+
+    if (earliestDate > latestDate) {
+      Alert.alert(
+        "선택 가능한 날짜가 없어요",
+        "여정 시작 날짜와 종료 날짜를 확인해주세요.",
       );
       return;
     }
@@ -4058,6 +4177,7 @@ export default function HomeScreen() {
     setRecordContent("");
     setRecordEmotion("");
     setRecordVisibility("private");
+    setRecordDate(latestDate);
     setRecordPhotos([]);
   };
 
@@ -4070,6 +4190,7 @@ export default function HomeScreen() {
     setRecordContent("");
     setRecordEmotion("");
     setRecordVisibility("private");
+    setRecordDate(toDateKey(new Date()));
     setRecordPhotos([]);
   };
 
@@ -4290,6 +4411,17 @@ export default function HomeScreen() {
       return;
     }
 
+    if (
+      !recordDate ||
+      !recordDateOptions.includes(recordDate)
+    ) {
+      Alert.alert(
+        "수행 날짜를 선택해주세요",
+        "미션을 수행한 날짜를 다시 선택해주세요.",
+      );
+      return;
+    }
+
     try {
       setRecordSaving(true);
       const {
@@ -4308,13 +4440,14 @@ export default function HomeScreen() {
         data: createdRecordId,
         error: recordError,
       } = await supabase.rpc(
-        "complete_mission_with_record",
+        "complete_mission_with_record_on_date",
         {
           p_mission_attempt_id: attempt.id,
           p_emotion: recordEmotion,
           p_content: recordContent.trim(),
           p_visibility: recordVisibility,
           p_place_id: attempt.placeId,
+          p_recorded_at: recordDate,
         },
       );
 
@@ -4349,7 +4482,7 @@ export default function HomeScreen() {
 
       Alert.alert(
         "기록 완료",
-        `오늘의 경험이 여정에 저장됐어요.${photoWarning}`,
+        `${formatDateKeyKorean(recordDate)}의 경험이 여정에 저장됐어요.${photoWarning}`,
       );
     } catch (error) {
       console.error("기록 저장 실패:", error);
@@ -5369,6 +5502,74 @@ export default function HomeScreen() {
               ) : null}
 
               <Text style={styles.recordFieldLabel}>
+                미션 수행 날짜
+              </Text>
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                style={styles.recordDateScroll}
+                contentContainerStyle={
+                  styles.recordDateScrollContent
+                }
+              >
+                {recordDateOptions.map((dateKey) => {
+                  const option =
+                    getRecordDateOption(dateKey);
+                  const selected =
+                    recordDate === dateKey;
+                  const isToday =
+                    dateKey === toDateKey(new Date());
+
+                  return (
+                    <Pressable
+                      key={dateKey}
+                      onPress={() =>
+                        setRecordDate(dateKey)
+                      }
+                      style={[
+                        styles.recordDateChip,
+                        selected &&
+                          styles.recordDateChipSelected,
+                      ]}
+                    >
+                      <Text
+                        style={[
+                          styles.recordDateWeekday,
+                          selected &&
+                            styles.recordDateTextSelected,
+                        ]}
+                      >
+                        {option.weekday}
+                      </Text>
+                      <Text
+                        style={[
+                          styles.recordDateMonthDay,
+                          selected &&
+                            styles.recordDateTextSelected,
+                        ]}
+                      >
+                        {option.monthDay}
+                      </Text>
+                      {isToday ? (
+                        <Text
+                          style={[
+                            styles.recordDateToday,
+                            selected &&
+                              styles.recordDateTodaySelected,
+                          ]}
+                        >
+                          오늘
+                        </Text>
+                      ) : null}
+                    </Pressable>
+                  );
+                })}
+              </ScrollView>
+              <Text style={styles.recordDateHint}>
+                여정 시작일부터 오늘까지 선택할 수 있어요.
+              </Text>
+
+              <Text style={styles.recordFieldLabel}>
                 어떤 감정이 가장 컸나요?
               </Text>
               <View style={styles.emotionWrap}>
@@ -5402,7 +5603,7 @@ export default function HomeScreen() {
               </View>
 
               <Text style={styles.recordFieldLabel}>
-                오늘의 경험을 남겨주세요
+                그날의 경험을 남겨주세요
               </Text>
               <TextInput
                 value={recordContent}
@@ -6573,6 +6774,57 @@ const styles = StyleSheet.create({
   recordModalCloseText: {
     fontSize: 14,
     color: T1,
+  },
+  recordDateScroll: {
+    marginBottom: 8,
+  },
+  recordDateScrollContent: {
+    paddingRight: 8,
+  },
+  recordDateChip: {
+    width: 66,
+    minHeight: 76,
+    marginRight: 8,
+    paddingVertical: 10,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: BG,
+    borderWidth: 1,
+    borderColor: T3,
+    borderRadius: 14,
+  },
+  recordDateChipSelected: {
+    backgroundColor: PINK_LIGHT,
+    borderColor: PINK,
+  },
+  recordDateWeekday: {
+    marginBottom: 4,
+    fontSize: 10,
+    fontWeight: "700",
+    color: T2,
+  },
+  recordDateMonthDay: {
+    fontSize: 13,
+    fontWeight: "800",
+    color: T0,
+  },
+  recordDateTextSelected: {
+    color: PINK,
+  },
+  recordDateToday: {
+    marginTop: 4,
+    fontSize: 9,
+    fontWeight: "700",
+    color: T2,
+  },
+  recordDateTodaySelected: {
+    color: PINK,
+  },
+  recordDateHint: {
+    marginBottom: 18,
+    fontSize: 10,
+    lineHeight: 16,
+    color: T2,
   },
   recordPlaceBox: {
     marginBottom: 18,
