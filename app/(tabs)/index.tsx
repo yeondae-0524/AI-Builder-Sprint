@@ -28,11 +28,13 @@ import {
 } from "react-native";
 
 import { KakaoMapView } from "../../components/KakaoMapView";
+import { useMission } from "../../contexts/mission-context";
 import { supabase } from "../../lib/supabase";
 import {
   Mission as BackendMission,
   getRecommendedMissions,
 } from "../../services/challenge.service";
+
 
 const BL = "#3D5AFE";
 const BLL = "#EEF1FF";
@@ -444,6 +446,7 @@ function getCategoryEmoji(category: CategoryName) {
 export default function HomeScreen() {
   const [missions, setMissions] =
     useState<HomeMission[]>(FALLBACK_MISSIONS);
+  const { pendingSharedMission, clearPendingSharedMission } = useMission();
   const [loading, setLoading] = useState(true);
   const [selectedMission, setSelectedMission] =
     useState<HomeMission | null>(null);
@@ -638,6 +641,34 @@ export default function HomeScreen() {
       void loadJourneyAndAttempts();
     }, [loadJourneyAndAttempts]),
   );
+  useEffect(() => {
+  if (!pendingSharedMission) return;
+
+  const missionToAdd: HomeMission = {
+    id: pendingSharedMission.id,
+    title: pendingSharedMission.title,
+    desc: pendingSharedMission.desc,
+    instructions: pendingSharedMission.instructions,
+    recommendationReason: pendingSharedMission.recommendationReason,
+    time: pendingSharedMission.time,
+    dist: pendingSharedMission.dist,
+    cost: pendingSharedMission.cost,
+    cat: pendingSharedMission.cat as CategoryName,
+    requiredItems: pendingSharedMission.requiredItems,
+    placeId: pendingSharedMission.placeId,
+    placeLat: pendingSharedMission.placeLat,
+    placeLng: pendingSharedMission.placeLng,
+    placeName: pendingSharedMission.placeName,
+  };
+
+  setMissions((prev) => {
+    const exists = prev.some((m) => m.id === missionToAdd.id);
+    return exists ? prev : [missionToAdd, ...prev];
+  });
+  setSelectedMission(missionToAdd);
+  moveSheet(0);
+  clearPendingSharedMission();
+  }, [pendingSharedMission]);
 
   useEffect(() => {
     const fetchMissions = async () => {
