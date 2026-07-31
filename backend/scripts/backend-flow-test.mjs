@@ -116,6 +116,10 @@ async function getOrCreateActiveJourney(user) {
     `)
     .eq("user_id", user.id)
     .eq("status", "active")
+    .order("created_at", {
+      ascending: false,
+    })
+    .limit(1)
     .maybeSingle();
 
   throwIfError(
@@ -275,9 +279,14 @@ async function getOrCreateMissionAttempt(
       status
     `)
     .eq("user_id", user.id)
+    .eq("journey_id", journey.id)
     .in("status", ["selected", "started"])
+    .order("created_at", {
+      ascending: false,
+    })
+    .limit(1)
     .maybeSingle();
-
+    
   throwIfError(
     "진행 중인 미션 조회 실패",
     activeAttemptError,

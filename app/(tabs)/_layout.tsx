@@ -13,8 +13,8 @@ import {
   View,
 } from "react-native";
 
+import { MissionProvider } from "../../contexts/mission-context";
 import { supabase } from "../../lib/supabase";
-import { MissionProvider } from "../_mission-context";
 
 const ACTIVE_COLOR = "#171719";
 const INACTIVE_COLOR = "#A0A0A6";

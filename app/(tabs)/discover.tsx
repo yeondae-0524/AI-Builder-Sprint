@@ -13,8 +13,8 @@ import {
   TextInput,
   View,
 } from "react-native";
-import { useMission } from "../_mission-context";
-import { KakaoMapView } from "./_kakao-map";
+import { KakaoMapView } from "../../components/KakaoMapView";
+import { useMission } from "../../contexts/mission-context";
 
 const BL = "#3D5AFE";
 const BLL = "#EEF1FF";
