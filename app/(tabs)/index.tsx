@@ -4,6 +4,7 @@ import { useFocusEffect } from "expo-router";
 import {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -26,15 +27,16 @@ import {
   UIManager,
   View,
 } from "react-native";
+import { WebView } from "react-native-webview";
 
 import { KakaoMapView } from "../../components/KakaoMapView";
 import { useMission } from "../../contexts/mission-context";
 import { supabase } from "../../lib/supabase";
 import {
   Mission as BackendMission,
+  getMissionById,
   getRecommendedMissions,
 } from "../../services/challenge.service";
-
 
 const BL = "#3D5AFE";
 const BLL = "#EEF1FF";
@@ -47,15 +49,27 @@ const T3 = "#E4E6EA";
 const WH = "#FFFFFF";
 const BG = "#F7F8FA";
 const SUCCESS = "#10B981";
+const SUCCESS_LIGHT = "#ECFDF5";
 
 const SCREEN_HEIGHT = Dimensions.get("window").height;
+const SCREEN_WIDTH = Dimensions.get("window").width;
 const SHEET_HEIGHT = SCREEN_HEIGHT - 90;
 const TAB_BAR_SPACE = 105;
-const COLLAPSED_HEADER_HEIGHT = 100;
+const COLLAPSED_HEADER_HEIGHT = 148;
 const COLLAPSED_VISIBLE_HEIGHT =
   TAB_BAR_SPACE + COLLAPSED_HEADER_HEIGHT;
-const COLLAPSED_POSITION =
-  SHEET_HEIGHT - COLLAPSED_VISIBLE_HEIGHT;
+const COLLAPSED_POSITION = Math.max(
+  SHEET_HEIGHT - COLLAPSED_VISIBLE_HEIGHT,
+  0,
+);
+const SECTION_HORIZONTAL_MARGIN = 16;
+const SECTION_INDICATOR_WIDTH =
+  (SCREEN_WIDTH - SECTION_HORIZONTAL_MARGIN * 2) / 3;
+
+const KAKAO_JS_KEY = "f937d15a94db64ab114b3495f8b6ad3c";
+const DEFAULT_ANY_RADIUS_KM = 3;
+const DISTRICT_TOPOJSON_URL =
+  "https://raw.githubusercontent.com/southkorea/southkorea-maps/master/kostat/2018/json/skorea-municipalities-2018-topo-simple.json";
 
 const DEFAULT_CENTER = {
   lat: 35.1795543,
@@ -74,6 +88,47 @@ const CATEGORIES = [
 ] as const;
 
 type CategoryName = (typeof CATEGORIES)[number];
+type CostStatus = "무료" | "유료" | "유료/무료";
+type SheetSection = "active" | "recommended" | "records";
+type ListKind = "active" | "recommended" | "record";
+type RecordVisibility = "private" | "anonymous";
+type EmotionValue =
+  | "comfortable"
+  | "joyful"
+  | "new"
+  | "uncomfortable"
+  | "unsure";
+type TimeFilter =
+  | "any"
+  | "under15"
+  | "under30"
+  | "under60"
+  | "over60";
+type CostFilter = "any" | "free" | "paid";
+type LocationMode = "any" | "radius" | "district";
+type RadiusKm = 1 | 3 | 5;
+type BusanDistrict =
+  | "강서구"
+  | "금정구"
+  | "기장군"
+  | "남구"
+  | "동구"
+  | "동래구"
+  | "부산진구"
+  | "북구"
+  | "사상구"
+  | "사하구"
+  | "서구"
+  | "수영구"
+  | "연제구"
+  | "영도구"
+  | "중구"
+  | "해운대구";
+
+type Coordinate = {
+  lat: number;
+  lng: number;
+};
 
 type HomeMission = {
   id: string;
@@ -81,25 +136,51 @@ type HomeMission = {
   desc: string;
   instructions: string;
   recommendationReason: string;
+  durationMinutes: number | null;
   time: string;
   dist: string;
-  cost: string;
+  cost: CostStatus;
   cat: CategoryName;
   requiredItems: string[];
   placeId?: string;
   placeLat?: number;
   placeLng?: number;
   placeName?: string;
+  isAtHome?: boolean;
   isFallback?: boolean;
 };
 
-type ExtendedBackendMission = BackendMission & {
+type ExtendedBackendMission = Partial<BackendMission> & {
+  id?: string | number | null;
+  name?: string | null;
+  mission_title?: string | null;
+  description?: string | null;
+  desc?: string | null;
+  detailed_description?: string | null;
+  mission_guide?: string | null;
+  reason?: string | null;
+  category?: BackendMission["category"] | string | null;
+  category_name?: string | null;
+  categoryName?: string | null;
+  cat?: string | null;
+  cost_type?: string | null;
+  costType?: string | null;
+  estimatedTime?: number | string | null;
+  duration?: number | string | null;
+  preparations?: string[] | string | null;
   place_id?: string | null;
-  place_lat?: number | null;
-  place_lng?: number | null;
+  place_lat?: number | string | null;
+  place_lng?: number | string | null;
   place_name?: string | null;
-  distance_km?: number | null;
-  distance?: number | null;
+  latitude?: number | string | null;
+  longitude?: number | string | null;
+  distance_km?: number | string | null;
+  distance?: number | string | null;
+  requiresPlace?: boolean | null;
+  location_type?: string | null;
+  locationType?: string | null;
+  at_home?: boolean | null;
+  is_home?: boolean | null;
 };
 
 type ActiveJourney = {
@@ -111,15 +192,39 @@ type StartedAttempt = {
   journeyId: string;
   missionId: string;
   placeId: string | null;
+  createdAt: string;
 };
 
-type RecordVisibility = "private" | "anonymous";
-type EmotionValue =
-  | "comfortable"
-  | "joyful"
-  | "new"
-  | "uncomfortable"
-  | "unsure";
+type CompletedRecord = {
+  id: string;
+  attemptId: string;
+  missionId: string;
+  content: string;
+  emotion: EmotionValue;
+  visibility: RecordVisibility | "nickname";
+  recordedAt: string;
+  photoUrls: string[];
+};
+
+type MissionListItem = {
+  key: string;
+  kind: ListKind;
+  mission: HomeMission;
+  attempt?: StartedAttempt;
+  record?: CompletedRecord;
+};
+
+type RecommendationFilters = {
+  categories: CategoryName[];
+  time: TimeFilter;
+  cost: CostFilter;
+};
+
+const DEFAULT_FILTERS: RecommendationFilters = {
+  categories: [],
+  time: "any",
+  cost: "any",
+};
 
 const MAX_RECORD_PHOTOS = 5;
 
@@ -135,6 +240,66 @@ const EMOTIONS: Array<{
   { label: "잘 모르겠어요", value: "unsure", emoji: "🤔" },
 ];
 
+const TIME_OPTIONS: Array<{
+  value: TimeFilter;
+  label: string;
+  backendValue: string;
+}> = [
+  { value: "any", label: "상관없음", backendValue: "상관없음" },
+  { value: "under15", label: "15분 이내", backendValue: "15분 이내" },
+  { value: "under30", label: "30분 이내", backendValue: "30분 이내" },
+  { value: "under60", label: "1시간 이내", backendValue: "1시간 이내" },
+  { value: "over60", label: "1시간 이상", backendValue: "1시간 이상" },
+];
+
+const COST_OPTIONS: Array<{
+  value: CostFilter;
+  label: string;
+  backendValue: string;
+}> = [
+  { value: "any", label: "상관없음", backendValue: "무료/유료" },
+  { value: "free", label: "무료", backendValue: "무료" },
+  { value: "paid", label: "유료", backendValue: "유료" },
+];
+
+
+
+const RADIUS_OPTIONS: RadiusKm[] = [1, 3, 5];
+
+const BUSAN_DISTRICTS: BusanDistrict[] = [
+  "강서구",
+  "금정구",
+  "기장군",
+  "남구",
+  "동구",
+  "동래구",
+  "부산진구",
+  "북구",
+  "사상구",
+  "사하구",
+  "서구",
+  "수영구",
+  "연제구",
+  "영도구",
+  "중구",
+  "해운대구",
+];
+
+const SECTION_LABELS: Array<{
+  key: SheetSection;
+  label: string;
+}> = [
+  { key: "active", label: "현재 진행중" },
+  { key: "recommended", label: "추천 미션" },
+  { key: "records", label: "내가 쓴 기록" },
+];
+
+const SECTION_INDEX: Record<SheetSection, number> = {
+  active: 0,
+  recommended: 1,
+  records: 2,
+};
+
 const FALLBACK_MISSIONS: HomeMission[] = [
   {
     id: "fallback-cafe-reading",
@@ -144,14 +309,16 @@ const FALLBACK_MISSIONS: HomeMission[] = [
       "가까운 카페의 편안한 자리를 골라 30분 동안 책 한 권을 천천히 읽어보세요.",
     recommendationReason:
       "조용한 공간에서 혼자 집중하는 경험을 선호할 가능성이 높아 추천했어요.",
+    durationMinutes: 30,
     time: "30분",
     dist: "0.3km",
-    cost: "음료비",
+    cost: "유료",
     cat: "배움",
     requiredItems: ["책 한 권"],
     placeLat: 35.13656,
     placeLng: 129.05952,
     placeName: "가까운 카페",
+    isAtHome: false,
     isFallback: true,
   },
   {
@@ -162,6 +329,7 @@ const FALLBACK_MISSIONS: HomeMission[] = [
       "가까운 공원을 천천히 걸으며 지금 가장 눈에 들어오는 풍경을 사진으로 남겨보세요.",
     recommendationReason:
       "가벼운 이동과 관찰을 함께 할 수 있어 부담 없이 시작하기 좋아요.",
+    durationMinutes: 20,
     time: "20분",
     dist: "0.5km",
     cost: "무료",
@@ -170,6 +338,7 @@ const FALLBACK_MISSIONS: HomeMission[] = [
     placeLat: 35.16862,
     placeLng: 129.05748,
     placeName: "부산시민공원",
+    isAtHome: false,
     isFallback: true,
   },
   {
@@ -180,89 +349,48 @@ const FALLBACK_MISSIONS: HomeMission[] = [
       "지나가며 궁금했던 빵집에 들어가 평소 고르지 않던 빵 하나를 선택해 맛을 천천히 느껴보세요.",
     recommendationReason:
       "짧은 시간 안에 새로운 감각을 경험할 수 있어 추천했어요.",
+    durationMinutes: 15,
     time: "15분",
     dist: "0.7km",
-    cost: "3,000원",
+    cost: "유료",
     cat: "카페 및 디저트",
     requiredItems: [],
     placeLat: 35.1517,
     placeLng: 129.0612,
     placeName: "근처 빵집",
+    isAtHome: false,
     isFallback: true,
   },
 ];
 
-function normalizeCategory(
-  value: string | null | undefined,
-): CategoryName {
-  const category = value?.trim() ?? "";
-
-  if (
-    CATEGORIES.includes(category as CategoryName)
-  ) {
-    return category as CategoryName;
+function relationArray<T>(
+  value: T | T[] | null | undefined,
+): T[] {
+  if (!value) {
+    return [];
   }
 
-  if (
-    category.includes("카페") ||
-    category.includes("디저트") ||
-    category.includes("빵")
-  ) {
-    return "카페 및 디저트";
-  }
-
-  if (
-    category.includes("독서") ||
-    category.includes("공부") ||
-    category.includes("배움")
-  ) {
-    return "배움";
-  }
-
-  if (
-    category.includes("음악") ||
-    category.includes("영화") ||
-    category.includes("공연") ||
-    category.includes("전시")
-  ) {
-    return "감상";
-  }
-
-  if (category.includes("산책")) {
-    return "산책";
-  }
-
-  if (
-    category.includes("운동") ||
-    category.includes("체험") ||
-    category.includes("활동")
-  ) {
-    return "활동";
-  }
-
-  if (category.includes("휴식")) {
-    return "휴식";
-  }
-
-  if (
-    category.includes("음식") ||
-    category.includes("식사") ||
-    category.includes("맛집")
-  ) {
-    return "음식";
-  }
-
-  return "기타";
+  return Array.isArray(value) ? value : [value];
 }
 
 function isFiniteNumber(value: unknown): value is number {
-  return (
-    typeof value === "number" &&
-    Number.isFinite(value)
-  );
+  return typeof value === "number" && Number.isFinite(value);
 }
 
-function isUuid(value: string | undefined) {
+function toFiniteNumber(value: unknown): number | null {
+  if (isFiniteNumber(value)) {
+    return value;
+  }
+
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  return null;
+}
+
+function isUuid(value: string | undefined | null) {
   if (!value) {
     return false;
   }
@@ -274,22 +402,22 @@ function isUuid(value: string | undefined) {
 
 function toDateKey(date: Date) {
   const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(
-    2,
-    "0",
-  );
-  const day = String(date.getDate()).padStart(
-    2,
-    "0",
-  );
-
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
   return `${year}-${month}-${day}`;
 }
 
-function getErrorMessage(
-  error: unknown,
-  fallback: string,
-) {
+function formatRecordDate(value: string) {
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+
+  return `${date.getFullYear()}. ${date.getMonth() + 1}. ${date.getDate()}`;
+}
+
+function getErrorMessage(error: unknown, fallback: string) {
   if (error instanceof Error && error.message.trim()) {
     return error.message;
   }
@@ -309,6 +437,727 @@ function getErrorMessage(
   }
 
   return fallback;
+}
+
+function getRawCategoryName(
+  mission: ExtendedBackendMission,
+): string {
+  if (typeof mission.category === "string") {
+    return mission.category;
+  }
+
+  if (
+    mission.category &&
+    typeof mission.category === "object" &&
+    "name" in mission.category
+  ) {
+    return String(mission.category.name ?? "");
+  }
+
+  return String(
+    mission.category_name ??
+      mission.categoryName ??
+      mission.cat ??
+      "",
+  );
+}
+
+function inferCategoryFromText(text: string): CategoryName {
+  const normalized = text.replace(/\s+/g, " ").toLowerCase();
+
+  if (
+    /(카페|디저트|베이커리|빵집|빵|커피|라떼|케이크|아이스크림|차 한 잔)/.test(
+      normalized,
+    )
+  ) {
+    return "카페 및 디저트";
+  }
+
+  if (
+    /(맛집|식사|음식|요리|먹기|국밥|라면|국수|분식|시장 음식|한 끼)/.test(
+      normalized,
+    )
+  ) {
+    return "음식";
+  }
+
+  if (
+    /(산책|걷기|걸어|공원|골목길|해변|강변|둘레길|동네 한 바퀴)/.test(
+      normalized,
+    )
+  ) {
+    return "산책";
+  }
+
+  if (
+    /(독서|책 읽|공부|배우|학습|강의|도서관|서점에서 읽|새로운 지식)/.test(
+      normalized,
+    )
+  ) {
+    return "배움";
+  }
+
+  if (
+    /(음악|영화|공연|전시|버스킹|미술관|박물관|감상|사진전|연극)/.test(
+      normalized,
+    )
+  ) {
+    return "감상";
+  }
+
+  if (
+    /(운동|체험|만들기|공방|자전거|클라이밍|러닝|요가|춤|볼링|활동)/.test(
+      normalized,
+    )
+  ) {
+    return "활동";
+  }
+
+  if (
+    /(휴식|명상|호흡|온천|찜질|낮잠|멍 때리|쉬어|힐링)/.test(
+      normalized,
+    )
+  ) {
+    return "휴식";
+  }
+
+  return "기타";
+}
+
+function normalizeCategory(
+  rawCategory: string | null | undefined,
+  textForInference: string,
+): CategoryName {
+  const category = rawCategory?.trim() ?? "";
+
+  if (CATEGORIES.includes(category as CategoryName)) {
+    return category as CategoryName;
+  }
+
+  const normalized = category.toLowerCase();
+
+  if (/(카페|디저트|베이커리|빵)/.test(normalized)) {
+    return "카페 및 디저트";
+  }
+  if (/(음식|식사|맛집|food)/.test(normalized)) {
+    return "음식";
+  }
+  if (/(산책|걷기|walk)/.test(normalized)) {
+    return "산책";
+  }
+  if (/(배움|독서|학습|learn|study)/.test(normalized)) {
+    return "배움";
+  }
+  if (/(감상|음악|영화|공연|전시|culture)/.test(normalized)) {
+    return "감상";
+  }
+  if (/(활동|운동|체험|activity|sport)/.test(normalized)) {
+    return "활동";
+  }
+  if (/(휴식|명상|relax|rest)/.test(normalized)) {
+    return "휴식";
+  }
+
+  return inferCategoryFromText(textForInference);
+}
+
+function normalizeCostStatus(
+  mission: ExtendedBackendMission,
+  textForInference: string,
+): CostStatus {
+  const explicit = String(
+    mission.cost_type ?? mission.costType ?? "",
+  )
+    .trim()
+    .toLowerCase();
+
+  if (
+    explicit.includes("유료/무료") ||
+    explicit.includes("무료/유료") ||
+    explicit.includes("optional") ||
+    explicit.includes("either")
+  ) {
+    return "유료/무료";
+  }
+
+  if (explicit === "무료" || explicit.includes("free")) {
+    return "무료";
+  }
+
+  if (explicit === "유료" || explicit.includes("paid")) {
+    return "유료";
+  }
+
+  const text = textForInference.replace(/\s+/g, " ");
+
+  if (
+    /(소품샵|편집숍|플리마켓|시장 구경|서점 구경|쇼핑몰 구경|구경하기|둘러보기)/.test(
+      text,
+    )
+  ) {
+    return "유료/무료";
+  }
+
+  if (
+    /(구매|주문|먹기|마시기|맛보기|카페|디저트|빵집|베이커리|음료|식사|맛집|입장권|티켓|체험비|공방)/.test(
+      text,
+    )
+  ) {
+    return "유료";
+  }
+
+  const estimatedCost = toFiniteNumber(
+    mission.estimated_cost,
+  );
+
+  if (estimatedCost === null) {
+    return "유료/무료";
+  }
+
+  return estimatedCost > 0 ? "유료" : "무료";
+}
+
+function parseDurationMinutes(value: unknown): number | null {
+  const direct = toFiniteNumber(value);
+
+  if (direct !== null) {
+    return direct;
+  }
+
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const hourMatch = value.match(/(\d+(?:\.\d+)?)\s*시간/);
+  const minuteMatch = value.match(/(\d+)\s*분/);
+
+  if (hourMatch) {
+    const hours = Number(hourMatch[1]);
+    const minutes = minuteMatch ? Number(minuteMatch[1]) : 0;
+    return Math.round(hours * 60 + minutes);
+  }
+
+  return minuteMatch ? Number(minuteMatch[1]) : null;
+}
+
+function normalizeRequiredItems(
+  mission: ExtendedBackendMission,
+): string[] {
+  const value = mission.required_items ?? mission.preparations;
+
+  if (Array.isArray(value)) {
+    return value.map(String).filter(Boolean);
+  }
+
+  if (typeof value === "string" && value.trim()) {
+    return value
+      .split(/[,/]/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+  }
+
+  return [];
+}
+
+function haversineDistanceKm(
+  from: Coordinate,
+  to: Coordinate,
+) {
+  const earthRadiusKm = 6371;
+  const toRadians = (degree: number) =>
+    (degree * Math.PI) / 180;
+  const latitudeDistance = toRadians(to.lat - from.lat);
+  const longitudeDistance = toRadians(to.lng - from.lng);
+  const fromLatitude = toRadians(from.lat);
+  const toLatitude = toRadians(to.lat);
+
+  const a =
+    Math.sin(latitudeDistance / 2) ** 2 +
+    Math.cos(fromLatitude) *
+      Math.cos(toLatitude) *
+      Math.sin(longitudeDistance / 2) ** 2;
+
+  return earthRadiusKm * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+
+function inferAtHomeMission(
+  mission: ExtendedBackendMission,
+  inferenceText: string,
+  placeName: string | null | undefined,
+) {
+  if (
+    mission.at_home === true ||
+    mission.is_home === true ||
+    mission.requires_place === false ||
+    mission.requiresPlace === false
+  ) {
+    return true;
+  }
+
+  const locationType = String(
+    mission.location_type ?? mission.locationType ?? "",
+  )
+    .trim()
+    .toLowerCase();
+
+  if (
+    locationType === "home" ||
+    locationType === "at_home" ||
+    locationType.includes("집")
+  ) {
+    return true;
+  }
+
+  const normalized = `${inferenceText} ${placeName ?? ""}`
+    .replace(/\s+/g, " ")
+    .toLowerCase();
+
+  return /(내 집|집에서|집 안|방에서|자택|홈트|침대에서|주방에서)/.test(
+    normalized,
+  );
+}
+
+function isGenericRecommendationReason(value: string) {
+  const normalized = value
+    .replace(/\s+/g, "")
+    .replace(/[.!?]/g, "");
+
+  return (
+    normalized === "" ||
+    normalized === "현재취향과조건을고려해추천했어요" ||
+    normalized === "사용자의취향과조건을고려해추천했어요" ||
+    normalized === "취향과조건을고려해추천했어요" ||
+    normalized === "현재상황과취향을고려해추천했어요"
+  );
+}
+
+function getConciseRecommendationReason(value: string) {
+  const normalized = value.replace(/\s+/g, " ").trim();
+
+  if (!normalized) {
+    return "지금의 취향과 상황에 잘 맞는 경험이에요.";
+  }
+
+  const firstSentence =
+    normalized
+      .split(/[.!?。！？]+/)
+      .map((item) => item.trim())
+      .find(Boolean) ?? normalized;
+
+  const withoutTitlePrefix = firstSentence.replace(
+    /^[‘'“"][^’'”"]+[’'”"](?:은|는|이|가)\s*/,
+    "",
+  );
+
+  if (withoutTitlePrefix.length <= 34) {
+    return withoutTitlePrefix;
+  }
+
+  const firstClause = withoutTitlePrefix
+    .split(/[,，]/)[0]
+    .trim();
+
+  if (firstClause.length >= 10 && firstClause.length <= 34) {
+    return firstClause;
+  }
+
+  return `${withoutTitlePrefix.slice(0, 34).trim()}…`;
+}
+
+function buildMissionSpecificRecommendationReason({
+  title,
+  category,
+  placeName,
+  time,
+  cost,
+  isAtHome,
+}: {
+  title: string;
+  category: CategoryName;
+  placeName?: string | null;
+  time: string;
+  cost: CostStatus;
+  isAtHome: boolean;
+}) {
+  void title;
+  void placeName;
+  void time;
+  void cost;
+  void isAtHome;
+
+  const categoryReasons: Record<CategoryName, string> = {
+    음식: "새로운 맛으로 일상에 작은 변화를 주기 좋아요.",
+    "카페 및 디저트": "향과 맛을 천천히 즐기며 쉬기 좋아요.",
+    산책: "가볍게 걸으며 주변 풍경을 새롭게 보기 좋아요.",
+    배움: "부담 없이 새로운 지식과 관점을 얻기 좋아요.",
+    감상: "감각에 집중하며 마음의 속도를 늦추기 좋아요.",
+    활동: "직접 움직이며 성취감과 활력을 얻기 좋아요.",
+    휴식: "잠시 멈춰 몸과 마음을 돌보기 좋아요.",
+    기타: "평소와 다른 작은 경험을 시작하기 좋아요.",
+  };
+
+  return categoryReasons[category];
+}
+
+function mapBackendMission(
+  backendMission: ExtendedBackendMission,
+  index = 0,
+  center?: Coordinate | null,
+  placeOverride?: {
+    id?: string | null;
+    name?: string | null;
+    latitude?: number | string | null;
+    longitude?: number | string | null;
+  } | null,
+): HomeMission {
+  const title = String(
+    backendMission.title ??
+      backendMission.mission_title ??
+      backendMission.name ??
+      "새로운 작은 경험",
+  );
+
+  const desc = String(
+    backendMission.short_description ??
+      backendMission.description ??
+      backendMission.desc ??
+      "",
+  ).trim();
+
+  const instructions = String(
+    backendMission.instructions ??
+      backendMission.detailed_description ??
+      backendMission.mission_guide ??
+      desc ??
+      "미션 안내에 따라 경험을 진행해보세요.",
+  ).trim();
+
+  const rawRecommendationReason = String(
+    backendMission.recommendation_reason ??
+      backendMission.reason ??
+      "",
+  ).trim();
+
+  const inferenceText = [
+    title,
+    desc,
+    instructions,
+    rawRecommendationReason,
+  ].join(" ");
+
+  const category = normalizeCategory(
+    getRawCategoryName(backendMission),
+    inferenceText,
+  );
+
+  const durationMinutes = parseDurationMinutes(
+    backendMission.estimated_duration_min ??
+      backendMission.estimatedTime ??
+      backendMission.duration,
+  );
+
+  const time =
+    durationMinutes !== null
+      ? `${durationMinutes}분`
+      : "시간 자유";
+
+  const rawPlaceName =
+    placeOverride?.name ??
+    backendMission.place_name ??
+    undefined;
+
+  const isAtHome = inferAtHomeMission(
+    backendMission,
+    inferenceText,
+    rawPlaceName,
+  );
+
+  const placeLat =
+    toFiniteNumber(placeOverride?.latitude) ??
+    toFiniteNumber(backendMission.place_lat) ??
+    toFiniteNumber(backendMission.latitude);
+
+  const placeLng =
+    toFiniteNumber(placeOverride?.longitude) ??
+    toFiniteNumber(backendMission.place_lng) ??
+    toFiniteNumber(backendMission.longitude);
+
+  const suppliedDistance =
+    toFiniteNumber(backendMission.distance_km) ??
+    toFiniteNumber(backendMission.distance);
+
+  const calculatedDistance =
+    !isAtHome &&
+    center &&
+    placeLat !== null &&
+    placeLng !== null
+      ? haversineDistanceKm(center, {
+          lat: placeLat,
+          lng: placeLng,
+        })
+      : null;
+
+  const distance = calculatedDistance ?? suppliedDistance;
+
+  const rawId = backendMission.id;
+  const id = rawId
+    ? String(rawId)
+    : `ai-temporary-${Date.now()}-${index}`;
+
+  const cost = normalizeCostStatus(
+    backendMission,
+    inferenceText,
+  );
+
+  const placeName = isAtHome
+    ? "내 집"
+    : rawPlaceName;
+
+  const recommendationReason =
+    getConciseRecommendationReason(
+      !isGenericRecommendationReason(
+        rawRecommendationReason,
+      )
+        ? rawRecommendationReason
+        : buildMissionSpecificRecommendationReason({
+            title,
+            category,
+            placeName,
+            time,
+            cost,
+            isAtHome,
+          }),
+    );
+
+  return {
+    id,
+    title,
+    desc,
+    instructions:
+      instructions ||
+      desc ||
+      "미션 안내에 따라 경험을 진행해보세요.",
+    recommendationReason,
+    durationMinutes,
+    time,
+    dist: isAtHome
+      ? "내 집"
+      : distance !== null
+        ? `${distance.toFixed(1)}km`
+        : "거리 정보 없음",
+    cost,
+    cat: category,
+    requiredItems: normalizeRequiredItems(
+      backendMission,
+    ),
+    placeId:
+      placeOverride?.id ??
+      backendMission.place_id ??
+      undefined,
+    placeLat:
+      isAtHome ? undefined : placeLat ?? undefined,
+    placeLng:
+      isAtHome ? undefined : placeLng ?? undefined,
+    placeName,
+    isAtHome,
+    isFallback: !isUuid(id),
+  };
+}
+
+function missionMatchesFilters(
+  mission: HomeMission,
+  filters: RecommendationFilters,
+  center: Coordinate | null,
+  radiusKm: RadiusKm,
+  district: BusanDistrict | null,
+) {
+  if (
+    filters.categories.length > 0 &&
+    !filters.categories.includes(mission.cat)
+  ) {
+    return false;
+  }
+
+  const minutes = mission.durationMinutes;
+
+  if (filters.time !== "any") {
+    if (minutes === null) {
+      return false;
+    }
+
+    if (filters.time === "under15" && minutes > 15) {
+      return false;
+    }
+    if (filters.time === "under30" && minutes > 30) {
+      return false;
+    }
+    if (filters.time === "under60" && minutes > 60) {
+      return false;
+    }
+    if (filters.time === "over60" && minutes < 60) {
+      return false;
+    }
+  }
+
+  if (filters.cost === "free") {
+    if (
+      mission.cost !== "무료" &&
+      mission.cost !== "유료/무료"
+    ) {
+      return false;
+    }
+  }
+
+  if (filters.cost === "paid") {
+    if (
+      mission.cost !== "유료" &&
+      mission.cost !== "유료/무료"
+    ) {
+      return false;
+    }
+  }
+
+  if (center && !mission.isAtHome) {
+    if (
+      !isFiniteNumber(mission.placeLat) ||
+      !isFiniteNumber(mission.placeLng)
+    ) {
+      return false;
+    }
+
+    const distance = haversineDistanceKm(center, {
+      lat: mission.placeLat,
+      lng: mission.placeLng,
+    });
+
+    if (distance > radiusKm) {
+      return false;
+    }
+  }
+
+  if (district && !mission.isAtHome) {
+    if (!mission.placeName) {
+      return false;
+    }
+
+    const normalizedPlace = mission.placeName.replace(/\s/g, "");
+    if (!normalizedPlace.includes(district.replace(/\s/g, ""))) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function dedupeMissions(missions: HomeMission[]) {
+  const seenIds = new Set<string>();
+  const seenTitles = new Set<string>();
+
+  return missions.filter((mission) => {
+    const normalizedTitle = mission.title
+      .trim()
+      .toLowerCase();
+
+    if (
+      seenIds.has(mission.id) ||
+      seenTitles.has(normalizedTitle)
+    ) {
+      return false;
+    }
+
+    seenIds.add(mission.id);
+    seenTitles.add(normalizedTitle);
+    return true;
+  });
+}
+
+function shuffle<T>(items: T[]) {
+  const copied = [...items];
+
+  for (let index = copied.length - 1; index > 0; index -= 1) {
+    const randomIndex = Math.floor(
+      Math.random() * (index + 1),
+    );
+    [copied[index], copied[randomIndex]] = [
+      copied[randomIndex],
+      copied[index],
+    ];
+  }
+
+  return copied;
+}
+
+function rankMissionsByInterests(
+  missions: HomeMission[],
+  interests: CategoryName[],
+) {
+  if (interests.length === 0) {
+    return missions;
+  }
+
+  const preferred = missions.filter((mission) =>
+    interests.includes(mission.cat),
+  );
+  const others = missions.filter(
+    (mission) => !interests.includes(mission.cat),
+  );
+
+  const result: HomeMission[] = [];
+  let preferredIndex = 0;
+  let otherIndex = 0;
+
+  while (
+    preferredIndex < preferred.length ||
+    otherIndex < others.length
+  ) {
+    for (
+      let count = 0;
+      count < 2 && preferredIndex < preferred.length;
+      count += 1
+    ) {
+      result.push(preferred[preferredIndex]);
+      preferredIndex += 1;
+    }
+
+    if (otherIndex < others.length) {
+      result.push(others[otherIndex]);
+      otherIndex += 1;
+    }
+  }
+
+  return result;
+}
+
+function getPreparationText(mission: HomeMission) {
+  return mission.requiredItems.length > 0
+    ? mission.requiredItems.join(", ")
+    : "별도 준비물 없음";
+}
+
+function getCategoryEmoji(category: CategoryName) {
+  const emojis: Record<CategoryName, string> = {
+    음식: "🍽️",
+    "카페 및 디저트": "☕",
+    산책: "🌿",
+    배움: "📚",
+    감상: "🎧",
+    활동: "🏃",
+    휴식: "🛋️",
+    기타: "✨",
+  };
+
+  return emojis[category];
+}
+
+function getEmotionInfo(value: EmotionValue) {
+  return (
+    EMOTIONS.find((item) => item.value === value) ?? {
+      label: value,
+      value,
+      emoji: "🙂",
+    }
+  );
 }
 
 function getPhotoExtension(
@@ -364,109 +1213,487 @@ function getPhotoContentType(
     : `image/${extension}`;
 }
 
-function mapBackendMission(
-  backendMission: ExtendedBackendMission,
-): HomeMission {
-  const distance =
-    backendMission.distance_km ??
-    backendMission.distance;
+function getConditionSummary(
+  filters: RecommendationFilters,
+  locationMode: LocationMode,
+  center: Coordinate | null,
+  radiusKm: RadiusKm,
+  district: BusanDistrict | null,
+) {
+  const parts: string[] = [];
 
-  return {
-    id: String(backendMission.id),
-    title: backendMission.title,
-    desc:
-      backendMission.short_description ||
-      "새로운 경험을 시작해보세요.",
-    instructions:
-      backendMission.instructions ||
-      backendMission.short_description ||
-      "미션 안내에 따라 경험을 진행해보세요.",
-    recommendationReason:
-      backendMission.recommendation_reason ||
-      "현재 취향과 조건을 고려해 추천했어요.",
-    time: backendMission.estimated_duration_min
-      ? `${backendMission.estimated_duration_min}분`
-      : "-",
-    dist: isFiniteNumber(distance)
-      ? `${distance.toFixed(1)}km`
-      : "-",
-    cost:
-      backendMission.estimated_cost == null ||
-      backendMission.estimated_cost === 0
-        ? "무료"
-        : `${backendMission.estimated_cost.toLocaleString()}원`,
-    cat: normalizeCategory(
-      backendMission.category?.name,
-    ),
-    requiredItems: Array.isArray(
-      backendMission.required_items,
-    )
-      ? backendMission.required_items
-      : [],
-    placeId:
-      backendMission.place_id ?? undefined,
-    placeLat: isFiniteNumber(
-      backendMission.place_lat,
-    )
-      ? backendMission.place_lat
-      : undefined,
-    placeLng: isFiniteNumber(
-      backendMission.place_lng,
-    )
-      ? backendMission.place_lng
-      : undefined,
-    placeName:
-      backendMission.place_name ?? undefined,
-  };
-}
-
-function getPreparationText(mission: HomeMission) {
-  if (mission.requiredItems.length === 0) {
-    return "별도 준비물 없음";
+  if (locationMode === "radius" && center) {
+    parts.push(`선택 지역 ${radiusKm}km`);
   }
 
-  return mission.requiredItems.join(", ");
+  if (locationMode === "district" && district) {
+    parts.push(district);
+  }
+
+  if (filters.categories.length > 0) {
+    parts.push(
+      filters.categories.length === 1
+        ? filters.categories[0]
+        : `카테고리 ${filters.categories.length}개`,
+    );
+  }
+
+  const timeLabel = TIME_OPTIONS.find(
+    (item) => item.value === filters.time,
+  )?.label;
+  if (timeLabel && filters.time !== "any") {
+    parts.push(timeLabel);
+  }
+
+  const costLabel = COST_OPTIONS.find(
+    (item) => item.value === filters.cost,
+  )?.label;
+  if (costLabel && filters.cost !== "any") {
+    parts.push(costLabel);
+  }
+
+  if (parts.length > 0) {
+    return parts.join(" · ");
+  }
+
+  return locationMode === "any"
+    ? `현재 위치 ${DEFAULT_ANY_RADIUS_KM}km · 취향을 반영한 추천 미션`
+    : "취향을 반영한 추천 미션";
 }
 
-function getCategoryEmoji(category: CategoryName) {
-  const emojis: Record<CategoryName, string> = {
-    음식: "🍽️",
-    "카페 및 디저트": "☕",
-    산책: "🌿",
-    배움: "📚",
-    감상: "🎧",
-    활동: "🏃",
-    휴식: "🛋️",
-    기타: "✨",
-  };
+function LocationPickerMap({
+  coordinate,
+  radiusKm,
+  onSelect,
+}: {
+  coordinate: Coordinate;
+  radiusKm: RadiusKm;
+  onSelect: (coordinate: Coordinate) => void;
+}) {
+  const html = useMemo(
+    () => `
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <style>
+    html, body, #map { width: 100%; height: 100%; margin: 0; padding: 0; }
+    #loading {
+      position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+      background: #f7f8fa; color: #5c5f6a; font-family: sans-serif; font-size: 13px; z-index: 10;
+    }
+  </style>
+</head>
+<body>
+  <div id="loading">지도를 불러오는 중이에요</div>
+  <div id="map"></div>
+  <script src="https://dapi.kakao.com/v2/maps/sdk.js?appkey=${KAKAO_JS_KEY}&autoload=false"></script>
+  <script>
+    const radiusMeters = ${radiusKm * 1000};
 
-  return emojis[category];
+    const send = (lat, lng) => {
+      window.ReactNativeWebView.postMessage(
+        JSON.stringify({ type: 'location', lat, lng })
+      );
+    };
+
+    const getBoundsForRadius = (lat, lng) => {
+      const latDelta = radiusMeters / 111320;
+      const lngDelta =
+        radiusMeters /
+        (111320 * Math.max(Math.cos(lat * Math.PI / 180), 0.2));
+
+      const bounds = new kakao.maps.LatLngBounds();
+      bounds.extend(new kakao.maps.LatLng(lat - latDelta, lng - lngDelta));
+      bounds.extend(new kakao.maps.LatLng(lat + latDelta, lng + lngDelta));
+      return bounds;
+    };
+
+    kakao.maps.load(function () {
+      document.getElementById('loading').style.display = 'none';
+
+      const initial = new kakao.maps.LatLng(
+        ${coordinate.lat},
+        ${coordinate.lng}
+      );
+
+      const map = new kakao.maps.Map(
+        document.getElementById('map'),
+        {
+          center: initial,
+          level: 5,
+        }
+      );
+
+      const marker = new kakao.maps.Marker({
+        position: initial,
+        map,
+        draggable: true,
+      });
+
+      const circle = new kakao.maps.Circle({
+        center: initial,
+        radius: radiusMeters,
+        strokeWeight: 3,
+        strokeColor: '#3D5AFE',
+        strokeOpacity: 1,
+        strokeStyle: 'solid',
+        fillColor: '#3D5AFE',
+        fillOpacity: 0.18,
+      });
+
+      circle.setMap(map);
+
+      const fitRadius = (latLng) => {
+        map.setBounds(
+          getBoundsForRadius(
+            latLng.getLat(),
+            latLng.getLng()
+          ),
+          28,
+          28,
+          28,
+          28
+        );
+      };
+
+      const update = (latLng, notify = true) => {
+        marker.setPosition(latLng);
+        circle.setPosition(latLng);
+        circle.setRadius(radiusMeters);
+        circle.setMap(map);
+        fitRadius(latLng);
+
+        if (notify) {
+          send(latLng.getLat(), latLng.getLng());
+        }
+      };
+
+      update(initial, false);
+
+      kakao.maps.event.addListener(
+        map,
+        'click',
+        function (mouseEvent) {
+          update(mouseEvent.latLng);
+        }
+      );
+
+      kakao.maps.event.addListener(
+        marker,
+        'dragend',
+        function () {
+          update(marker.getPosition());
+        }
+      );
+    });
+  </script>
+</body>
+</html>`,
+    [coordinate.lat, coordinate.lng, radiusKm],
+  );
+
+  return (
+    <WebView
+      key={`${coordinate.lat.toFixed(5)}-${coordinate.lng.toFixed(
+        5,
+      )}-${radiusKm}`}
+      originWhitelist={["*"]}
+      source={{ html }}
+      javaScriptEnabled
+      domStorageEnabled
+      mixedContentMode="always"
+      onMessage={(event) => {
+        try {
+          const message = JSON.parse(
+            event.nativeEvent.data,
+          ) as {
+            type?: string;
+            lat?: number;
+            lng?: number;
+          };
+
+          if (
+            message.type === "location" &&
+            isFiniteNumber(message.lat) &&
+            isFiniteNumber(message.lng)
+          ) {
+            onSelect({
+              lat: message.lat,
+              lng: message.lng,
+            });
+          }
+        } catch {
+          // 지도 내부의 다른 메시지는 무시한다.
+        }
+      }}
+      style={styles.locationPickerMap}
+    />
+  );
+}
+
+function DistrictBoundaryMap({
+  district,
+}: {
+  district: BusanDistrict;
+}) {
+  const html = useMemo(
+    () => `
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <style>
+    html, body, #map { width: 100%; height: 100%; margin: 0; padding: 0; }
+    #loading {
+      position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+      padding: 20px; text-align: center;
+      background: #f7f8fa; color: #5c5f6a; font-family: sans-serif; font-size: 13px; z-index: 10;
+    }
+  </style>
+</head>
+<body>
+  <div id="loading">선택한 구의 경계를 불러오는 중이에요</div>
+  <div id="map"></div>
+
+  <script src="https://dapi.kakao.com/v2/maps/sdk.js?appkey=${KAKAO_JS_KEY}&autoload=false"></script>
+  <script src="https://cdn.jsdelivr.net/npm/topojson-client@3/dist/topojson-client.min.js"></script>
+
+  <script>
+    const selectedDistrict = ${JSON.stringify(district)};
+    const topoUrl = ${JSON.stringify(DISTRICT_TOPOJSON_URL)};
+
+    const flattenPairs = (value, result = []) => {
+      if (
+        Array.isArray(value) &&
+        value.length >= 2 &&
+        typeof value[0] === 'number' &&
+        typeof value[1] === 'number'
+      ) {
+        result.push(value);
+        return result;
+      }
+
+      if (Array.isArray(value)) {
+        value.forEach((child) =>
+          flattenPairs(child, result)
+        );
+      }
+
+      return result;
+    };
+
+    const isBusanFeature = (feature) => {
+      const properties = feature.properties || {};
+      const name = String(
+        properties.name ||
+        properties.NAME ||
+        properties.name_kr ||
+        feature.id ||
+        ''
+      );
+      const code = String(
+        properties.code ||
+        properties.CODE ||
+        properties.adm_cd ||
+        ''
+      );
+
+      if (name !== selectedDistrict) {
+        return false;
+      }
+
+      if (code.startsWith('26')) {
+        return true;
+      }
+
+      const pairs = flattenPairs(
+        feature.geometry &&
+        feature.geometry.coordinates
+      );
+
+      if (pairs.length === 0) {
+        return false;
+      }
+
+      const averageLng =
+        pairs.reduce((sum, pair) => sum + pair[0], 0) /
+        pairs.length;
+      const averageLat =
+        pairs.reduce((sum, pair) => sum + pair[1], 0) /
+        pairs.length;
+
+      return (
+        averageLng >= 128.65 &&
+        averageLng <= 129.45 &&
+        averageLat >= 34.85 &&
+        averageLat <= 35.45
+      );
+    };
+
+    const toPath = (ring) =>
+      ring.map(
+        ([lng, lat]) => new kakao.maps.LatLng(lat, lng)
+      );
+
+    kakao.maps.load(async function () {
+      const loading = document.getElementById('loading');
+
+      try {
+        const map = new kakao.maps.Map(
+          document.getElementById('map'),
+          {
+            center: new kakao.maps.LatLng(35.1796, 129.0756),
+            level: 8,
+          }
+        );
+
+        const response = await fetch(topoUrl);
+
+        if (!response.ok) {
+          throw new Error('행정구역 데이터를 불러오지 못했습니다.');
+        }
+
+        const topology = await response.json();
+        const objectKey = Object.keys(topology.objects || {})[0];
+
+        if (!objectKey || !window.topojson) {
+          throw new Error('행정구역 데이터 형식을 읽지 못했습니다.');
+        }
+
+        const collection = window.topojson.feature(
+          topology,
+          topology.objects[objectKey]
+        );
+
+        const feature = (collection.features || []).find(
+          isBusanFeature
+        );
+
+        if (!feature || !feature.geometry) {
+          throw new Error(
+            selectedDistrict + ' 경계를 찾지 못했습니다.'
+          );
+        }
+
+        const bounds = new kakao.maps.LatLngBounds();
+        const geometries =
+          feature.geometry.type === 'MultiPolygon'
+            ? feature.geometry.coordinates
+            : [feature.geometry.coordinates];
+
+        geometries.forEach((polygonCoordinates) => {
+          const path = polygonCoordinates.map((ring) => {
+            const converted = toPath(ring);
+            converted.forEach((point) => bounds.extend(point));
+            return converted;
+          });
+
+          const polygon = new kakao.maps.Polygon({
+            map,
+            path,
+            strokeWeight: 3,
+            strokeColor: '#3D5AFE',
+            strokeOpacity: 1,
+            strokeStyle: 'solid',
+            fillColor: '#3D5AFE',
+            fillOpacity: 0.2,
+          });
+
+          polygon.setMap(map);
+        });
+
+        map.setBounds(bounds, 24, 24, 24, 24);
+        loading.style.display = 'none';
+      } catch (error) {
+        loading.textContent =
+          error && error.message
+            ? error.message
+            : '선택한 구의 경계를 표시하지 못했습니다.';
+      }
+    });
+  </script>
+</body>
+</html>`,
+    [district],
+  );
+
+  return (
+    <WebView
+      key={district}
+      originWhitelist={["*"]}
+      source={{ html }}
+      javaScriptEnabled
+      domStorageEnabled
+      mixedContentMode="always"
+      style={styles.locationPickerMap}
+    />
+  );
 }
 
 export default function HomeScreen() {
   const [missions, setMissions] =
     useState<HomeMission[]>(FALLBACK_MISSIONS);
-  const { pendingSharedMission, clearPendingSharedMission } = useMission();
   const [loading, setLoading] = useState(true);
-  const [selectedMission, setSelectedMission] =
-    useState<HomeMission | null>(null);
-  const [userLocation, setUserLocation] = useState<{
-    lat: number;
-    lng: number;
-  } | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [userLocation, setUserLocation] =
+    useState<Coordinate | null>(null);
   const [activeJourney, setActiveJourney] =
     useState<ActiveJourney | null>(null);
   const [startedAttempts, setStartedAttempts] =
     useState<Record<string, StartedAttempt>>({});
+  const [attemptMissions, setAttemptMissions] =
+    useState<Record<string, HomeMission>>({});
+  const [completedRecords, setCompletedRecords] =
+    useState<CompletedRecord[]>([]);
   const [completedMissionIds, setCompletedMissionIds] =
     useState<Set<string>>(new Set());
+  const [completedMissionCount, setCompletedMissionCount] =
+    useState(0);
   const [startLoadingId, setStartLoadingId] =
     useState<string | null>(null);
 
+  const [sheetSection, setSheetSection] =
+    useState<SheetSection>("recommended");
+  const [selectedItemKey, setSelectedItemKey] =
+    useState<string | null>(null);
+
+  const [appliedFilters, setAppliedFilters] =
+    useState<RecommendationFilters>(DEFAULT_FILTERS);
+  const [recommendationCenter, setRecommendationCenter] =
+    useState<Coordinate | null>(null);
+  const [recommendationLocationMode, setRecommendationLocationMode] =
+    useState<LocationMode>("any");
+  const [recommendationRadiusKm, setRecommendationRadiusKm] =
+    useState<RadiusKm>(1);
+  const [recommendationDistrict, setRecommendationDistrict] =
+    useState<BusanDistrict | null>(null);
+  const [profileInterests, setProfileInterests] =
+    useState<CategoryName[]>([]);
+  const [conditionVisible, setConditionVisible] =
+    useState(false);
+  const [conditionStep, setConditionStep] = useState(0);
+  const [draftCategories, setDraftCategories] = useState<
+    CategoryName[]
+  >([]);
+  const [draftTime, setDraftTime] =
+    useState<TimeFilter>("any");
+  const [draftCost, setDraftCost] =
+    useState<CostFilter>("any");
+  const [draftCenter, setDraftCenter] =
+    useState<Coordinate | null>(null);
+  const [draftLocationMode, setDraftLocationMode] =
+    useState<LocationMode>("any");
+  const [draftRadiusKm, setDraftRadiusKm] =
+    useState<RadiusKm>(1);
+  const [draftDistrict, setDraftDistrict] =
+    useState<BusanDistrict | null>(null);
+
   const [recordMission, setRecordMission] =
     useState<HomeMission | null>(null);
-  const [recordContent, setRecordContent] =
-    useState("");
+  const [recordContent, setRecordContent] = useState("");
   const [recordEmotion, setRecordEmotion] =
     useState<EmotionValue | "">("");
   const [recordVisibility, setRecordVisibility] =
@@ -476,6 +1703,13 @@ export default function HomeScreen() {
   >([]);
   const [recordSaving, setRecordSaving] =
     useState(false);
+  const [recordDetail, setRecordDetail] =
+    useState<CompletedRecord | null>(null);
+
+  const {
+    pendingSharedMission,
+    clearPendingSharedMission,
+  } = useMission();
 
   const locationRequested = useRef(false);
   const sheetTranslateY = useRef(
@@ -488,6 +1722,12 @@ export default function HomeScreen() {
     new Animated.Value(0),
   ).current;
   const selectedCardClosing = useRef(false);
+  const sectionIndicator = useRef(
+    new Animated.Value(SECTION_INDEX.recommended),
+  ).current;
+  const sectionContentAnimation = useRef(
+    new Animated.Value(1),
+  ).current;
 
   useEffect(() => {
     if (
@@ -516,279 +1756,862 @@ export default function HomeScreen() {
     [sheetTranslateY],
   );
 
-  const loadJourneyAndAttempts = useCallback(
-    async () => {
+  const fetchRecommendations = useCallback(
+    async ({
+      filters,
+      center,
+      locationMode,
+      radiusKm,
+      district,
+      locationHint,
+      completedCount,
+      showInitialLoading = false,
+    }: {
+      filters: RecommendationFilters;
+      center: Coordinate | null;
+      locationMode: LocationMode;
+      radiusKm: RadiusKm;
+      district: BusanDistrict | null;
+      locationHint?: Coordinate | null;
+      completedCount: number;
+      showInitialLoading?: boolean;
+    }) => {
+      if (showInitialLoading) {
+        setLoading(true);
+      } else {
+        setRefreshing(true);
+      }
+
       try {
-        const {
-          data: { user },
-          error: userError,
-        } = await supabase.auth.getUser();
+        const timeOption = TIME_OPTIONS.find(
+          (item) => item.value === filters.time,
+        );
+        const costOption = COST_OPTIONS.find(
+          (item) => item.value === filters.cost,
+        );
+        const effectiveCenter =
+          locationMode === "radius"
+            ? center ?? locationHint ?? null
+            : locationMode === "any"
+              ? locationHint ?? null
+              : null;
 
-        if (userError) {
-          throw userError;
+        const effectiveRadiusKm =
+          locationMode === "radius"
+            ? radiusKm
+            : DEFAULT_ANY_RADIUS_KM;
+
+        const requestCoordinate =
+          locationMode === "district"
+            ? locationHint ?? null
+            : effectiveCenter;
+
+        let interests = profileInterests;
+
+        if (filters.categories.length === 0 && interests.length === 0) {
+          const {
+            data: { user },
+          } = await supabase.auth.getUser();
+
+          if (user) {
+            const { data: profile } = await supabase
+              .from("profiles")
+              .select("interests")
+              .eq("id", user.id)
+              .maybeSingle();
+
+            const rawInterests = relationArray<string>(
+              profile?.interests,
+            );
+            interests = Array.from(
+              new Set(
+                rawInterests.map((interest) =>
+                  normalizeCategory(interest, interest),
+                ),
+              ),
+            );
+            setProfileInterests(interests);
+          }
         }
 
-        if (!user) {
-          setActiveJourney(null);
-          setStartedAttempts({});
-          setCompletedMissionIds(new Set());
-          return;
-        }
-
-        const todayKey = toDateKey(new Date());
-
-        const {
-          data: journeyData,
-          error: journeyError,
-        } = await supabase
-          .from("journeys")
-          .select("id")
-          .eq("user_id", user.id)
-          .eq("status", "active")
-          .lte("start_date", todayKey)
-          .gte("end_date", todayKey)
-          .order("created_at", {
-            ascending: false,
-          })
-          .limit(1)
-          .maybeSingle();
-
-        if (journeyError) {
-          throw journeyError;
-        }
-
-        if (!journeyData) {
-          setActiveJourney(null);
-          setStartedAttempts({});
-          setCompletedMissionIds(new Set());
-          return;
-        }
-
-        const journey = {
-          id: String(journeyData.id),
+        const requestBody = {
+          category:
+            filters.categories.length > 0
+              ? filters.categories.join(", ")
+              : "전체",
+          categories:
+            filters.categories.length > 0
+              ? filters.categories
+              : [...CATEGORIES],
+          preferredCategories:
+            filters.categories.length === 0
+              ? interests
+              : filters.categories,
+          interests:
+            filters.categories.length === 0
+              ? interests
+              : filters.categories,
+          time:
+            timeOption?.backendValue ?? "상관없음",
+          estimatedDuration:
+            timeOption?.backendValue ?? "상관없음",
+          cost:
+            costOption?.backendValue ?? "무료/유료",
+          locationType: "실내/실외",
+          latitude: requestCoordinate?.lat,
+          longitude: requestCoordinate?.lng,
+          locationMode:
+            locationMode === "any"
+              ? "radius"
+              : locationMode,
+          radiusKm:
+            locationMode === "district"
+              ? undefined
+              : effectiveRadiusKm,
+          radius_km:
+            locationMode === "district"
+              ? undefined
+              : effectiveRadiusKm,
+          district:
+            locationMode === "district"
+              ? district
+              : undefined,
+          gu:
+            locationMode === "district"
+              ? district
+              : undefined,
+          includeRecommendationReason: true,
+          recommendationReasonRequired: true,
+          recommendationReasonInstruction:
+            "각 미션마다 가장 핵심적인 추천 이유 하나만 recommendation_reason 필드에 15~30자 길이의 짧은 한 문장으로 작성해주세요. 미션마다 서로 다른 이유를 쓰고 같은 문장을 반복하지 마세요.",
+          limit: 10,
+          refreshToken: Date.now(),
         };
 
-        setActiveJourney(journey);
+        let aiCandidates: HomeMission[] = [];
 
-        const {
-          data: attemptRows,
-          error: attemptsError,
-        } = await supabase
-          .from("mission_attempts")
-          .select(
-            "id, journey_id, mission_id, place_id, status, created_at",
-          )
-          .eq("user_id", user.id)
-          .eq("journey_id", journey.id)
-          .in("status", [
-            "selected",
-            "started",
-            "completed",
-          ])
-          .order("created_at", {
-            ascending: false,
-          });
+        try {
+          const { data, error } =
+            await supabase.functions.invoke(
+              "clever-task",
+              {
+                body: requestBody,
+              },
+            );
 
-        if (attemptsError) {
-          throw attemptsError;
-        }
-
-        const nextStartedAttempts: Record<
-          string,
-          StartedAttempt
-        > = {};
-        const nextCompletedMissionIds =
-          new Set<string>();
-
-        for (const row of attemptRows ?? []) {
-          const missionId = String(row.mission_id);
-
-          if (row.status === "completed") {
-            nextCompletedMissionIds.add(missionId);
-            continue;
+          if (error) {
+            throw error;
           }
 
-          if (!nextStartedAttempts[missionId]) {
-            nextStartedAttempts[missionId] = {
-              id: String(row.id),
-              journeyId: String(row.journey_id),
-              missionId,
-              placeId: row.place_id
-                ? String(row.place_id)
-                : null,
+          const rawMissions = relationArray<any>(
+            data?.missions ?? data?.recommendations,
+          );
+
+          aiCandidates = rawMissions.map(
+            (mission, index) =>
+              mapBackendMission(
+                mission as ExtendedBackendMission,
+                index,
+                effectiveCenter,
+              ),
+          );
+        } catch (error) {
+          console.warn(
+            "AI 추천 호출 실패, DB 추천으로 대체:",
+            getErrorMessage(error, "알 수 없는 오류"),
+          );
+        }
+
+        let databaseCandidates: HomeMission[] = [];
+
+        try {
+          const databaseMissions =
+            await getRecommendedMissions(
+              20,
+              completedCount,
+            );
+
+          databaseCandidates = databaseMissions.map(
+            (mission, index) =>
+              mapBackendMission(
+                mission as ExtendedBackendMission,
+                index,
+                effectiveCenter,
+              ),
+          );
+        } catch (error) {
+          console.warn(
+            "DB 추천 조회 실패:",
+            getErrorMessage(error, "알 수 없는 오류"),
+          );
+        }
+
+        const filtered = dedupeMissions([
+          ...aiCandidates,
+          ...shuffle(databaseCandidates),
+        ]).filter((mission) =>
+          missionMatchesFilters(
+            mission,
+            filters,
+            effectiveCenter,
+            effectiveRadiusKm,
+            locationMode === "district" ? district : null,
+          ),
+        );
+
+        const ranked =
+          filters.categories.length === 0
+            ? rankMissionsByInterests(filtered, interests)
+            : filtered;
+
+        if (ranked.length > 0) {
+          setMissions(ranked.slice(0, 10));
+        } else {
+          const fallbackCandidates =
+            effectiveCenter
+              ? FALLBACK_MISSIONS.map((mission) => {
+                  if (
+                    mission.isAtHome ||
+                    !isFiniteNumber(mission.placeLat) ||
+                    !isFiniteNumber(mission.placeLng)
+                  ) {
+                    return mission;
+                  }
+
+                  return {
+                    ...mission,
+                    dist: `${haversineDistanceKm(
+                      effectiveCenter,
+                      {
+                        lat: mission.placeLat,
+                        lng: mission.placeLng,
+                      },
+                    ).toFixed(1)}km`,
+                  };
+                }).filter((mission) =>
+                  missionMatchesFilters(
+                    mission,
+                    filters,
+                    effectiveCenter,
+                    effectiveRadiusKm,
+                    locationMode === "district"
+                      ? district
+                      : null,
+                  ),
+                )
+              : FALLBACK_MISSIONS.filter((mission) =>
+                  missionMatchesFilters(
+                    mission,
+                    filters,
+                    null,
+                    effectiveRadiusKm,
+                    locationMode === "district"
+                      ? district
+                      : null,
+                  ),
+                );
+
+          setMissions(fallbackCandidates.slice(0, 10));
+        }
+      } catch (error) {
+        console.error("추천 미션 새로고침 실패:", error);
+        Alert.alert(
+          "추천 미션 불러오기 실패",
+          getErrorMessage(
+            error,
+            "추천 미션을 새로 불러오지 못했습니다.",
+          ),
+        );
+      } finally {
+        setLoading(false);
+        setRefreshing(false);
+      }
+    },
+    [profileInterests],
+  );
+
+  const loadJourneyAndAttempts = useCallback(async () => {
+    try {
+      const {
+        data: { user },
+        error: userError,
+      } = await supabase.auth.getUser();
+
+      if (userError) {
+        throw userError;
+      }
+
+      if (!user) {
+        setActiveJourney(null);
+        setStartedAttempts({});
+        setAttemptMissions({});
+        setCompletedRecords([]);
+        setCompletedMissionIds(new Set());
+        setCompletedMissionCount(0);
+        return;
+      }
+
+      const todayKey = toDateKey(new Date());
+      const {
+        data: journeyData,
+        error: journeyError,
+      } = await supabase
+        .from("journeys")
+        .select("id")
+        .eq("user_id", user.id)
+        .eq("status", "active")
+        .lte("start_date", todayKey)
+        .gte("end_date", todayKey)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (journeyError) {
+        throw journeyError;
+      }
+
+      if (!journeyData) {
+        setActiveJourney(null);
+        setStartedAttempts({});
+        setAttemptMissions({});
+        setCompletedRecords([]);
+        setCompletedMissionIds(new Set());
+        setCompletedMissionCount(0);
+        return;
+      }
+
+      const journey = { id: String(journeyData.id) };
+      setActiveJourney(journey);
+
+      const {
+        data: attemptRows,
+        error: attemptsError,
+      } = await supabase
+        .from("mission_attempts")
+        .select(
+          "id, journey_id, mission_id, place_id, status, created_at",
+        )
+        .eq("user_id", user.id)
+        .eq("journey_id", journey.id)
+        .in("status", [
+          "selected",
+          "started",
+          "completed",
+        ])
+        .order("created_at", { ascending: false });
+
+      if (attemptsError) {
+        throw attemptsError;
+      }
+
+      const attempts = attemptRows ?? [];
+      const missionIds = [
+        ...new Set(
+          attempts
+            .map((row) => String(row.mission_id))
+            .filter(Boolean),
+        ),
+      ];
+      const placeIds = [
+        ...new Set(
+          attempts
+            .map((row) =>
+              row.place_id ? String(row.place_id) : "",
+            )
+            .filter(Boolean),
+        ),
+      ];
+
+      const placeMap: Record<
+        string,
+        {
+          id: string;
+          name: string | null;
+          latitude: number | null;
+          longitude: number | null;
+        }
+      > = {};
+
+      if (placeIds.length > 0) {
+        const { data: placeRows, error: placeError } =
+          await supabase
+            .from("places")
+            .select("id, name, latitude, longitude")
+            .in("id", placeIds);
+
+        if (placeError) {
+          console.warn("장소 정보 조회 실패:", placeError);
+        } else {
+          for (const place of placeRows ?? []) {
+            placeMap[String(place.id)] = {
+              id: String(place.id),
+              name: place.name ?? null,
+              latitude: toFiniteNumber(place.latitude),
+              longitude: toFiniteNumber(place.longitude),
             };
           }
         }
-
-        setStartedAttempts(nextStartedAttempts);
-        setCompletedMissionIds(
-          nextCompletedMissionIds,
-        );
-      } catch (error) {
-        console.error(
-          "진행 중 미션 조회 실패:",
-          error instanceof Error
-            ? error.message
-            : error,
-        );
       }
-    },
-    [],
-  );
+
+      const missionPairs = await Promise.all(
+        missionIds.map(async (missionId) => {
+          try {
+            const mission = await getMissionById(missionId);
+            const attemptWithPlace = attempts.find(
+              (row) =>
+                String(row.mission_id) === missionId &&
+                row.place_id,
+            );
+            const place = attemptWithPlace?.place_id
+              ? placeMap[String(attemptWithPlace.place_id)]
+              : null;
+
+            return [
+              missionId,
+              mapBackendMission(
+                mission as ExtendedBackendMission,
+                0,
+                recommendationCenter ?? userLocation,
+                place,
+              ),
+            ] as const;
+          } catch (error) {
+            console.warn(
+              `미션 ${missionId} 상세 조회 실패:`,
+              getErrorMessage(error, "알 수 없는 오류"),
+            );
+            return null;
+          }
+        }),
+      );
+
+      const nextMissionMap: Record<string, HomeMission> = {};
+      for (const pair of missionPairs) {
+        if (pair) {
+          nextMissionMap[pair[0]] = pair[1];
+        }
+      }
+
+      const nextStartedAttempts: Record<
+        string,
+        StartedAttempt
+      > = {};
+      const nextCompletedMissionIds = new Set<string>();
+      const completedAttemptIds: string[] = [];
+      const completedAttemptMissionMap: Record<
+        string,
+        string
+      > = {};
+
+      for (const row of attempts) {
+        const missionId = String(row.mission_id);
+        const attemptId = String(row.id);
+
+        if (row.status === "completed") {
+          nextCompletedMissionIds.add(missionId);
+          completedAttemptIds.push(attemptId);
+          completedAttemptMissionMap[attemptId] = missionId;
+          continue;
+        }
+
+        if (!nextStartedAttempts[missionId]) {
+          nextStartedAttempts[missionId] = {
+            id: attemptId,
+            journeyId: String(row.journey_id),
+            missionId,
+            placeId: row.place_id
+              ? String(row.place_id)
+              : null,
+            createdAt: String(row.created_at),
+          };
+        }
+      }
+
+      const nextCompletedRecords: CompletedRecord[] = [];
+
+      if (completedAttemptIds.length > 0) {
+        const { data: recordRows, error: recordError } =
+          await supabase
+            .from("records")
+            .select(`
+              id,
+              mission_attempt_id,
+              content,
+              emotion,
+              visibility,
+              recorded_at,
+              record_photos (
+                storage_path,
+                sort_order,
+                is_cover
+              )
+            `)
+            .eq("user_id", user.id)
+            .in("mission_attempt_id", completedAttemptIds)
+            .order("recorded_at", { ascending: false });
+
+        if (recordError) {
+          throw recordError;
+        }
+
+        for (const record of recordRows ?? []) {
+          const attemptId = String(
+            record.mission_attempt_id,
+          );
+          const missionId =
+            completedAttemptMissionMap[attemptId];
+
+          if (!missionId) {
+            continue;
+          }
+
+          const photos = relationArray<any>(
+            record.record_photos,
+          ).sort((a, b) => {
+            if (Boolean(a.is_cover) !== Boolean(b.is_cover)) {
+              return a.is_cover ? -1 : 1;
+            }
+            return Number(a.sort_order ?? 0) - Number(b.sort_order ?? 0);
+          });
+          const photoUrls = (
+            await Promise.all(
+              photos.map(async (photo) => {
+                const storagePath = String(
+                  photo.storage_path ?? "",
+                );
+
+                if (!storagePath) {
+                  return null;
+                }
+
+                const { data, error } =
+                  await supabase.storage
+                    .from("record-photos")
+                    .createSignedUrl(storagePath, 3600);
+
+                if (error) {
+                  console.warn(
+                    "기록 사진 URL 생성 실패:",
+                    error,
+                  );
+                  return null;
+                }
+
+                return data.signedUrl;
+              }),
+            )
+          ).filter((url): url is string => Boolean(url));
+
+          nextCompletedRecords.push({
+            id: String(record.id),
+            attemptId,
+            missionId,
+            content: String(record.content ?? ""),
+            emotion: record.emotion as EmotionValue,
+            visibility: record.visibility as
+              | RecordVisibility
+              | "nickname",
+            recordedAt: String(record.recorded_at),
+            photoUrls,
+          });
+        }
+      }
+
+      setStartedAttempts(nextStartedAttempts);
+      setAttemptMissions(nextMissionMap);
+      setCompletedRecords(nextCompletedRecords);
+      setCompletedMissionIds(nextCompletedMissionIds);
+      setCompletedMissionCount(nextCompletedRecords.length);
+    } catch (error) {
+      console.error("미션 상태 조회 실패:", error);
+    }
+  }, [recommendationCenter, userLocation]);
 
   useFocusEffect(
     useCallback(() => {
       void loadJourneyAndAttempts();
     }, [loadJourneyAndAttempts]),
   );
-  useEffect(() => {
-  if (!pendingSharedMission) return;
-
-  const missionToAdd: HomeMission = {
-    id: pendingSharedMission.id,
-    title: pendingSharedMission.title,
-    desc: pendingSharedMission.desc,
-    instructions: pendingSharedMission.instructions,
-    recommendationReason: pendingSharedMission.recommendationReason,
-    time: pendingSharedMission.time,
-    dist: pendingSharedMission.dist,
-    cost: pendingSharedMission.cost,
-    cat: pendingSharedMission.cat as CategoryName,
-    requiredItems: pendingSharedMission.requiredItems,
-    placeId: pendingSharedMission.placeId,
-    placeLat: pendingSharedMission.placeLat,
-    placeLng: pendingSharedMission.placeLng,
-    placeName: pendingSharedMission.placeName,
-  };
-
-  setMissions((prev) => {
-    const exists = prev.some((m) => m.id === missionToAdd.id);
-    return exists ? prev : [missionToAdd, ...prev];
-  });
-  setSelectedMission(missionToAdd);
-  moveSheet(0);
-  clearPendingSharedMission();
-  }, [pendingSharedMission]);
 
   useEffect(() => {
-    const fetchMissions = async () => {
-      setLoading(true);
+    const initialize = async () => {
+      let coordinate: Coordinate | null = null;
 
       try {
-        let latitude: number | undefined;
-        let longitude: number | undefined;
-
         if (!locationRequested.current) {
           locationRequested.current = true;
-
           const { status } =
             await Location.requestForegroundPermissionsAsync();
 
           if (status === "granted") {
             const location =
               await Location.getCurrentPositionAsync({});
-
-            latitude = location.coords.latitude;
-            longitude = location.coords.longitude;
-
-            setUserLocation({
-              lat: latitude,
-              lng: longitude,
-            });
-          }
-        } else if (userLocation) {
-          latitude = userLocation.lat;
-          longitude = userLocation.lng;
-        }
-
-        const {
-          data: aiData,
-          error: aiError,
-        } = await supabase.functions.invoke(
-          "clever-task",
-          {
-            body: {
-              category: "전체",
-              cost: "무료/유료",
-              locationType: "실내/실외",
-              latitude,
-              longitude,
-            },
-          },
-        );
-
-        if (!aiError) {
-          const aiMissions =
-            (aiData?.missions ?? []) as ExtendedBackendMission[];
-
-          if (aiMissions.length > 0) {
-            setMissions(
-              aiMissions.map(mapBackendMission),
-            );
-            return;
+            coordinate = {
+              lat: location.coords.latitude,
+              lng: location.coords.longitude,
+            };
+            setUserLocation(coordinate);
           }
         }
-
-        const databaseMissions =
-          await getRecommendedMissions(8, 0);
-
-        if (databaseMissions.length > 0) {
-          setMissions(
-            databaseMissions.map((mission) =>
-              mapBackendMission(
-                mission as ExtendedBackendMission,
-              ),
-            ),
-          );
-          return;
-        }
-
-        setMissions(FALLBACK_MISSIONS);
       } catch (error) {
-        console.log(
-          "AI 미션 추천 실패, 임시 데이터 사용:",
-          error instanceof Error
-            ? error.message
-            : error,
-        );
-
-        try {
-          const databaseMissions =
-            await getRecommendedMissions(8, 0);
-
-          if (databaseMissions.length > 0) {
-            setMissions(
-              databaseMissions.map((mission) =>
-                mapBackendMission(
-                  mission as ExtendedBackendMission,
-                ),
-              ),
-            );
-          } else {
-            setMissions(FALLBACK_MISSIONS);
-          }
-        } catch {
-          setMissions(FALLBACK_MISSIONS);
-        }
-      } finally {
-        setLoading(false);
+        console.warn("현재 위치 조회 실패:", error);
       }
+
+      await fetchRecommendations({
+        filters: DEFAULT_FILTERS,
+        center: null,
+        locationMode: "any",
+        radiusKm: DEFAULT_ANY_RADIUS_KM,
+        district: null,
+        locationHint: coordinate,
+        completedCount: 0,
+        showInitialLoading: true,
+      });
     };
 
-    void fetchMissions();
-  }, []);
+    void initialize();
+  }, [fetchRecommendations]);
+
+  useEffect(() => {
+    if (!pendingSharedMission) {
+      return;
+    }
+
+    const shared = pendingSharedMission as any;
+    const sharedTitle = String(shared.title);
+    const sharedDescription = String(
+      shared.desc ?? shared.shortDescription ?? "",
+    );
+    const sharedInstructions = String(
+      shared.instructions ?? shared.desc ?? "",
+    );
+    const sharedCategory = normalizeCategory(
+      shared.cat,
+      `${sharedTitle} ${sharedDescription} ${sharedInstructions}`,
+    );
+    const sharedIsAtHome =
+      shared.isAtHome === true ||
+      /(내 집|집에서|집 안|방에서|자택)/.test(
+        `${sharedTitle} ${sharedDescription} ${sharedInstructions}`,
+      );
+
+    const missionToAdd: HomeMission = {
+      id: String(shared.id),
+      title: sharedTitle,
+      desc: sharedDescription,
+      instructions: sharedInstructions,
+      recommendationReason: String(
+        shared.recommendationReason ??
+          buildMissionSpecificRecommendationReason({
+            title: sharedTitle,
+            category: sharedCategory,
+            placeName: sharedIsAtHome
+              ? "내 집"
+              : shared.placeName,
+            time: String(shared.time ?? "시간 자유"),
+            cost:
+              shared.cost === "무료" ||
+              shared.cost === "유료" ||
+              shared.cost === "유료/무료"
+                ? shared.cost
+                : "유료/무료",
+            isAtHome: sharedIsAtHome,
+          }),
+      ),
+      durationMinutes: parseDurationMinutes(
+        shared.time,
+      ),
+      time: String(shared.time ?? "시간 자유"),
+      dist: sharedIsAtHome
+        ? "내 집"
+        : String(shared.dist ?? "거리 정보 없음"),
+      cost:
+        shared.cost === "무료" ||
+        shared.cost === "유료" ||
+        shared.cost === "유료/무료"
+          ? shared.cost
+          : "유료/무료",
+      cat: sharedCategory,
+      requiredItems: Array.isArray(
+        shared.requiredItems,
+      )
+        ? shared.requiredItems
+        : [],
+      placeId: shared.placeId,
+      placeLat: sharedIsAtHome
+        ? undefined
+        : toFiniteNumber(shared.placeLat) ?? undefined,
+      placeLng: sharedIsAtHome
+        ? undefined
+        : toFiniteNumber(shared.placeLng) ?? undefined,
+      placeName: sharedIsAtHome
+        ? "내 집"
+        : shared.placeName,
+      isAtHome: sharedIsAtHome,
+      isFallback: !isUuid(String(shared.id)),
+    };
+
+    setMissions((previous) => {
+      const exists = previous.some(
+        (mission) => mission.id === missionToAdd.id,
+      );
+      return exists
+        ? previous
+        : [missionToAdd, ...previous];
+    });
+    setSheetSection("recommended");
+    sectionIndicator.setValue(
+      SECTION_INDEX.recommended,
+    );
+    setSelectedItemKey(
+      `recommended:${missionToAdd.id}`,
+    );
+    selectedCardAnimation.setValue(1);
+    moveSheet(0);
+    clearPendingSharedMission();
+  }, [
+    clearPendingSharedMission,
+    moveSheet,
+    pendingSharedMission,
+    sectionIndicator,
+    selectedCardAnimation,
+  ]);
+
+  const activeItems = useMemo<MissionListItem[]>(
+    () =>
+      Object.values(startedAttempts)
+        .sort((a, b) =>
+          b.createdAt.localeCompare(a.createdAt),
+        )
+        .map((attempt) => {
+          const mission =
+            attemptMissions[attempt.missionId] ??
+            missions.find(
+              (item) => item.id === attempt.missionId,
+            );
+
+          return mission
+            ? {
+                key: `active:${attempt.id}`,
+                kind: "active" as const,
+                mission,
+                attempt,
+              }
+            : null;
+        })
+        .filter(
+          (item): item is MissionListItem =>
+            item !== null,
+        ),
+    [attemptMissions, missions, startedAttempts],
+  );
+
+  const recommendedItems = useMemo<MissionListItem[]>(
+    () =>
+      missions
+        .filter(
+          (mission) =>
+            !startedAttempts[mission.id] &&
+            !completedMissionIds.has(mission.id),
+        )
+        .map((mission) => ({
+          key: `recommended:${mission.id}`,
+          kind: "recommended" as const,
+          mission,
+        })),
+    [completedMissionIds, missions, startedAttempts],
+  );
+
+  const recordItems = useMemo<MissionListItem[]>(
+    () =>
+      completedRecords
+        .map((record) => {
+          const mission =
+            attemptMissions[record.missionId] ??
+            missions.find(
+              (item) => item.id === record.missionId,
+            );
+
+          return mission
+            ? {
+                key: `record:${record.attemptId}`,
+                kind: "record" as const,
+                mission,
+                record,
+              }
+            : null;
+        })
+        .filter(
+          (item): item is MissionListItem =>
+            item !== null,
+        ),
+    [attemptMissions, completedRecords, missions],
+  );
+
+  const currentItems =
+    sheetSection === "active"
+      ? activeItems
+      : sheetSection === "recommended"
+        ? recommendedItems
+        : recordItems;
+
+  const currentSectionTitle =
+    sheetSection === "active"
+      ? "현재 진행중인 미션"
+      : sheetSection === "recommended"
+        ? "추천 미션"
+        : "내가 쓴 기록";
+
+  const currentSectionSub =
+    sheetSection === "recommended"
+      ? `${getConditionSummary(
+          appliedFilters,
+          recommendationLocationMode,
+          recommendationCenter,
+          recommendationRadiusKm,
+          recommendationDistrict,
+        )} · ${recommendedItems.length}개`
+      : sheetSection === "active"
+        ? `${activeItems.length}개의 미션을 진행하고 있어요`
+        : `${recordItems.length}개의 기록을 남겼어요`;
+
+  const changeSection = (next: SheetSection) => {
+    if (next === sheetSection) {
+      return;
+    }
+
+    Animated.spring(sectionIndicator, {
+      toValue: SECTION_INDEX[next],
+      useNativeDriver: true,
+      damping: 22,
+      stiffness: 220,
+      mass: 0.8,
+    }).start();
+
+    Animated.timing(sectionContentAnimation, {
+      toValue: 0,
+      duration: 90,
+      useNativeDriver: true,
+    }).start(() => {
+      setSelectedItemKey(null);
+      selectedCardAnimation.setValue(0);
+      setSheetSection(next);
+      sectionContentAnimation.setValue(0);
+
+      Animated.timing(sectionContentAnimation, {
+        toValue: 1,
+        duration: 180,
+        useNativeDriver: true,
+      }).start();
+    });
+  };
 
   const toggleSheet = () => {
-    sheetTranslateY.stopAnimation(
-      (currentPosition) => {
-        const isCollapsed =
-          currentPosition > COLLAPSED_POSITION / 2;
-
-        moveSheet(
-          isCollapsed ? 0 : COLLAPSED_POSITION,
-        );
-      },
-    );
+    sheetTranslateY.stopAnimation((currentPosition) => {
+      const isCollapsed =
+        currentPosition > COLLAPSED_POSITION / 2;
+      moveSheet(isCollapsed ? 0 : COLLAPSED_POSITION);
+    });
   };
 
   const finishDrag = (
@@ -805,19 +2628,17 @@ export default function HomeScreen() {
       return;
     }
 
-    const shouldExpand =
-      currentPosition < COLLAPSED_POSITION / 2;
-
     moveSheet(
-      shouldExpand ? 0 : COLLAPSED_POSITION,
+      currentPosition < COLLAPSED_POSITION / 2
+        ? 0
+        : COLLAPSED_POSITION,
     );
   };
 
   const panResponder = useRef(
     PanResponder.create({
       onStartShouldSetPanResponder: () => true,
-      onStartShouldSetPanResponderCapture: () =>
-        true,
+      onStartShouldSetPanResponderCapture: () => true,
       onMoveShouldSetPanResponder: (_event, gesture) =>
         Math.abs(gesture.dy) > 2,
       onMoveShouldSetPanResponderCapture: (
@@ -827,23 +2648,22 @@ export default function HomeScreen() {
       onPanResponderGrant: () => {
         sheetTranslateY.stopAnimation(
           (currentPosition) => {
-            dragStartPosition.current =
-              currentPosition;
+            dragStartPosition.current = currentPosition;
           },
         );
       },
       onPanResponderMove: (_event, gesture) => {
         const nextPosition =
           dragStartPosition.current + gesture.dy;
-        const limitedPosition = Math.max(
-          0,
-          Math.min(
-            nextPosition,
-            COLLAPSED_POSITION,
+        sheetTranslateY.setValue(
+          Math.max(
+            0,
+            Math.min(
+              nextPosition,
+              COLLAPSED_POSITION,
+            ),
           ),
         );
-
-        sheetTranslateY.setValue(limitedPosition);
       },
       onPanResponderRelease: (_event, gesture) => {
         const currentPosition = Math.max(
@@ -861,10 +2681,7 @@ export default function HomeScreen() {
 
         finishDrag(currentPosition, gesture.vy);
       },
-      onPanResponderTerminate: (
-        _event,
-        gesture,
-      ) => {
+      onPanResponderTerminate: (_event, gesture) => {
         const currentPosition = Math.max(
           0,
           Math.min(
@@ -872,11 +2689,9 @@ export default function HomeScreen() {
             COLLAPSED_POSITION,
           ),
         );
-
         finishDrag(currentPosition, gesture.vy);
       },
-      onPanResponderTerminationRequest: () =>
-        false,
+      onPanResponderTerminationRequest: () => false,
       onShouldBlockNativeResponder: () => true,
     }),
   ).current;
@@ -890,8 +2705,8 @@ export default function HomeScreen() {
         } as any)
       : undefined;
 
-  const selectMission = (mission: HomeMission) => {
-    if (selectedMission?.id === mission.id) {
+  const selectListItem = (item: MissionListItem) => {
+    if (selectedItemKey === item.key) {
       moveSheet(0);
       return;
     }
@@ -899,11 +2714,10 @@ export default function HomeScreen() {
     LayoutAnimation.configureNext(
       LayoutAnimation.Presets.easeInEaseOut,
     );
-
     selectedCardClosing.current = false;
     selectedCardAnimation.stopAnimation();
     selectedCardAnimation.setValue(0);
-    setSelectedMission(mission);
+    setSelectedItemKey(item.key);
     moveSheet(0);
 
     requestAnimationFrame(() => {
@@ -918,11 +2732,8 @@ export default function HomeScreen() {
     });
   };
 
-  const closeSelectedMission = () => {
-    if (
-      !selectedMission ||
-      selectedCardClosing.current
-    ) {
+  const closeSelectedItem = () => {
+    if (!selectedItemKey || selectedCardClosing.current) {
       return;
     }
 
@@ -931,34 +2742,121 @@ export default function HomeScreen() {
 
     Animated.timing(selectedCardAnimation, {
       toValue: 0,
-      duration: 190,
+      duration: 180,
       useNativeDriver: true,
     }).start(() => {
       LayoutAnimation.configureNext(
         LayoutAnimation.Presets.easeInEaseOut,
       );
-      setSelectedMission(null);
+      setSelectedItemKey(null);
       selectedCardClosing.current = false;
     });
   };
 
-  const handleMarkerPress = (
-    markerId: string | number,
-  ) => {
-    const mission = missions.find(
-      (item) => String(item.id) === String(markerId),
+  const handleMarkerPress = (markerId: string | number) => {
+    const missionId = String(markerId);
+    const item = currentItems.find(
+      (candidate) => candidate.mission.id === missionId,
     );
 
-    if (mission) {
-      selectMission(mission);
+    if (item) {
+      selectListItem(item);
     }
+  };
+
+  const openConditionModal = (step = 0) => {
+    setDraftCategories(appliedFilters.categories);
+    setDraftTime(appliedFilters.time);
+    setDraftCost(appliedFilters.cost);
+    setDraftCenter(recommendationCenter);
+    setDraftLocationMode(recommendationLocationMode);
+    setDraftRadiusKm(recommendationRadiusKm);
+    setDraftDistrict(recommendationDistrict);
+    setConditionStep(step);
+    setConditionVisible(true);
+  };
+
+  const applyConditions = async () => {
+    if (
+      draftLocationMode === "radius" &&
+      !draftCenter
+    ) {
+      Alert.alert(
+        "중심 위치를 선택해주세요",
+        "지도에서 추천 범위의 중심이 될 위치를 눌러주세요.",
+      );
+      setConditionStep(0);
+      return;
+    }
+
+    if (
+      draftLocationMode === "district" &&
+      !draftDistrict
+    ) {
+      Alert.alert(
+        "구를 선택해주세요",
+        "추천받을 부산 지역을 하나 선택해주세요.",
+      );
+      setConditionStep(0);
+      return;
+    }
+
+    const nextFilters: RecommendationFilters = {
+      categories: draftCategories,
+      time: draftTime,
+      cost: draftCost,
+    };
+
+    setAppliedFilters(nextFilters);
+    setRecommendationCenter(
+      draftLocationMode === "radius" ? draftCenter : null,
+    );
+    setRecommendationLocationMode(draftLocationMode);
+    setRecommendationRadiusKm(draftRadiusKm);
+    setRecommendationDistrict(
+      draftLocationMode === "district"
+        ? draftDistrict
+        : null,
+    );
+    setConditionVisible(false);
+    setSelectedItemKey(null);
+    changeSection("recommended");
+
+    await fetchRecommendations({
+      filters: nextFilters,
+      center:
+        draftLocationMode === "radius"
+          ? draftCenter
+          : null,
+      locationMode: draftLocationMode,
+      radiusKm: draftRadiusKm,
+      district:
+        draftLocationMode === "district"
+          ? draftDistrict
+          : null,
+      locationHint: userLocation,
+      completedCount: completedMissionCount,
+    });
+  };
+
+  const refreshRecommendations = async () => {
+    setSelectedItemKey(null);
+    await fetchRecommendations({
+      filters: appliedFilters,
+      center: recommendationCenter,
+      locationMode: recommendationLocationMode,
+      radiusKm: recommendationRadiusKm,
+      district: recommendationDistrict,
+      locationHint: userLocation,
+      completedCount: completedMissionCount,
+    });
   };
 
   const handleStartMission = async (
     mission: HomeMission,
   ) => {
     if (startedAttempts[mission.id]) {
-      closeSelectedMission();
+      changeSection("active");
       return;
     }
 
@@ -970,13 +2868,10 @@ export default function HomeScreen() {
       return;
     }
 
-    if (
-      mission.isFallback ||
-      !isUuid(mission.id)
-    ) {
+    if (mission.isFallback || !isUuid(mission.id)) {
       Alert.alert(
         "임시 미션이에요",
-        "AI 또는 데이터베이스에서 불러온 실제 미션만 시작할 수 있어요.",
+        "AI 또는 데이터베이스에 저장된 실제 미션만 시작할 수 있어요.",
       );
       return;
     }
@@ -992,24 +2887,21 @@ export default function HomeScreen() {
       if (userError) {
         throw userError;
       }
-
       if (!user) {
         throw new Error("로그인이 필요합니다.");
       }
 
-      const now = new Date().toISOString();
       const placeId = isUuid(mission.placeId)
         ? mission.placeId
         : null;
-
-      // 같은 미션의 진행 중 시도가 이미 있으면 새 행을 만들지 않고 재사용한다.
-      // 빠르게 두 번 누르거나 화면 상태가 늦게 갱신되는 경우의 중복 생성을 막는다.
       const {
         data: existingAttempt,
-        error: existingAttemptError,
+        error: existingError,
       } = await supabase
         .from("mission_attempts")
-        .select("id, journey_id, mission_id, place_id")
+        .select(
+          "id, journey_id, mission_id, place_id, created_at",
+        )
         .eq("user_id", user.id)
         .eq("journey_id", activeJourney.id)
         .eq("mission_id", mission.id)
@@ -1018,16 +2910,17 @@ export default function HomeScreen() {
         .limit(1)
         .maybeSingle();
 
-      if (existingAttemptError) {
-        throw existingAttemptError;
+      if (existingError) {
+        throw existingError;
       }
 
       let attempt = existingAttempt;
 
       if (!attempt) {
+        const now = new Date().toISOString();
         const {
           data: insertedAttempt,
-          error: attemptError,
+          error: insertError,
         } = await supabase
           .from("mission_attempts")
           .insert({
@@ -1038,40 +2931,49 @@ export default function HomeScreen() {
             status: "selected",
             selected_at: now,
           })
-          .select("id, journey_id, mission_id, place_id")
+          .select(
+            "id, journey_id, mission_id, place_id, created_at",
+          )
           .single();
 
-        if (attemptError) {
-          throw attemptError;
+        if (insertError) {
+          throw insertError;
         }
 
         attempt = insertedAttempt;
       }
 
       if (!attempt) {
-        throw new Error("생성된 미션 시도를 확인하지 못했습니다.");
+        throw new Error(
+          "생성된 미션 시도를 확인하지 못했습니다.",
+        );
       }
+
+      const startedAttempt: StartedAttempt = {
+        id: String(attempt.id),
+        journeyId: String(attempt.journey_id),
+        missionId: String(attempt.mission_id),
+        placeId: attempt.place_id
+          ? String(attempt.place_id)
+          : null,
+        createdAt: String(
+          attempt.created_at ?? new Date().toISOString(),
+        ),
+      };
 
       setStartedAttempts((previous) => ({
         ...previous,
-        [mission.id]: {
-          id: String(attempt.id),
-          journeyId: String(attempt.journey_id),
-          missionId: String(attempt.mission_id),
-          placeId: attempt.place_id
-            ? String(attempt.place_id)
-            : null,
-        },
+        [mission.id]: startedAttempt,
       }));
-
-      closeSelectedMission();
+      setAttemptMissions((previous) => ({
+        ...previous,
+        [mission.id]: mission,
+      }));
+      setSelectedItemKey(null);
+      changeSection("active");
       moveSheet(0);
     } catch (error) {
-      console.error(
-        "미션 시작 실패 전체 오류:",
-        error,
-      );
-
+      console.error("미션 시작 실패:", error);
       const errorCode =
         typeof error === "object" &&
         error !== null &&
@@ -1085,29 +2987,17 @@ export default function HomeScreen() {
         "미션을 시작하지 못했습니다.",
       );
 
-      if (
-        errorCode === "23505" &&
-        errorMessage.includes(
-          "one_active_mission_per_user",
-        )
-      ) {
-        Alert.alert(
-          "여러 미션 허용 설정이 필요해요",
-          "데이터베이스에 한 사람당 진행 중 미션을 하나만 허용하는 기존 제약조건이 남아 있어요. 안내한 SQL을 Supabase SQL Editor에서 한 번 실행해주세요.",
-        );
-        return;
-      }
-
       if (errorCode === "23505") {
         await loadJourneyAndAttempts();
-        closeSelectedMission();
+        Alert.alert(
+          "이미 시작한 미션이에요",
+          "현재 진행중인 미션 탭에서 확인해주세요.",
+        );
+        changeSection("active");
         return;
       }
 
-      Alert.alert(
-        "미션 시작 실패",
-        errorMessage,
-      );
+      Alert.alert("미션 시작 실패", errorMessage);
     } finally {
       setStartLoadingId(null);
     }
@@ -1148,11 +3038,11 @@ export default function HomeScreen() {
       const combined = [...previous];
 
       for (const photo of photos) {
-        const isDuplicate = combined.some(
-          (item) => item.uri === photo.uri,
-        );
-
-        if (!isDuplicate) {
+        if (
+          !combined.some(
+            (item) => item.uri === photo.uri,
+          )
+        ) {
           combined.push(photo);
         }
       }
@@ -1235,12 +3125,6 @@ export default function HomeScreen() {
     }
   };
 
-  const removeRecordPhoto = (uri: string) => {
-    setRecordPhotos((previous) =>
-      previous.filter((photo) => photo.uri !== uri),
-    );
-  };
-
   const uploadRecordPhotos = async ({
     userId,
     recordId,
@@ -1257,7 +3141,11 @@ export default function HomeScreen() {
     const uploadedPaths: string[] = [];
 
     try {
-      for (let index = 0; index < photos.length; index += 1) {
+      for (
+        let index = 0;
+        index < photos.length;
+        index += 1
+      ) {
         const photo = photos[index];
         const extension = getPhotoExtension(photo);
         const contentType = getPhotoContentType(
@@ -1268,7 +3156,6 @@ export default function HomeScreen() {
           .toString(36)
           .slice(2, 8)}`;
         const storagePath = `${userId}/${recordId}/${uniquePart}.${extension}`;
-
         const response = await fetch(photo.uri);
 
         if (!response.ok) {
@@ -1278,7 +3165,6 @@ export default function HomeScreen() {
         }
 
         const arrayBuffer = await response.arrayBuffer();
-
         const { error: uploadError } =
           await supabase.storage
             .from("record-photos")
@@ -1295,38 +3181,26 @@ export default function HomeScreen() {
         uploadedPaths.push(storagePath);
       }
 
-      const photoRows = uploadedPaths.map(
-        (storagePath, index) => ({
-          record_id: recordId,
-          storage_path: storagePath,
-          sort_order: index,
-          is_cover: index === 0,
-        }),
-      );
+      const { error: rowsError } = await supabase
+        .from("record_photos")
+        .insert(
+          uploadedPaths.map((storagePath, index) => ({
+            record_id: recordId,
+            storage_path: storagePath,
+            sort_order: index,
+            is_cover: index === 0,
+          })),
+        );
 
-      const { error: photoRowsError } =
-        await supabase
-          .from("record_photos")
-          .insert(photoRows);
-
-      if (photoRowsError) {
-        throw photoRowsError;
+      if (rowsError) {
+        throw rowsError;
       }
     } catch (error) {
       if (uploadedPaths.length > 0) {
-        const { error: cleanupError } =
-          await supabase.storage
-            .from("record-photos")
-            .remove(uploadedPaths);
-
-        if (cleanupError) {
-          console.error(
-            "실패한 사진 정리 오류:",
-            cleanupError,
-          );
-        }
+        await supabase.storage
+          .from("record-photos")
+          .remove(uploadedPaths);
       }
-
       throw error;
     }
   };
@@ -1336,8 +3210,7 @@ export default function HomeScreen() {
       return;
     }
 
-    const attempt =
-      startedAttempts[recordMission.id];
+    const attempt = startedAttempts[recordMission.id];
 
     if (!attempt) {
       Alert.alert(
@@ -1365,7 +3238,6 @@ export default function HomeScreen() {
 
     try {
       setRecordSaving(true);
-
       const {
         data: { user },
         error: userError,
@@ -1374,7 +3246,6 @@ export default function HomeScreen() {
       if (userError) {
         throw userError;
       }
-
       if (!user) {
         throw new Error("로그인이 필요합니다.");
       }
@@ -1396,58 +3267,38 @@ export default function HomeScreen() {
       if (recordError) {
         throw recordError;
       }
-
       if (!createdRecordId) {
         throw new Error(
           "생성된 기록 ID를 확인하지 못했습니다.",
         );
       }
 
-      const recordId = String(createdRecordId);
       let photoWarning = "";
 
       if (recordPhotos.length > 0) {
         try {
           await uploadRecordPhotos({
             userId: user.id,
-            recordId,
+            recordId: String(createdRecordId),
             photos: recordPhotos,
           });
         } catch (photoError) {
-          console.error(
-            "기록 사진 저장 실패:",
-            photoError,
-          );
-
+          console.error("기록 사진 저장 실패:", photoError);
           photoWarning =
             "\n\n기록은 저장됐지만 사진은 업로드하지 못했어요.";
         }
       }
 
-      setStartedAttempts((previous) => {
-        const next = { ...previous };
-        delete next[recordMission.id];
-        return next;
-      });
-
-      setCompletedMissionIds((previous) => {
-        const next = new Set(previous);
-        next.add(recordMission.id);
-        return next;
-      });
-
       closeRecordModal(true);
+      await loadJourneyAndAttempts();
+      changeSection("records");
 
       Alert.alert(
         "기록 완료",
         `오늘의 경험이 여정에 저장됐어요.${photoWarning}`,
       );
     } catch (error) {
-      console.error(
-        "기록 저장 실패 전체 오류:",
-        error,
-      );
-
+      console.error("기록 저장 실패:", error);
       Alert.alert(
         "기록 저장 실패",
         getErrorMessage(
@@ -1460,21 +3311,293 @@ export default function HomeScreen() {
     }
   };
 
-  const mapCenter = selectedMission?.placeLat &&
-    selectedMission?.placeLng
-    ? {
-        lat: selectedMission.placeLat,
-        lng: selectedMission.placeLng,
-      }
-    : userLocation ?? DEFAULT_CENTER;
+  const renderExpandedItem = (item: MissionListItem) => {
+    const { mission } = item;
 
-  const selectedStarted = selectedMission
-    ? Boolean(startedAttempts[selectedMission.id])
-    : false;
+    return (
+      <Animated.View
+        style={[
+          styles.selectedCard,
+          {
+            opacity: selectedCardAnimation,
+            transform: [
+              {
+                scale: selectedCardAnimation.interpolate({
+                  inputRange: [0, 1],
+                  outputRange: [0.94, 1],
+                }),
+              },
+              {
+                translateY:
+                  selectedCardAnimation.interpolate({
+                    inputRange: [0, 1],
+                    outputRange: [12, 0],
+                  }),
+              },
+            ],
+          },
+        ]}
+      >
+        <View style={styles.selectedCardHeader}>
+          <View style={styles.categoryTag}>
+            <Text style={styles.categoryTagText}>
+              {mission.cat}
+            </Text>
+          </View>
 
-  const selectedCompleted = selectedMission
-    ? completedMissionIds.has(selectedMission.id)
-    : false;
+          <Pressable
+            onPress={closeSelectedItem}
+            hitSlop={10}
+            style={({ pressed }) => [
+              styles.closeDetailButton,
+              pressed && styles.pressed,
+            ]}
+          >
+            <Text style={styles.closeDetailButtonText}>
+              닫기
+            </Text>
+          </Pressable>
+        </View>
+
+        <Text style={styles.selectedTitle}>
+          {mission.title}
+        </Text>
+        <View style={styles.instructionBox}>
+          <Text style={styles.instructionLabel}>
+            미션 안내
+          </Text>
+          <Text style={styles.instructionText}>
+            {mission.instructions}
+          </Text>
+        </View>
+
+        {mission.placeName ? (
+          <View style={styles.placeRow}>
+            <Text style={styles.placeIcon}>📍</Text>
+            <Text style={styles.placeText}>
+              {mission.placeName}
+            </Text>
+          </View>
+        ) : null}
+
+        <View style={styles.metricRow}>
+          <View style={styles.metricItem}>
+            <Text style={styles.metricLabel}>
+              예상 시간
+            </Text>
+            <Text style={styles.metricValue}>
+              {mission.time}
+            </Text>
+          </View>
+          <View style={styles.metricItem}>
+            <Text style={styles.metricLabel}>
+              준비물
+            </Text>
+            <Text
+              numberOfLines={2}
+              style={styles.metricValue}
+            >
+              {getPreparationText(mission)}
+            </Text>
+          </View>
+          <View style={styles.metricItem}>
+            <Text style={styles.metricLabel}>비용</Text>
+            <Text style={styles.metricValue}>
+              {mission.cost}
+            </Text>
+          </View>
+        </View>
+
+        <View style={styles.recommendationBox}>
+          <Text style={styles.recommendationLabel}>
+            추천 이유
+          </Text>
+          <Text
+            numberOfLines={1}
+            ellipsizeMode="tail"
+            style={styles.recommendationText}
+          >
+            {getConciseRecommendationReason(
+              mission.recommendationReason,
+            )}
+          </Text>
+        </View>
+
+        {item.kind === "recommended" ? (
+          <Pressable
+            onPress={() =>
+              void handleStartMission(mission)
+            }
+            disabled={startLoadingId === mission.id}
+            style={({ pressed }) => [
+              styles.startLargeButton,
+              pressed && styles.pressed,
+              startLoadingId === mission.id &&
+                styles.buttonDisabled,
+            ]}
+          >
+            {startLoadingId === mission.id ? (
+              <ActivityIndicator color={WH} />
+            ) : (
+              <Text style={styles.startLargeButtonText}>
+                미션 시작하기
+              </Text>
+            )}
+          </Pressable>
+        ) : item.kind === "active" ? (
+          <Pressable
+            onPress={() => openRecordModal(mission)}
+            style={({ pressed }) => [
+              styles.recordLargeButton,
+              pressed && styles.pressed,
+            ]}
+          >
+            <Text style={styles.recordLargeButtonText}>
+              기록하기
+            </Text>
+          </Pressable>
+        ) : (
+          <Pressable
+            onPress={() =>
+              item.record && setRecordDetail(item.record)
+            }
+            style={({ pressed }) => [
+              styles.viewRecordLargeButton,
+              pressed && styles.pressed,
+            ]}
+          >
+            <Text style={styles.viewRecordLargeButtonText}>
+              내가 쓴 기록 보기
+            </Text>
+          </Pressable>
+        )}
+      </Animated.View>
+    );
+  };
+
+  const renderCompactItem = (item: MissionListItem) => {
+    const { mission } = item;
+
+    return (
+      <Pressable
+        style={({ pressed }) => [
+          styles.compactCard,
+          pressed && styles.cardPressed,
+        ]}
+        onPress={() => selectListItem(item)}
+      >
+        <View style={styles.compactThumb}>
+          <Text style={styles.compactThumbEmoji}>
+            {getCategoryEmoji(mission.cat)}
+          </Text>
+        </View>
+
+        <View style={styles.compactContent}>
+          <Text numberOfLines={2} style={styles.compactTitle}>
+            {mission.title}
+          </Text>
+          <View style={styles.compactMetaRow}>
+            <Text style={styles.compactMeta}>
+              {mission.time}
+            </Text>
+            <Text style={styles.compactMetaDot}>·</Text>
+            <Text style={styles.compactMeta}>
+              {mission.dist}
+            </Text>
+            <View style={styles.compactCategory}>
+              <Text style={styles.compactCategoryText}>
+                {mission.cat}
+              </Text>
+            </View>
+            <View style={styles.compactCost}>
+              <Text style={styles.compactCostText}>
+                {mission.cost}
+              </Text>
+            </View>
+          </View>
+          {mission.placeName ? (
+            <Text numberOfLines={1} style={styles.compactPlace}>
+              📍 {mission.placeName}
+            </Text>
+          ) : null}
+        </View>
+
+        {item.kind === "recommended" ? (
+          <Pressable
+            onPress={(event) => {
+              event.stopPropagation();
+              selectListItem(item);
+            }}
+            style={({ pressed }) => [
+              styles.selectButton,
+              pressed && styles.pressed,
+            ]}
+          >
+            <Text style={styles.selectButtonText}>
+              선택
+            </Text>
+          </Pressable>
+        ) : item.kind === "active" ? (
+          <Pressable
+            onPress={(event) => {
+              event.stopPropagation();
+              openRecordModal(mission);
+            }}
+            style={({ pressed }) => [
+              styles.recordButton,
+              pressed && styles.pressed,
+            ]}
+          >
+            <Text style={styles.recordButtonText}>
+              기록하기
+            </Text>
+          </Pressable>
+        ) : (
+          <Pressable
+            onPress={(event) => {
+              event.stopPropagation();
+              if (item.record) {
+                setRecordDetail(item.record);
+              }
+            }}
+            style={({ pressed }) => [
+              styles.completedButton,
+              pressed && styles.pressed,
+            ]}
+          >
+            <Text style={styles.completedButtonText}>
+              기록 보기
+            </Text>
+          </Pressable>
+        )}
+      </Pressable>
+    );
+  };
+
+  const selectedItem = currentItems.find(
+    (item) => item.key === selectedItemKey,
+  );
+  const mapCenter =
+    selectedItem?.mission.placeLat &&
+    selectedItem?.mission.placeLng
+      ? {
+          lat: selectedItem.mission.placeLat,
+          lng: selectedItem.mission.placeLng,
+        }
+      : recommendationCenter ??
+        userLocation ??
+        DEFAULT_CENTER;
+  const mapMissions = currentItems.map(
+    (item) => item.mission,
+  );
+  const recordDetailMission = recordDetail
+    ? attemptMissions[recordDetail.missionId] ??
+      missions.find(
+        (mission) => mission.id === recordDetail.missionId,
+      )
+    : null;
+  const conditionMapCoordinate =
+    draftCenter ?? userLocation ?? DEFAULT_CENTER;
 
   return (
     <View style={styles.container}>
@@ -1482,7 +3605,7 @@ export default function HomeScreen() {
         latitude={mapCenter.lat}
         longitude={mapCenter.lng}
         style={styles.mapPlaceholder}
-        markers={missions
+        markers={mapMissions
           .filter(
             (mission) =>
               isFiniteNumber(mission.placeLat) &&
@@ -1496,15 +3619,14 @@ export default function HomeScreen() {
         onMarkerPress={handleMarkerPress}
       />
 
+
       <Animated.View
         style={[
           styles.sheet,
           {
             height: SHEET_HEIGHT,
             transform: [
-              {
-                translateY: sheetTranslateY,
-              },
+              { translateY: sheetTranslateY },
             ],
           },
         ]}
@@ -1517,408 +3639,632 @@ export default function HomeScreen() {
         </View>
 
         <View style={styles.sheetHeader}>
-          <View>
+          <View style={styles.sheetHeadingText}>
             <Text style={styles.sheetTitle}>
-              추천 미션
+              {currentSectionTitle}
             </Text>
-            <Text style={styles.sheetSub}>
-              취향을 반영한 {missions.length}가지 미션
+            <Text
+              numberOfLines={1}
+              style={styles.sheetSub}
+            >
+              {currentSectionSub}
             </Text>
           </View>
 
-          <Pressable
-            onPress={() =>
-              Alert.alert(
-                "조건 설정",
-                "미션 조건 설정 화면은 다음 단계에서 연결할 예정입니다.",
-              )
-            }
-            style={({ pressed }) => [
-              styles.conditionBtn,
-              pressed && styles.pressed,
+          {sheetSection === "recommended" ? (
+            <View style={styles.headerActionRow}>
+              <Pressable
+                onPress={() =>
+                  void refreshRecommendations()
+                }
+                disabled={refreshing}
+                style={({ pressed }) => [
+                  styles.refreshBtn,
+                  pressed && styles.pressed,
+                  refreshing && styles.buttonDisabled,
+                ]}
+              >
+                {refreshing ? (
+                  <ActivityIndicator
+                    size="small"
+                    color={BL}
+                  />
+                ) : (
+                  <Text style={styles.refreshText}>
+                    ↻
+                  </Text>
+                )}
+              </Pressable>
+              <Pressable
+                onPress={() => openConditionModal(0)}
+                style={({ pressed }) => [
+                  styles.conditionBtn,
+                  pressed && styles.pressed,
+                ]}
+              >
+                <Text style={styles.conditionText}>
+                  조건 설정
+                </Text>
+              </Pressable>
+            </View>
+          ) : null}
+        </View>
+
+        <View style={styles.sectionTabs}>
+          <Animated.View
+            style={[
+              styles.sectionIndicator,
+              {
+                width: SECTION_INDICATOR_WIDTH,
+                transform: [
+                  {
+                    translateX:
+                      sectionIndicator.interpolate({
+                        inputRange: [0, 1, 2],
+                        outputRange: [
+                          0,
+                          SECTION_INDICATOR_WIDTH,
+                          SECTION_INDICATOR_WIDTH * 2,
+                        ],
+                      }),
+                  },
+                ],
+              },
             ]}
-          >
-            <Text style={styles.conditionText}>
-              조건 설정
-            </Text>
-          </Pressable>
+          />
+
+          {SECTION_LABELS.map((section) => {
+            const count =
+              section.key === "active"
+                ? activeItems.length
+                : section.key === "recommended"
+                  ? recommendedItems.length
+                  : recordItems.length;
+            const selected = sheetSection === section.key;
+
+            return (
+              <Pressable
+                key={section.key}
+                onPress={() => changeSection(section.key)}
+                style={styles.sectionTab}
+              >
+                <Text
+                  style={[
+                    styles.sectionTabText,
+                    selected &&
+                      styles.sectionTabTextSelected,
+                  ]}
+                >
+                  {section.label}
+                </Text>
+                <Text
+                  style={[
+                    styles.sectionCount,
+                    selected &&
+                      styles.sectionCountSelected,
+                  ]}
+                >
+                  {count}
+                </Text>
+              </Pressable>
+            );
+          })}
         </View>
 
         {loading ? (
           <View style={styles.loadingArea}>
-            <ActivityIndicator
-              color={BL}
-              size="small"
-            />
+            <ActivityIndicator color={BL} />
           </View>
         ) : (
-          <ScrollView
-            style={styles.missionScroll}
-            showsVerticalScrollIndicator={false}
-            nestedScrollEnabled
-            keyboardShouldPersistTaps="handled"
-            contentContainerStyle={
-              styles.missionScrollContent
-            }
-          >
-            {selectedMission ? (
-              <Animated.View
-                style={[
-                  styles.selectedCard,
+          <Animated.View
+            style={[
+              styles.sectionContent,
+              {
+                opacity: sectionContentAnimation,
+                transform: [
                   {
-                    opacity: selectedCardAnimation,
-                    transform: [
-                      {
-                        scale: selectedCardAnimation.interpolate({
-                          inputRange: [0, 1],
-                          outputRange: [0.9, 1],
-                        }),
-                      },
-                      {
-                        translateY:
-                          selectedCardAnimation.interpolate({
-                            inputRange: [0, 1],
-                            outputRange: [18, 0],
-                          }),
-                      },
-                    ],
+                    translateY:
+                      sectionContentAnimation.interpolate({
+                        inputRange: [0, 1],
+                        outputRange: [8, 0],
+                      }),
                   },
-                ]}
+                ],
+              },
+            ]}
+          >
+            <ScrollView
+              style={styles.missionScroll}
+              showsVerticalScrollIndicator={false}
+              nestedScrollEnabled
+              keyboardShouldPersistTaps="handled"
+              contentContainerStyle={
+                styles.missionScrollContent
+              }
+            >
+              {currentItems.length > 0 ? (
+                currentItems.map((item) => (
+                  <View key={item.key}>
+                    {selectedItemKey === item.key
+                      ? renderExpandedItem(item)
+                      : renderCompactItem(item)}
+                  </View>
+                ))
+              ) : (
+                <View style={styles.emptyState}>
+                  <Text style={styles.emptyStateEmoji}>
+                    {sheetSection === "active"
+                      ? "🚶"
+                      : sheetSection === "records"
+                        ? "📝"
+                        : "🔎"}
+                  </Text>
+                  <Text style={styles.emptyStateTitle}>
+                    {sheetSection === "active"
+                      ? "진행 중인 미션이 없어요"
+                      : sheetSection === "records"
+                        ? "아직 작성한 기록이 없어요"
+                        : "조건에 맞는 미션을 찾지 못했어요"}
+                  </Text>
+                  <Text style={styles.emptyStateDescription}>
+                    {sheetSection === "active"
+                      ? "추천 미션에서 새로운 경험을 시작해보세요."
+                      : sheetSection === "records"
+                        ? "미션을 완료하고 첫 기록을 남겨보세요."
+                        : "조건을 조금 넓히거나 새로고침해보세요."}
+                  </Text>
+                  {sheetSection === "recommended" ? (
+                    <Pressable
+                      onPress={() => openConditionModal(0)}
+                      style={styles.emptyStateButton}
+                    >
+                      <Text style={styles.emptyStateButtonText}>
+                        조건 다시 설정하기
+                      </Text>
+                    </Pressable>
+                  ) : null}
+                </View>
+              )}
+            </ScrollView>
+          </Animated.View>
+        )}
+      </Animated.View>
+
+      <Modal
+        visible={conditionVisible}
+        animationType="slide"
+        transparent
+        onRequestClose={() => setConditionVisible(false)}
+      >
+        <View style={styles.conditionModalOverlay}>
+          <Pressable
+            style={styles.conditionBackdrop}
+            onPress={() => setConditionVisible(false)}
+          />
+          <View style={styles.conditionModalCard}>
+            <View style={styles.conditionHandle} />
+            <View style={styles.conditionHeader}>
+              <View>
+                <Text style={styles.conditionCaption}>
+                  추천 조건 설정
+                </Text>
+                <Text style={styles.conditionTitle}>
+                  {conditionStep === 0
+                    ? "1. 지역 설정"
+                    : conditionStep === 1
+                      ? "2. 카테고리"
+                      : conditionStep === 2
+                        ? "3. 예상 시간"
+                        : "4. 비용"}
+                </Text>
+              </View>
+              <Pressable
+                onPress={() => setConditionVisible(false)}
+                style={styles.conditionClose}
               >
-                <View style={styles.selectedCardHeader}>
-                  <View style={styles.categoryTag}>
-                    <Text
-                      style={styles.categoryTagText}
-                    >
-                      {selectedMission.cat}
-                    </Text>
-                  </View>
-
-                  <Pressable
-                    onPress={closeSelectedMission}
-                    hitSlop={10}
-                    style={({ pressed }) => [
-                      styles.closeDetailButton,
-                      pressed && styles.pressed,
-                    ]}
-                  >
-                    <Text
-                      style={
-                        styles.closeDetailButtonText
-                      }
-                    >
-                      닫기
-                    </Text>
-                  </Pressable>
-                </View>
-
-                <Text style={styles.selectedTitle}>
-                  {selectedMission.title}
+                <Text style={styles.conditionCloseText}>
+                  ✕
                 </Text>
+              </Pressable>
+            </View>
 
-                <Text
-                  style={styles.selectedDescription}
-                >
-                  {selectedMission.desc}
-                </Text>
-
-                <View style={styles.instructionBox}>
-                  <Text
-                    style={styles.instructionLabel}
-                  >
-                    미션 안내
-                  </Text>
-                  <Text
-                    style={styles.instructionText}
-                  >
-                    {selectedMission.instructions}
-                  </Text>
-                </View>
-
-                {selectedMission.placeName ? (
-                  <View style={styles.placeRow}>
-                    <Text style={styles.placeIcon}>
-                      📍
-                    </Text>
-                    <Text style={styles.placeText}>
-                      {selectedMission.placeName}
-                    </Text>
-                  </View>
-                ) : null}
-
-                <View style={styles.metricRow}>
-                  <View
-                    style={[
-                      styles.metricItem,
-                      styles.metricItemFirst,
-                    ]}
-                  >
-                    <Text style={styles.metricLabel}>
-                      예상 시간
-                    </Text>
-                    <Text style={styles.metricValue}>
-                      {selectedMission.time}
-                    </Text>
-                  </View>
-
-                  <View
-                    style={[
-                      styles.metricItem,
-                      styles.metricItemMiddle,
-                    ]}
-                  >
-                    <Text style={styles.metricLabel}>
-                      준비물
-                    </Text>
-                    <Text
-                      numberOfLines={2}
-                      style={styles.metricValue}
-                    >
-                      {getPreparationText(
-                        selectedMission,
-                      )}
-                    </Text>
-                  </View>
-
-                  <View
-                    style={[
-                      styles.metricItem,
-                      styles.metricItemLast,
-                    ]}
-                  >
-                    <Text style={styles.metricLabel}>
-                      비용
-                    </Text>
-                    <Text style={styles.metricValue}>
-                      {selectedMission.cost}
-                    </Text>
-                  </View>
-                </View>
-
+            <View style={styles.conditionProgressRow}>
+              {[0, 1, 2, 3].map((step) => (
                 <View
-                  style={styles.recommendationBox}
-                >
-                  <Text
-                    style={styles.recommendationLabel}
-                  >
-                    추천 이유
+                  key={step}
+                  style={[
+                    styles.conditionProgress,
+                    step <= conditionStep &&
+                      styles.conditionProgressActive,
+                  ]}
+                />
+              ))}
+            </View>
+
+            <ScrollView
+              showsVerticalScrollIndicator={false}
+              keyboardShouldPersistTaps="handled"
+              contentContainerStyle={
+                styles.conditionBody
+              }
+            >
+              {conditionStep === 0 ? (
+                <>
+                  <Text style={styles.conditionHelp}>
+                    상관없음은 현재 위치 3km를 사용하고, 직접 반경이나 부산의 구를 선택할 수도 있어요.
                   </Text>
-                  <Text
-                    style={styles.recommendationText}
-                  >
-                    {selectedMission.recommendationReason}
-                  </Text>
-                </View>
 
-                {selectedCompleted ? (
-                  <View
-                    style={styles.completedLargeButton}
-                  >
-                    <Text
-                      style={
-                        styles.completedLargeButtonText
-                      }
-                    >
-                      기록 완료
-                    </Text>
-                  </View>
-                ) : selectedStarted ? (
-                  <Pressable
-                    onPress={() =>
-                      openRecordModal(selectedMission)
-                    }
-                    style={({ pressed }) => [
-                      styles.recordLargeButton,
-                      pressed && styles.pressed,
-                    ]}
-                  >
-                    <Text
-                      style={styles.recordLargeButtonText}
-                    >
-                      기록하기
-                    </Text>
-                  </Pressable>
-                ) : (
-                  <Pressable
-                    onPress={() =>
-                      void handleStartMission(
-                        selectedMission,
-                      )
-                    }
-                    disabled={
-                      startLoadingId ===
-                      selectedMission.id
-                    }
-                    style={({ pressed }) => [
-                      styles.startLargeButton,
-                      pressed && styles.pressed,
-                      startLoadingId ===
-                        selectedMission.id &&
-                        styles.buttonDisabled,
-                    ]}
-                  >
-                    {startLoadingId ===
-                    selectedMission.id ? (
-                      <ActivityIndicator color={WH} />
-                    ) : (
-                      <Text
-                        style={
-                          styles.startLargeButtonText
-                        }
-                      >
-                        미션 시작하기
-                      </Text>
-                    )}
-                  </Pressable>
-                )}
-              </Animated.View>
-            ) : null}
+                  <View style={styles.locationModeRow}>
+                    {([
+                      ["any", "상관없음"],
+                      ["radius", "반경"],
+                      ["district", "구 선택"],
+                    ] as const).map(([mode, label]) => {
+                      const selected =
+                        draftLocationMode === mode;
 
-            {selectedMission ? (
-              <Text style={styles.otherMissionTitle}>
-                다른 추천 미션
-              </Text>
-            ) : null}
+                      return (
+                        <Pressable
+                          key={mode}
+                          onPress={() => {
+                            setDraftLocationMode(mode);
 
-            {missions
-              .filter(
-                (mission) =>
-                  mission.id !== selectedMission?.id,
-              )
-              .map((mission) => {
-                const isStarted = Boolean(
-                  startedAttempts[mission.id],
-                );
-                const isCompleted =
-                  completedMissionIds.has(mission.id);
-
-                return (
-                  <Pressable
-                    key={mission.id}
-                    onPress={() => selectMission(mission)}
-                    style={({ pressed }) => [
-                      styles.compactCard,
-                      pressed && styles.cardPressed,
-                    ]}
-                  >
-                    <View
-                      style={styles.compactThumb}
-                    >
-                      <Text
-                        style={styles.compactThumbEmoji}
-                      >
-                        {getCategoryEmoji(mission.cat)}
-                      </Text>
-                    </View>
-
-                    <View
-                      style={styles.compactContent}
-                    >
-                      <Text
-                        numberOfLines={2}
-                        style={styles.compactTitle}
-                      >
-                        {mission.title}
-                      </Text>
-
-                      <View style={styles.compactMetaRow}>
-                        <Text
-                          style={styles.compactMeta}
-                        >
-                          {mission.time}
-                        </Text>
-                        <Text
-                          style={styles.compactMetaDot}
-                        >
-                          ·
-                        </Text>
-                        <Text
-                          style={styles.compactMeta}
-                        >
-                          {mission.dist}
-                        </Text>
-                        <View
-                          style={styles.compactCategory}
+                            if (
+                              mode === "radius" &&
+                              !draftCenter
+                            ) {
+                              setDraftCenter(
+                                userLocation ??
+                                  DEFAULT_CENTER,
+                              );
+                            }
+                          }}
+                          style={[
+                            styles.locationModeButton,
+                            selected &&
+                              styles.locationModeButtonSelected,
+                          ]}
                         >
                           <Text
-                            style={
-                              styles.compactCategoryText
-                            }
+                            style={[
+                              styles.locationModeText,
+                              selected &&
+                                styles.locationModeTextSelected,
+                            ]}
                           >
-                            {mission.cat}
+                            {label}
+                          </Text>
+                        </Pressable>
+                      );
+                    })}
+                  </View>
+
+                  {draftLocationMode === "radius" ? (
+                    <>
+                      <Text style={styles.locationSubLabel}>
+                        추천 범위
+                      </Text>
+                      <View style={styles.radiusOptionRow}>
+                        {RADIUS_OPTIONS.map((radius) => {
+                          const selected =
+                            draftRadiusKm === radius;
+
+                          return (
+                            <Pressable
+                              key={radius}
+                              onPress={() =>
+                                setDraftRadiusKm(radius)
+                              }
+                              style={[
+                                styles.radiusOptionButton,
+                                selected &&
+                                  styles.radiusOptionButtonSelected,
+                              ]}
+                            >
+                              <Text
+                                style={[
+                                  styles.radiusOptionText,
+                                  selected &&
+                                    styles.radiusOptionTextSelected,
+                                ]}
+                              >
+                                {radius}km
+                              </Text>
+                            </Pressable>
+                          );
+                        })}
+                      </View>
+
+                      <View style={styles.locationQuickRow}>
+                        <Pressable
+                          onPress={() => {
+                            if (userLocation) {
+                              setDraftCenter(userLocation);
+                            } else {
+                              Alert.alert(
+                                "현재 위치를 확인할 수 없어요",
+                                "위치 권한을 허용한 뒤 다시 시도해주세요.",
+                              );
+                            }
+                          }}
+                          style={styles.quickLocationButton}
+                        >
+                          <Text style={styles.quickLocationText}>
+                            내 현재 위치로 이동
+                          </Text>
+                        </Pressable>
+                      </View>
+
+                      <View style={styles.locationMapWrapper}>
+                        <LocationPickerMap
+                          coordinate={conditionMapCoordinate}
+                          radiusKm={draftRadiusKm}
+                          onSelect={setDraftCenter}
+                        />
+                        <View style={styles.radiusBadge}>
+                          <Text style={styles.radiusBadgeText}>
+                            반경 {draftRadiusKm}km
                           </Text>
                         </View>
                       </View>
 
-                      {mission.placeName ? (
-                        <Text
-                          numberOfLines={1}
-                          style={styles.compactPlace}
-                        >
-                          📍 {mission.placeName}
-                        </Text>
-                      ) : null}
-                    </View>
+                      <Text style={styles.selectedCoordinateText}>
+                        {draftCenter
+                          ? `선택 위치: ${draftCenter.lat.toFixed(5)}, ${draftCenter.lng.toFixed(5)}`
+                          : "지도를 눌러 중심 위치를 선택해주세요."}
+                      </Text>
+                    </>
+                  ) : draftLocationMode === "district" ? (
+                    <>
+                      <Text style={styles.locationSubLabel}>
+                        부산 지역
+                      </Text>
+                      <View style={styles.optionWrap}>
+                        {BUSAN_DISTRICTS.map((district) => {
+                          const selected =
+                            draftDistrict === district;
 
-                    {isCompleted ? (
-                      <View
-                        style={styles.completedButton}
-                      >
-                        <Text
-                          style={
-                            styles.completedButtonText
-                          }
-                        >
-                          완료
-                        </Text>
+                          return (
+                            <Pressable
+                              key={district}
+                              onPress={() =>
+                                setDraftDistrict(district)
+                              }
+                              style={[
+                                styles.optionChip,
+                                selected &&
+                                  styles.optionChipSelected,
+                              ]}
+                            >
+                              <Text
+                                style={[
+                                  styles.optionChipText,
+                                  selected &&
+                                    styles.optionChipTextSelected,
+                                ]}
+                              >
+                                {district}
+                              </Text>
+                            </Pressable>
+                          );
+                        })}
                       </View>
-                    ) : isStarted ? (
-                      <Pressable
-                        onPress={(event) => {
-                          event.stopPropagation();
-                          openRecordModal(mission);
-                        }}
-                        style={({ pressed }) => [
-                          styles.recordButton,
-                          pressed && styles.pressed,
+                      {draftDistrict ? (
+                        <>
+                          <View style={styles.locationMapWrapper}>
+                            <DistrictBoundaryMap
+                              district={draftDistrict}
+                            />
+                            <View style={styles.radiusBadge}>
+                              <Text style={styles.radiusBadgeText}>
+                                부산 {draftDistrict}
+                              </Text>
+                            </View>
+                          </View>
+
+                          <Text style={styles.selectedCoordinateText}>
+                            파란색으로 표시된 {draftDistrict} 안의 장소를 우선 추천해요.
+                          </Text>
+                        </>
+                      ) : (
+                        <Text style={styles.selectedCoordinateText}>
+                          추천받을 구를 하나 선택해주세요.
+                        </Text>
+                      )}
+                    </>
+                  ) : (
+                    <View style={styles.locationAnyBox}>
+                      <Text style={styles.locationAnyEmoji}>
+                        📍
+                      </Text>
+                      <Text style={styles.locationAnyTitle}>
+                        현재 위치 주변에서 추천받아요
+                      </Text>
+                      <Text style={styles.locationAnyDescription}>
+                        상관없음을 선택하면 현재 위치를 기준으로 반경 {DEFAULT_ANY_RADIUS_KM}km 안의 미션과 집에서 할 수 있는 미션을 보여줘요.
+                      </Text>
+                    </View>
+                  )}
+                </>
+              ) : conditionStep === 1 ? (
+                <>
+                  <Text style={styles.conditionHelp}>
+                    여러 카테고리를 동시에 선택할 수 있어요.
+                  </Text>
+                  <View style={styles.optionWrap}>
+                    <Pressable
+                      onPress={() => setDraftCategories([])}
+                      style={[
+                        styles.optionChip,
+                        draftCategories.length === 0 &&
+                          styles.optionChipSelected,
+                      ]}
+                    >
+                      <Text
+                        style={[
+                          styles.optionChipText,
+                          draftCategories.length === 0 &&
+                            styles.optionChipTextSelected,
                         ]}
                       >
-                        <Text
-                          style={styles.recordButtonText}
+                        상관없음
+                      </Text>
+                    </Pressable>
+                    {CATEGORIES.map((category) => {
+                      const selected =
+                        draftCategories.includes(category);
+
+                      return (
+                        <Pressable
+                          key={category}
+                          onPress={() =>
+                            setDraftCategories((previous) =>
+                              selected
+                                ? previous.filter(
+                                    (item) =>
+                                      item !== category,
+                                  )
+                                : [...previous, category],
+                            )
+                          }
+                          style={[
+                            styles.optionChip,
+                            selected &&
+                              styles.optionChipSelected,
+                          ]}
                         >
-                          기록하기
-                        </Text>
-                      </Pressable>
-                    ) : (
-                      <Pressable
-                        onPress={(event) => {
-                          event.stopPropagation();
-                          selectMission(mission);
-                        }}
-                        style={({ pressed }) => [
-                          styles.selectButton,
-                          pressed && styles.pressed,
+                          <Text
+                            style={[
+                              styles.optionChipText,
+                              selected &&
+                                styles.optionChipTextSelected,
+                            ]}
+                          >
+                            {getCategoryEmoji(category)} {category}
+                          </Text>
+                        </Pressable>
+                      );
+                    })}
+                  </View>
+                </>
+              ) : conditionStep === 2 ? (
+                <>
+                  <Text style={styles.conditionHelp}>
+                    미션을 수행할 수 있는 시간을 골라주세요.
+                  </Text>
+                  {TIME_OPTIONS.map((option) => (
+                    <Pressable
+                      key={option.value}
+                      onPress={() => setDraftTime(option.value)}
+                      style={[
+                        styles.radioOption,
+                        draftTime === option.value &&
+                          styles.radioOptionSelected,
+                      ]}
+                    >
+                      <Text
+                        style={[
+                          styles.radioOptionText,
+                          draftTime === option.value &&
+                            styles.radioOptionTextSelected,
                         ]}
                       >
-                        <Text
-                          style={styles.selectButtonText}
-                        >
-                          선택
-                        </Text>
-                      </Pressable>
-                    )}
-                  </Pressable>
-                );
-              })}
-          </ScrollView>
-        )}
-      </Animated.View>
+                        {option.label}
+                      </Text>
+                      <View
+                        style={[
+                          styles.radioCircle,
+                          draftTime === option.value &&
+                            styles.radioCircleSelected,
+                        ]}
+                      >
+                        {draftTime === option.value ? (
+                          <View style={styles.radioDot} />
+                        ) : null}
+                      </View>
+                    </Pressable>
+                  ))}
+                </>
+              ) : (
+                <>
+                  <Text style={styles.conditionHelp}>
+                    비용이 들 수 있는 활동도 괜찮은지 선택해주세요.
+                  </Text>
+                  {COST_OPTIONS.map((option) => (
+                    <Pressable
+                      key={option.value}
+                      onPress={() => setDraftCost(option.value)}
+                      style={[
+                        styles.radioOption,
+                        draftCost === option.value &&
+                          styles.radioOptionSelected,
+                      ]}
+                    >
+                      <Text
+                        style={[
+                          styles.radioOptionText,
+                          draftCost === option.value &&
+                            styles.radioOptionTextSelected,
+                        ]}
+                      >
+                        {option.label}
+                      </Text>
+                      <View
+                        style={[
+                          styles.radioCircle,
+                          draftCost === option.value &&
+                            styles.radioCircleSelected,
+                        ]}
+                      >
+                        {draftCost === option.value ? (
+                          <View style={styles.radioDot} />
+                        ) : null}
+                      </View>
+                    </Pressable>
+                  ))}
+                </>
+              )}
+            </ScrollView>
+
+            <View style={styles.conditionFooter}>
+              {conditionStep > 0 ? (
+                <Pressable
+                  onPress={() =>
+                    setConditionStep((step) => step - 1)
+                  }
+                  style={styles.previousButton}
+                >
+                  <Text style={styles.previousButtonText}>
+                    이전
+                  </Text>
+                </Pressable>
+              ) : null}
+              <Pressable
+                onPress={() => {
+                  if (conditionStep < 3) {
+                    setConditionStep((step) => step + 1);
+                  } else {
+                    void applyConditions();
+                  }
+                }}
+                style={styles.nextButton}
+              >
+                <Text style={styles.nextButtonText}>
+                  {conditionStep < 3
+                    ? "다음"
+                    : "조건 적용하고 추천받기"}
+                </Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
 
       <Modal
         visible={recordMission !== null}
         transparent
         animationType="slide"
-        onRequestClose={closeRecordModal}
+        onRequestClose={() => closeRecordModal()}
       >
         <KeyboardAvoidingView
           style={styles.recordModalOverlay}
@@ -1928,12 +4274,10 @@ export default function HomeScreen() {
         >
           <Pressable
             style={styles.recordModalBackdrop}
-            onPress={closeRecordModal}
+            onPress={() => closeRecordModal()}
           />
-
           <View style={styles.recordModalCard}>
             <View style={styles.recordModalHandle} />
-
             <ScrollView
               showsVerticalScrollIndicator={false}
               keyboardShouldPersistTaps="handled"
@@ -1942,7 +4286,7 @@ export default function HomeScreen() {
               }
             >
               <View style={styles.recordModalHeader}>
-                <View style={{ flex: 1 }}>
+                <View style={styles.recordModalHeaderText}>
                   <Text style={styles.recordModalCaption}>
                     경험 기록하기
                   </Text>
@@ -1950,18 +4294,11 @@ export default function HomeScreen() {
                     {recordMission?.title}
                   </Text>
                 </View>
-
                 <Pressable
-                  onPress={closeRecordModal}
-                  hitSlop={10}
-                  style={({ pressed }) => [
-                    styles.recordModalClose,
-                    pressed && styles.pressed,
-                  ]}
+                  onPress={() => closeRecordModal()}
+                  style={styles.recordModalClose}
                 >
-                  <Text
-                    style={styles.recordModalCloseText}
-                  >
+                  <Text style={styles.recordModalCloseText}>
                     ✕
                   </Text>
                 </Pressable>
@@ -1981,30 +4318,26 @@ export default function HomeScreen() {
               <Text style={styles.recordFieldLabel}>
                 어떤 감정이 가장 컸나요?
               </Text>
-
               <View style={styles.emotionWrap}>
                 {EMOTIONS.map((emotion) => {
-                  const isSelected =
+                  const selected =
                     recordEmotion === emotion.value;
-
                   return (
                     <Pressable
                       key={emotion.value}
                       onPress={() =>
-                        setRecordEmotion(
-                          emotion.value,
-                        )
+                        setRecordEmotion(emotion.value)
                       }
                       style={[
                         styles.emotionChip,
-                        isSelected &&
+                        selected &&
                           styles.emotionChipSelected,
                       ]}
                     >
                       <Text
                         style={[
                           styles.emotionChipText,
-                          isSelected &&
+                          selected &&
                             styles.emotionChipTextSelected,
                         ]}
                       >
@@ -2018,7 +4351,6 @@ export default function HomeScreen() {
               <Text style={styles.recordFieldLabel}>
                 오늘의 경험을 남겨주세요
               </Text>
-
               <TextInput
                 value={recordContent}
                 onChangeText={setRecordContent}
@@ -2029,7 +4361,6 @@ export default function HomeScreen() {
                 placeholderTextColor={T2}
                 style={styles.recordInput}
               />
-
               <Text style={styles.characterCount}>
                 {recordContent.length}/1200
               </Text>
@@ -2047,22 +4378,16 @@ export default function HomeScreen() {
                   {recordPhotos.length}/{MAX_RECORD_PHOTOS}
                 </Text>
               </View>
-
               <View style={styles.photoActionRow}>
                 <Pressable
                   onPress={() => void handleTakePhoto()}
                   disabled={
                     recordSaving ||
-                    recordPhotos.length >=
-                      MAX_RECORD_PHOTOS
+                    recordPhotos.length >= MAX_RECORD_PHOTOS
                   }
                   style={({ pressed }) => [
                     styles.photoActionButton,
                     pressed && styles.pressed,
-                    (recordSaving ||
-                      recordPhotos.length >=
-                        MAX_RECORD_PHOTOS) &&
-                      styles.buttonDisabled,
                   ]}
                 >
                   <Text style={styles.photoActionIcon}>
@@ -2072,22 +4397,16 @@ export default function HomeScreen() {
                     직접 찍기
                   </Text>
                 </Pressable>
-
                 <Pressable
                   onPress={() => void handlePickPhotos()}
                   disabled={
                     recordSaving ||
-                    recordPhotos.length >=
-                      MAX_RECORD_PHOTOS
+                    recordPhotos.length >= MAX_RECORD_PHOTOS
                   }
                   style={({ pressed }) => [
                     styles.photoActionButton,
                     styles.photoActionButtonLast,
                     pressed && styles.pressed,
-                    (recordSaving ||
-                      recordPhotos.length >=
-                        MAX_RECORD_PHOTOS) &&
-                      styles.buttonDisabled,
                   ]}
                 >
                   <Text style={styles.photoActionIcon}>
@@ -2104,9 +4423,6 @@ export default function HomeScreen() {
                   horizontal
                   showsHorizontalScrollIndicator={false}
                   style={styles.photoPreviewScroll}
-                  contentContainerStyle={
-                    styles.photoPreviewRow
-                  }
                 >
                   {recordPhotos.map((photo, index) => (
                     <View
@@ -2117,34 +4433,24 @@ export default function HomeScreen() {
                         source={{ uri: photo.uri }}
                         style={styles.photoPreview}
                       />
-
                       <Pressable
                         onPress={() =>
-                          removeRecordPhoto(photo.uri)
+                          setRecordPhotos((previous) =>
+                            previous.filter(
+                              (item) =>
+                                item.uri !== photo.uri,
+                            ),
+                          )
                         }
-                        disabled={recordSaving}
-                        hitSlop={8}
-                        style={({ pressed }) => [
-                          styles.photoRemoveButton,
-                          pressed && styles.pressed,
-                        ]}
+                        style={styles.photoRemoveButton}
                       >
-                        <Text
-                          style={
-                            styles.photoRemoveButtonText
-                          }
-                        >
+                        <Text style={styles.photoRemoveText}>
                           ✕
                         </Text>
                       </Pressable>
-
                       {index === 0 ? (
-                        <View style={styles.coverPhotoBadge}>
-                          <Text
-                            style={
-                              styles.coverPhotoBadgeText
-                            }
-                          >
+                        <View style={styles.coverBadge}>
+                          <Text style={styles.coverBadgeText}>
                             대표
                           </Text>
                         </View>
@@ -2161,7 +4467,6 @@ export default function HomeScreen() {
               <Text style={styles.recordFieldLabel}>
                 공개 범위
               </Text>
-
               <View style={styles.visibilityRow}>
                 <Pressable
                   onPress={() =>
@@ -2182,19 +4487,17 @@ export default function HomeScreen() {
                   >
                     나만 보기
                   </Text>
-                  <Text
-                    style={styles.visibilityOptionDesc}
-                  >
+                  <Text style={styles.visibilityOptionDesc}>
                     내 기록에서만 확인해요
                   </Text>
                 </Pressable>
-
                 <Pressable
                   onPress={() =>
                     setRecordVisibility("anonymous")
                   }
                   style={[
                     styles.visibilityOption,
+                    styles.visibilityOptionLast,
                     recordVisibility === "anonymous" &&
                       styles.visibilityOptionSelected,
                   ]}
@@ -2208,18 +4511,14 @@ export default function HomeScreen() {
                   >
                     익명 공유
                   </Text>
-                  <Text
-                    style={styles.visibilityOptionDesc}
-                  >
+                  <Text style={styles.visibilityOptionDesc}>
                     이름 없이 발견 탭에 공유해요
                   </Text>
                 </Pressable>
               </View>
 
               <Pressable
-                onPress={() =>
-                  void handleSaveRecord()
-                }
+                onPress={() => void handleSaveRecord()}
                 disabled={recordSaving}
                 style={({ pressed }) => [
                   styles.saveRecordButton,
@@ -2230,9 +4529,7 @@ export default function HomeScreen() {
                 {recordSaving ? (
                   <ActivityIndicator color={WH} />
                 ) : (
-                  <Text
-                    style={styles.saveRecordButtonText}
-                  >
+                  <Text style={styles.saveRecordButtonText}>
                     기록 저장하기
                   </Text>
                 )}
@@ -2240,6 +4537,97 @@ export default function HomeScreen() {
             </ScrollView>
           </View>
         </KeyboardAvoidingView>
+      </Modal>
+
+      <Modal
+        visible={recordDetail !== null}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setRecordDetail(null)}
+      >
+        <View style={styles.recordDetailOverlay}>
+          <Pressable
+            style={styles.recordModalBackdrop}
+            onPress={() => setRecordDetail(null)}
+          />
+          <View style={styles.recordDetailCard}>
+            <View style={styles.recordModalHandle} />
+            <ScrollView
+              showsVerticalScrollIndicator={false}
+              contentContainerStyle={
+                styles.recordDetailContent
+              }
+            >
+              <View style={styles.recordModalHeader}>
+                <View style={styles.recordModalHeaderText}>
+                  <Text style={styles.recordDetailCaption}>
+                    내가 쓴 기록
+                  </Text>
+                  <Text style={styles.recordModalTitle}>
+                    {recordDetailMission?.title ??
+                      "완료한 미션"}
+                  </Text>
+                </View>
+                <Pressable
+                  onPress={() => setRecordDetail(null)}
+                  style={styles.recordModalClose}
+                >
+                  <Text style={styles.recordModalCloseText}>
+                    ✕
+                  </Text>
+                </Pressable>
+              </View>
+
+              {recordDetail ? (
+                <>
+                  <Text style={styles.recordDetailDate}>
+                    {formatRecordDate(recordDetail.recordedAt)}
+                  </Text>
+                  <View style={styles.recordDetailMetaRow}>
+                    <View style={styles.recordDetailEmotion}>
+                      <Text style={styles.recordDetailEmotionText}>
+                        {getEmotionInfo(recordDetail.emotion).emoji}{" "}
+                        {getEmotionInfo(recordDetail.emotion).label}
+                      </Text>
+                    </View>
+                    <View style={styles.recordDetailVisibility}>
+                      <Text style={styles.recordDetailVisibilityText}>
+                        {recordDetail.visibility === "private"
+                          ? "나만 보기"
+                          : recordDetail.visibility === "anonymous"
+                            ? "익명 공유"
+                            : "닉네임 공유"}
+                      </Text>
+                    </View>
+                  </View>
+
+                  {recordDetail.photoUrls.length > 0 ? (
+                    <ScrollView
+                      horizontal
+                      pagingEnabled
+                      showsHorizontalScrollIndicator={false}
+                      style={styles.recordDetailPhotoScroll}
+                    >
+                      {recordDetail.photoUrls.map((url) => (
+                        <Image
+                          key={url}
+                          source={{ uri: url }}
+                          style={styles.recordDetailPhoto}
+                        />
+                      ))}
+                    </ScrollView>
+                  ) : null}
+
+                  <View style={styles.recordDetailTextBox}>
+                    <Text style={styles.recordDetailText}>
+                      {recordDetail.content}
+                    </Text>
+                  </View>
+                </>
+              ) : null}
+            </ScrollView>
+          </View>
+        </View>
       </Modal>
     </View>
   );
@@ -2251,846 +4639,1175 @@ const styles = StyleSheet.create({
     overflow: "hidden",
     backgroundColor: BG,
   },
-
   mapPlaceholder: {
     ...StyleSheet.absoluteFillObject,
     backgroundColor: "#DFE8F0",
   },
-
+  mapConditionButton: {
+    position: "absolute",
+    top: 54,
+    right: 14,
+    paddingHorizontal: 13,
+    paddingVertical: 9,
+    backgroundColor: WH,
+    borderRadius: 12,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.14,
+    shadowRadius: 8,
+    elevation: 7,
+  },
+  mapConditionButtonText: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: BL,
+  },
   sheet: {
     position: "absolute",
     right: 0,
     bottom: 0,
     left: 0,
-
     overflow: "hidden",
-
     backgroundColor: WH,
-
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,
-
-    shadowColor: "#000000",
-    shadowOffset: {
-      width: 0,
-      height: -5,
-    },
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: -5 },
     shadowOpacity: 0.12,
     shadowRadius: 14,
-
     elevation: 15,
   },
-
   dragArea: {
-    height: 52,
-
+    height: 44,
     alignItems: "center",
     justifyContent: "center",
-
     backgroundColor: WH,
   },
-
   dragHandle: {
     width: 46,
     height: 5,
-
     backgroundColor: "#D7D9DE",
     borderRadius: 3,
   },
-
   sheetHeader: {
+    minHeight: 58,
     flexDirection: "row",
     alignItems: "flex-start",
     justifyContent: "space-between",
-
     paddingHorizontal: 20,
-    paddingBottom: 14,
+    paddingBottom: 10,
   },
-
+  sheetHeadingText: {
+    flex: 1,
+    marginRight: 10,
+  },
   sheetTitle: {
-    fontSize: 16,
-    fontWeight: "700",
+    fontSize: 17,
+    fontWeight: "800",
     color: T0,
   },
-
   sheetSub: {
-    marginTop: 2,
-
-    fontSize: 12,
+    marginTop: 3,
+    fontSize: 11,
     color: T2,
   },
-
-  conditionBtn: {
-    alignSelf: "flex-start",
-
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-
-    backgroundColor: BLL,
-    borderRadius: 8,
+  headerActionRow: {
+    flexDirection: "row",
+    alignItems: "center",
   },
-
+  refreshBtn: {
+    width: 34,
+    height: 34,
+    marginRight: 7,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: BG,
+    borderRadius: 10,
+  },
+  refreshText: {
+    fontSize: 20,
+    lineHeight: 22,
+    color: BL,
+  },
+  conditionBtn: {
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+    backgroundColor: BLL,
+    borderRadius: 10,
+  },
   conditionText: {
     fontSize: 11,
     fontWeight: "700",
     color: BL,
   },
-
+  sectionTabs: {
+    position: "relative",
+    height: 50,
+    marginHorizontal: SECTION_HORIZONTAL_MARGIN,
+    flexDirection: "row",
+    backgroundColor: BG,
+    borderRadius: 13,
+    overflow: "hidden",
+  },
+  sectionIndicator: {
+    position: "absolute",
+    top: 3,
+    bottom: 3,
+    left: 0,
+    backgroundColor: WH,
+    borderRadius: 11,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.07,
+    shadowRadius: 5,
+    elevation: 2,
+  },
+  sectionTab: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    flexDirection: "row",
+  },
+  sectionTabText: {
+    fontSize: 10,
+    fontWeight: "600",
+    color: T2,
+  },
+  sectionTabTextSelected: {
+    fontWeight: "800",
+    color: BL,
+  },
+  sectionCount: {
+    minWidth: 18,
+    marginLeft: 4,
+    paddingHorizontal: 4,
+    paddingVertical: 2,
+    textAlign: "center",
+    fontSize: 9,
+    fontWeight: "700",
+    color: T2,
+    backgroundColor: "#ECEEF2",
+    borderRadius: 8,
+  },
+  sectionCountSelected: {
+    color: BL,
+    backgroundColor: BLL,
+  },
   loadingArea: {
     flex: 1,
     alignItems: "center",
     justifyContent: "center",
   },
-
+  sectionContent: {
+    flex: 1,
+  },
   missionScroll: {
     flex: 1,
   },
-
   missionScrollContent: {
     paddingHorizontal: 16,
+    paddingTop: 12,
     paddingBottom: 130,
   },
-
   selectedCard: {
-    marginBottom: 18,
+    marginBottom: 10,
     padding: 18,
-
     backgroundColor: WH,
-
     borderWidth: 1,
-    borderColor: "rgba(61, 90, 254, 0.16)",
+    borderColor: "rgba(61, 90, 254, 0.20)",
     borderRadius: 18,
   },
-
   selectedCardHeader: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-
     marginBottom: 12,
   },
-
   categoryTag: {
-    alignSelf: "flex-start",
-
     paddingHorizontal: 10,
     paddingVertical: 5,
-
     backgroundColor: BLL,
     borderRadius: 8,
   },
-
   categoryTagText: {
     fontSize: 12,
     fontWeight: "700",
     color: BL,
   },
-
   closeDetailButton: {
     paddingHorizontal: 8,
     paddingVertical: 5,
   },
-
   closeDetailButtonText: {
     fontSize: 12,
     color: T2,
   },
-
   selectedTitle: {
     marginBottom: 8,
-
     fontSize: 21,
     lineHeight: 29,
     fontWeight: "800",
     color: T0,
   },
-
-  selectedDescription: {
-    marginBottom: 14,
-
-    fontSize: 14,
-    lineHeight: 22,
-    color: T1,
-  },
-
   instructionBox: {
     marginBottom: 12,
     padding: 13,
-
     backgroundColor: BG,
     borderRadius: 12,
   },
-
   instructionLabel: {
     marginBottom: 5,
-
     fontSize: 11,
     fontWeight: "700",
     color: T2,
   },
-
   instructionText: {
     fontSize: 13,
     lineHeight: 20,
     color: T1,
   },
-
   placeRow: {
     flexDirection: "row",
     alignItems: "center",
-
     marginBottom: 15,
   },
-
   placeIcon: {
     marginRight: 5,
-
     fontSize: 13,
   },
-
   placeText: {
     flex: 1,
-
     fontSize: 12,
     color: T1,
   },
-
   metricRow: {
     flexDirection: "row",
     alignItems: "flex-start",
-
     marginBottom: 14,
-    paddingLeft: 12,
-    paddingRight: 2,
+    paddingLeft: 16,
+    paddingRight: 0,
   },
-
   metricItem: {
     flex: 1,
     minWidth: 0,
+    paddingRight: 5,
   },
-
-  metricItemFirst: {
-    paddingRight: 8,
-  },
-
-  metricItemMiddle: {
-    paddingHorizontal: 8,
-  },
-
-  metricItemLast: {
-    paddingLeft: 8,
-  },
-
   metricLabel: {
     marginBottom: 5,
-
     fontSize: 11,
     color: T2,
   },
-
   metricValue: {
     fontSize: 13,
     lineHeight: 18,
     fontWeight: "700",
     color: T0,
   },
-
   recommendationBox: {
     flexDirection: "row",
-    alignItems: "flex-start",
-
+    alignItems: "center",
     marginBottom: 16,
     paddingHorizontal: 13,
     paddingVertical: 11,
-
     backgroundColor: "#F4F6F8",
     borderRadius: 12,
   },
-
   recommendationLabel: {
     marginRight: 7,
-
     fontSize: 12,
     lineHeight: 18,
     fontWeight: "700",
     color: BL,
     includeFontPadding: false,
   },
-
   recommendationText: {
     flex: 1,
-
     fontSize: 12,
     lineHeight: 18,
     color: T1,
     includeFontPadding: false,
   },
-
   startLargeButton: {
     minHeight: 52,
-
     alignItems: "center",
     justifyContent: "center",
-
     backgroundColor: BL,
     borderRadius: 14,
   },
-
   startLargeButtonText: {
     fontSize: 15,
     fontWeight: "800",
     color: WH,
   },
-
   recordLargeButton: {
     minHeight: 52,
-
     alignItems: "center",
     justifyContent: "center",
-
     backgroundColor: PINK,
     borderRadius: 14,
   },
-
   recordLargeButtonText: {
     fontSize: 15,
     fontWeight: "800",
     color: WH,
   },
-
-  completedLargeButton: {
+  viewRecordLargeButton: {
     minHeight: 52,
-
     alignItems: "center",
     justifyContent: "center",
-
-    backgroundColor: "#ECFDF5",
+    backgroundColor: SUCCESS_LIGHT,
     borderRadius: 14,
   },
-
-  completedLargeButtonText: {
+  viewRecordLargeButtonText: {
     fontSize: 14,
-    fontWeight: "700",
+    fontWeight: "800",
     color: SUCCESS,
   },
-
-  otherMissionTitle: {
-    marginBottom: 10,
-
-    fontSize: 14,
-    fontWeight: "700",
-    color: T1,
-  },
-
   compactCard: {
     minHeight: 96,
-
     marginBottom: 10,
     padding: 12,
-
     flexDirection: "row",
     alignItems: "center",
-
     backgroundColor: WH,
-
     borderWidth: 1,
-    borderColor: "rgba(0, 0, 0, 0.06)",
+    borderColor: "rgba(0,0,0,0.06)",
     borderRadius: 15,
   },
-
   compactThumb: {
     width: 58,
     height: 58,
-
     marginRight: 12,
-
     alignItems: "center",
     justifyContent: "center",
-
     backgroundColor: BLL,
     borderRadius: 11,
   },
-
   compactThumbEmoji: {
     fontSize: 25,
   },
-
   compactContent: {
     flex: 1,
-    marginRight: 10,
+    marginRight: 8,
   },
-
   compactTitle: {
     fontSize: 13,
     lineHeight: 18,
     fontWeight: "700",
     color: T0,
   },
-
   compactMetaRow: {
     flexDirection: "row",
     alignItems: "center",
     flexWrap: "wrap",
-
     marginTop: 5,
   },
-
   compactMeta: {
-    fontSize: 11,
+    fontSize: 10,
     color: T2,
   },
-
   compactMetaDot: {
     marginHorizontal: 4,
-
-    fontSize: 11,
+    fontSize: 10,
     color: T2,
   },
-
   compactCategory: {
-    marginLeft: 7,
-    paddingHorizontal: 7,
+    marginLeft: 6,
+    paddingHorizontal: 6,
     paddingVertical: 3,
-
     backgroundColor: BG,
     borderRadius: 6,
   },
-
   compactCategoryText: {
-    fontSize: 10,
+    fontSize: 9,
     color: T1,
   },
-
+  compactCost: {
+    marginLeft: 5,
+    paddingHorizontal: 6,
+    paddingVertical: 3,
+    backgroundColor: "#FFF7ED",
+    borderRadius: 6,
+  },
+  compactCostText: {
+    fontSize: 9,
+    color: "#C2410C",
+  },
   compactPlace: {
     marginTop: 4,
-
     fontSize: 10,
     color: T2,
   },
-
   selectButton: {
     minWidth: 54,
-
     alignItems: "center",
     justifyContent: "center",
-
     paddingHorizontal: 10,
     paddingVertical: 11,
-
     backgroundColor: BLL,
     borderRadius: 11,
   },
-
   selectButtonText: {
     fontSize: 12,
     fontWeight: "700",
     color: BL,
   },
-
   recordButton: {
     minWidth: 68,
-
     alignItems: "center",
     justifyContent: "center",
-
     paddingHorizontal: 10,
     paddingVertical: 11,
-
     backgroundColor: PINK_LIGHT,
-
     borderWidth: 1,
-    borderColor: "rgba(236, 72, 153, 0.22)",
+    borderColor: "rgba(236,72,153,0.22)",
     borderRadius: 11,
   },
-
   recordButtonText: {
     fontSize: 12,
     fontWeight: "800",
     color: PINK,
   },
-
   completedButton: {
-    minWidth: 54,
-
+    minWidth: 72,
     alignItems: "center",
     justifyContent: "center",
-
-    paddingHorizontal: 10,
+    paddingHorizontal: 9,
     paddingVertical: 11,
-
-    backgroundColor: "#ECFDF5",
+    backgroundColor: SUCCESS_LIGHT,
     borderRadius: 11,
   },
-
   completedButtonText: {
-    fontSize: 12,
+    fontSize: 11,
     fontWeight: "700",
     color: SUCCESS,
   },
+  emptyState: {
+    marginTop: 16,
+    paddingHorizontal: 24,
+    paddingVertical: 36,
+    alignItems: "center",
+    backgroundColor: BG,
+    borderRadius: 18,
+  },
+  emptyStateEmoji: {
+    marginBottom: 10,
+    fontSize: 30,
+  },
+  emptyStateTitle: {
+    marginBottom: 6,
+    fontSize: 15,
+    fontWeight: "800",
+    color: T0,
+  },
+  emptyStateDescription: {
+    textAlign: "center",
+    fontSize: 12,
+    lineHeight: 19,
+    color: T2,
+  },
+  emptyStateButton: {
+    marginTop: 16,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    backgroundColor: BLL,
+    borderRadius: 10,
+  },
+  emptyStateButtonText: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: BL,
+  },
 
+
+  locationModeRow: {
+    flexDirection: "row",
+    marginBottom: 18,
+    padding: 4,
+    backgroundColor: BG,
+    borderRadius: 12,
+  },
+
+  locationModeButton: {
+    flex: 1,
+    minHeight: 42,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: 9,
+  },
+
+  locationModeButtonSelected: {
+    backgroundColor: WH,
+    shadowColor: "#000000",
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.08,
+    shadowRadius: 5,
+    elevation: 2,
+  },
+
+  locationModeText: {
+    fontSize: 12,
+    fontWeight: "700",
+    color: T2,
+  },
+
+  locationModeTextSelected: {
+    color: BL,
+  },
+
+  locationSubLabel: {
+    marginBottom: 10,
+    fontSize: 12,
+    fontWeight: "700",
+    color: T1,
+  },
+
+  radiusOptionRow: {
+    flexDirection: "row",
+    marginBottom: 14,
+  },
+
+  radiusOptionButton: {
+    flex: 1,
+    minHeight: 42,
+    marginRight: 8,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: BG,
+    borderWidth: 1,
+    borderColor: T3,
+    borderRadius: 10,
+  },
+
+  radiusOptionButtonSelected: {
+    backgroundColor: BLL,
+    borderColor: BL,
+  },
+
+  radiusOptionText: {
+    fontSize: 12,
+    fontWeight: "700",
+    color: T1,
+  },
+
+  radiusOptionTextSelected: {
+    color: BL,
+  },
+
+  locationAnyBox: {
+    alignItems: "center",
+    paddingHorizontal: 20,
+    paddingVertical: 26,
+    backgroundColor: BG,
+    borderRadius: 14,
+  },
+
+  locationAnyEmoji: {
+    marginBottom: 8,
+    fontSize: 28,
+  },
+
+  locationAnyTitle: {
+    marginBottom: 6,
+    fontSize: 14,
+    fontWeight: "800",
+    color: T0,
+  },
+
+  locationAnyDescription: {
+    textAlign: "center",
+    fontSize: 11,
+    lineHeight: 17,
+    color: T2,
+  },
+
+  conditionModalOverlay: {
+    flex: 1,
+    justifyContent: "flex-end",
+  },
+  conditionBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: "rgba(0,0,0,0.45)",
+  },
+  conditionModalCard: {
+    height: "88%",
+    backgroundColor: WH,
+    borderTopLeftRadius: 26,
+    borderTopRightRadius: 26,
+  },
+  conditionHandle: {
+    alignSelf: "center",
+    width: 42,
+    height: 5,
+    marginTop: 10,
+    backgroundColor: "#D7D9DE",
+    borderRadius: 3,
+  },
+  conditionHeader: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+    paddingHorizontal: 20,
+    paddingTop: 16,
+  },
+  conditionCaption: {
+    marginBottom: 4,
+    fontSize: 11,
+    fontWeight: "700",
+    color: BL,
+  },
+  conditionTitle: {
+    fontSize: 20,
+    fontWeight: "800",
+    color: T0,
+  },
+  conditionClose: {
+    width: 36,
+    height: 36,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: BG,
+    borderRadius: 18,
+  },
+  conditionCloseText: {
+    fontSize: 14,
+    color: T1,
+  },
+  conditionProgressRow: {
+    flexDirection: "row",
+    paddingHorizontal: 20,
+    marginTop: 16,
+  },
+  conditionProgress: {
+    flex: 1,
+    height: 4,
+    marginRight: 5,
+    backgroundColor: "#ECEEF2",
+    borderRadius: 2,
+  },
+  conditionProgressActive: {
+    backgroundColor: BL,
+  },
+  conditionBody: {
+    paddingHorizontal: 20,
+    paddingTop: 18,
+    paddingBottom: 24,
+  },
+  conditionHelp: {
+    marginBottom: 14,
+    fontSize: 12,
+    lineHeight: 19,
+    color: T1,
+  },
+  locationQuickRow: {
+    flexDirection: "row",
+    marginBottom: 12,
+  },
+  quickLocationButton: {
+    flex: 1,
+    marginRight: 8,
+    paddingVertical: 11,
+    alignItems: "center",
+    backgroundColor: BG,
+    borderWidth: 1,
+    borderColor: T3,
+    borderRadius: 11,
+  },
+  quickLocationButtonLast: {
+    marginRight: 0,
+  },
+  quickLocationButtonSelected: {
+    backgroundColor: BLL,
+    borderColor: BL,
+  },
+  quickLocationText: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: T1,
+  },
+  quickLocationTextSelected: {
+    color: BL,
+  },
+  locationMapWrapper: {
+    position: "relative",
+    height: 330,
+    overflow: "hidden",
+    backgroundColor: BG,
+    borderWidth: 1,
+    borderColor: T3,
+    borderRadius: 16,
+  },
+  locationPickerMap: {
+    flex: 1,
+    backgroundColor: BG,
+  },
+  radiusBadge: {
+    position: "absolute",
+    top: 10,
+    right: 10,
+    paddingHorizontal: 9,
+    paddingVertical: 6,
+    backgroundColor: "rgba(255,255,255,0.92)",
+    borderRadius: 9,
+  },
+  radiusBadgeText: {
+    fontSize: 10,
+    fontWeight: "700",
+    color: BL,
+  },
+  selectedCoordinateText: {
+    marginTop: 9,
+    fontSize: 10,
+    color: T2,
+  },
+  optionWrap: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+  },
+  optionChip: {
+    marginRight: 8,
+    marginBottom: 9,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    backgroundColor: BG,
+    borderWidth: 1,
+    borderColor: T3,
+    borderRadius: 20,
+  },
+  optionChipSelected: {
+    backgroundColor: BLL,
+    borderColor: BL,
+  },
+  optionChipText: {
+    fontSize: 12,
+    color: T1,
+  },
+  optionChipTextSelected: {
+    fontWeight: "700",
+    color: BL,
+  },
+  radioOption: {
+    minHeight: 56,
+    marginBottom: 10,
+    paddingHorizontal: 16,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    backgroundColor: BG,
+    borderWidth: 1,
+    borderColor: T3,
+    borderRadius: 13,
+  },
+  radioOptionSelected: {
+    backgroundColor: BLL,
+    borderColor: BL,
+  },
+  radioOptionText: {
+    fontSize: 13,
+    fontWeight: "600",
+    color: T1,
+  },
+  radioOptionTextSelected: {
+    color: BL,
+  },
+  radioCircle: {
+    width: 20,
+    height: 20,
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: 1.5,
+    borderColor: T2,
+    borderRadius: 10,
+  },
+  radioCircleSelected: {
+    borderColor: BL,
+  },
+  radioDot: {
+    width: 10,
+    height: 10,
+    backgroundColor: BL,
+    borderRadius: 5,
+  },
+  conditionFooter: {
+    flexDirection: "row",
+    paddingHorizontal: 20,
+    paddingTop: 12,
+    paddingBottom: 30,
+    borderTopWidth: 1,
+    borderTopColor: T3,
+  },
+  previousButton: {
+    minWidth: 88,
+    marginRight: 8,
+    paddingVertical: 14,
+    alignItems: "center",
+    backgroundColor: BG,
+    borderRadius: 13,
+  },
+  previousButtonText: {
+    fontSize: 13,
+    fontWeight: "700",
+    color: T1,
+  },
+  nextButton: {
+    flex: 1,
+    paddingVertical: 14,
+    alignItems: "center",
+    backgroundColor: BL,
+    borderRadius: 13,
+  },
+  nextButtonText: {
+    fontSize: 13,
+    fontWeight: "800",
+    color: WH,
+  },
   recordModalOverlay: {
     flex: 1,
     justifyContent: "flex-end",
   },
-
   recordModalBackdrop: {
     ...StyleSheet.absoluteFillObject,
-    backgroundColor: "rgba(0, 0, 0, 0.44)",
+    backgroundColor: "rgba(0,0,0,0.44)",
   },
-
   recordModalCard: {
     maxHeight: "88%",
-
     backgroundColor: WH,
-
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,
   },
-
   recordModalHandle: {
     alignSelf: "center",
-
     width: 42,
     height: 5,
-
     marginTop: 10,
-
     backgroundColor: "#D7D9DE",
     borderRadius: 3,
   },
-
   recordModalContent: {
     paddingHorizontal: 20,
     paddingTop: 17,
     paddingBottom: 34,
   },
-
   recordModalHeader: {
     flexDirection: "row",
     alignItems: "flex-start",
-
     marginBottom: 16,
   },
-
+  recordModalHeaderText: {
+    flex: 1,
+  },
   recordModalCaption: {
     marginBottom: 5,
-
     fontSize: 12,
     fontWeight: "700",
     color: PINK,
   },
-
   recordModalTitle: {
     paddingRight: 10,
-
     fontSize: 19,
     lineHeight: 26,
     fontWeight: "800",
     color: T0,
   },
-
   recordModalClose: {
     width: 36,
     height: 36,
-
     alignItems: "center",
     justifyContent: "center",
-
     backgroundColor: BG,
     borderRadius: 18,
   },
-
   recordModalCloseText: {
     fontSize: 14,
     color: T1,
   },
-
   recordPlaceBox: {
     marginBottom: 18,
     padding: 13,
-
     backgroundColor: PINK_LIGHT,
     borderRadius: 12,
   },
-
   recordPlaceLabel: {
     marginBottom: 4,
-
     fontSize: 10,
     fontWeight: "700",
     color: PINK,
   },
-
   recordPlaceName: {
     fontSize: 13,
     fontWeight: "700",
     color: T0,
   },
-
   recordFieldLabel: {
     marginBottom: 9,
-
     fontSize: 13,
     fontWeight: "700",
     color: T0,
   },
-
   emotionWrap: {
     flexDirection: "row",
     flexWrap: "wrap",
-
     marginBottom: 18,
   },
-
   emotionChip: {
     marginRight: 8,
     marginBottom: 8,
-
     paddingHorizontal: 13,
     paddingVertical: 8,
-
     backgroundColor: BG,
-
     borderWidth: 1,
     borderColor: T3,
     borderRadius: 18,
   },
-
   emotionChipSelected: {
     backgroundColor: PINK_LIGHT,
     borderColor: PINK,
   },
-
   emotionChipText: {
     fontSize: 12,
     color: T1,
   },
-
   emotionChipTextSelected: {
     fontWeight: "700",
     color: PINK,
   },
-
   recordInput: {
     minHeight: 150,
-
     paddingHorizontal: 14,
     paddingTop: 13,
     paddingBottom: 13,
-
     fontSize: 14,
     lineHeight: 22,
     color: T0,
-
     backgroundColor: BG,
-
     borderWidth: 1,
     borderColor: T3,
     borderRadius: 14,
   },
-
   characterCount: {
     marginTop: 6,
     marginBottom: 18,
-
     textAlign: "right",
-
     fontSize: 10,
     color: T2,
   },
-
   photoSectionHeader: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
   },
-
   photoFieldLabel: {
     marginBottom: 0,
   },
-
   photoCountText: {
     fontSize: 11,
     color: T2,
   },
-
   photoActionRow: {
     flexDirection: "row",
-
     marginTop: 9,
     marginBottom: 10,
   },
-
   photoActionButton: {
     flex: 1,
     minHeight: 48,
-
     marginRight: 8,
-
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
-
     backgroundColor: BG,
-
     borderWidth: 1,
     borderColor: T3,
     borderRadius: 12,
   },
-
   photoActionButtonLast: {
     marginRight: 0,
   },
-
   photoActionIcon: {
     marginRight: 6,
     fontSize: 16,
   },
-
   photoActionText: {
     fontSize: 12,
     fontWeight: "700",
     color: T1,
   },
-
   photoPreviewScroll: {
     marginBottom: 17,
   },
-
-  photoPreviewRow: {
-    paddingRight: 8,
-  },
-
   photoPreviewWrapper: {
     position: "relative",
-
     width: 92,
     height: 92,
-
     marginRight: 9,
   },
-
   photoPreview: {
     width: "100%",
     height: "100%",
-
     backgroundColor: T3,
     borderRadius: 12,
   },
-
   photoRemoveButton: {
     position: "absolute",
     top: 5,
     right: 5,
-
     width: 24,
     height: 24,
-
     alignItems: "center",
     justifyContent: "center",
-
-    backgroundColor: "rgba(15, 15, 15, 0.70)",
+    backgroundColor: "rgba(15,15,15,0.7)",
     borderRadius: 12,
   },
-
-  photoRemoveButtonText: {
+  photoRemoveText: {
     fontSize: 11,
     fontWeight: "800",
     color: WH,
   },
-
-  coverPhotoBadge: {
+  coverBadge: {
     position: "absolute",
     right: 5,
     bottom: 5,
-
     paddingHorizontal: 7,
     paddingVertical: 3,
-
     backgroundColor: PINK,
     borderRadius: 7,
   },
-
-  coverPhotoBadgeText: {
+  coverBadgeText: {
     fontSize: 9,
     fontWeight: "800",
     color: WH,
   },
-
   photoHelperText: {
     marginBottom: 18,
-
     fontSize: 10,
     color: T2,
   },
-
   visibilityRow: {
     flexDirection: "row",
-
     marginBottom: 20,
   },
-
   visibilityOption: {
     flex: 1,
     minHeight: 76,
-
     marginRight: 8,
     padding: 12,
-
     backgroundColor: WH,
-
     borderWidth: 1,
     borderColor: T3,
     borderRadius: 12,
   },
-
+  visibilityOptionLast: {
+    marginRight: 0,
+  },
   visibilityOptionSelected: {
     backgroundColor: BLL,
     borderColor: BL,
   },
-
   visibilityOptionTitle: {
     marginBottom: 4,
-
     fontSize: 12,
     fontWeight: "700",
     color: T1,
   },
-
   visibilityOptionTitleSelected: {
     color: BL,
   },
-
   visibilityOptionDesc: {
     fontSize: 10,
     lineHeight: 15,
     color: T2,
   },
-
   saveRecordButton: {
     minHeight: 52,
-
     alignItems: "center",
     justifyContent: "center",
-
     backgroundColor: PINK,
     borderRadius: 14,
   },
-
   saveRecordButtonText: {
     fontSize: 15,
     fontWeight: "800",
     color: WH,
   },
-
+  recordDetailOverlay: {
+    flex: 1,
+    justifyContent: "flex-end",
+  },
+  recordDetailCard: {
+    maxHeight: "84%",
+    backgroundColor: WH,
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+  },
+  recordDetailContent: {
+    paddingHorizontal: 20,
+    paddingTop: 17,
+    paddingBottom: 36,
+  },
+  recordDetailCaption: {
+    marginBottom: 5,
+    fontSize: 12,
+    fontWeight: "700",
+    color: SUCCESS,
+  },
+  recordDetailDate: {
+    marginBottom: 10,
+    fontSize: 11,
+    color: T2,
+  },
+  recordDetailMetaRow: {
+    flexDirection: "row",
+    marginBottom: 16,
+  },
+  recordDetailEmotion: {
+    marginRight: 7,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    backgroundColor: PINK_LIGHT,
+    borderRadius: 9,
+  },
+  recordDetailEmotionText: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: PINK,
+  },
+  recordDetailVisibility: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    backgroundColor: BLL,
+    borderRadius: 9,
+  },
+  recordDetailVisibilityText: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: BL,
+  },
+  recordDetailPhotoScroll: {
+    marginBottom: 16,
+  },
+  recordDetailPhoto: {
+    width: SCREEN_WIDTH - 40,
+    height: 250,
+    marginRight: 8,
+    backgroundColor: T3,
+    borderRadius: 16,
+  },
+  recordDetailTextBox: {
+    padding: 17,
+    backgroundColor: BG,
+    borderRadius: 15,
+  },
+  recordDetailText: {
+    fontSize: 14,
+    lineHeight: 24,
+    color: T0,
+  },
   buttonDisabled: {
     opacity: 0.55,
   },
-
   pressed: {
     opacity: 0.72,
   },
-
   cardPressed: {
     opacity: 0.82,
   },
