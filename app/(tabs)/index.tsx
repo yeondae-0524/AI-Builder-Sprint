@@ -1,3 +1,4 @@
+import * as ImageManipulator from "expo-image-manipulator";
 import * as ImagePicker from "expo-image-picker";
 import * as Location from "expo-location";
 import { useFocusEffect } from "expo-router";
@@ -130,6 +131,19 @@ type Coordinate = {
   lng: number;
 };
 
+type LngLat = [number, number];
+type DistrictPolygon = LngLat[][];
+
+type PlaceCandidate = {
+  id: string;
+  name: string;
+  latitude: number;
+  longitude: number;
+  address?: string;
+  districtName?: string;
+  category?: CategoryName;
+};
+
 type HomeMission = {
   id: string;
   title: string;
@@ -146,7 +160,10 @@ type HomeMission = {
   placeLat?: number;
   placeLng?: number;
   placeName?: string;
+  placeAddress?: string;
+  districtName?: string;
   isAtHome?: boolean;
+  isLocationFlexible?: boolean;
   isFallback?: boolean;
 };
 
@@ -172,6 +189,14 @@ type ExtendedBackendMission = Partial<BackendMission> & {
   place_lat?: number | string | null;
   place_lng?: number | string | null;
   place_name?: string | null;
+  place_address?: string | null;
+  address?: string | null;
+  address_name?: string | null;
+  road_address?: string | null;
+  road_address_name?: string | null;
+  district?: string | null;
+  gu?: string | null;
+  region_2depth_name?: string | null;
   latitude?: number | string | null;
   longitude?: number | string | null;
   distance_km?: number | string | null;
@@ -264,24 +289,63 @@ const COST_OPTIONS: Array<{
 
 const RADIUS_OPTIONS: RadiusKm[] = [1, 3, 5];
 
+// 부산광역시 공식 15개 자치구 + 기장군만 사용한다.
 const BUSAN_DISTRICTS: BusanDistrict[] = [
-  "강서구",
-  "금정구",
-  "기장군",
-  "남구",
-  "동구",
-  "동래구",
-  "부산진구",
-  "북구",
-  "사상구",
-  "사하구",
-  "서구",
-  "수영구",
-  "연제구",
-  "영도구",
   "중구",
+  "서구",
+  "동구",
+  "영도구",
+  "부산진구",
+  "동래구",
+  "남구",
+  "북구",
   "해운대구",
+  "사하구",
+  "금정구",
+  "강서구",
+  "연제구",
+  "수영구",
+  "사상구",
+  "기장군",
 ];
+
+const BUSAN_DISTRICT_CODES: Record<BusanDistrict, string> = {
+  강서구: "26440",
+  금정구: "26410",
+  기장군: "26710",
+  남구: "26290",
+  동구: "26170",
+  동래구: "26260",
+  부산진구: "26230",
+  북구: "26320",
+  사상구: "26530",
+  사하구: "26380",
+  서구: "26140",
+  수영구: "26500",
+  연제구: "26470",
+  영도구: "26200",
+  중구: "26110",
+  해운대구: "26350",
+};
+
+const BUSAN_DISTRICT_CENTERS: Record<BusanDistrict, Coordinate> = {
+  강서구: { lat: 35.2121, lng: 128.9806 },
+  금정구: { lat: 35.2431, lng: 129.0921 },
+  기장군: { lat: 35.2445, lng: 129.2223 },
+  남구: { lat: 35.1365, lng: 129.0842 },
+  동구: { lat: 35.1293, lng: 129.0454 },
+  동래구: { lat: 35.2048, lng: 129.0838 },
+  부산진구: { lat: 35.1629, lng: 129.0532 },
+  북구: { lat: 35.1972, lng: 128.9904 },
+  사상구: { lat: 35.1526, lng: 128.9911 },
+  사하구: { lat: 35.1045, lng: 128.9748 },
+  서구: { lat: 35.0979, lng: 129.0244 },
+  수영구: { lat: 35.1455, lng: 129.1132 },
+  연제구: { lat: 35.1762, lng: 129.0799 },
+  영도구: { lat: 35.0912, lng: 129.0679 },
+  중구: { lat: 35.1063, lng: 129.0323 },
+  해운대구: { lat: 35.1631, lng: 129.1635 },
+};
 
 const SECTION_LABELS: Array<{
   key: SheetSection;
@@ -369,6 +433,52 @@ function relationArray<T>(
   }
 
   return Array.isArray(value) ? value : [value];
+}
+
+function normalizeStringArray(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value
+      .flatMap((item) => normalizeStringArray(item))
+      .map((item) => item.trim())
+      .filter(Boolean);
+  }
+
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+
+    if (!trimmed) {
+      return [];
+    }
+
+    try {
+      const parsed: unknown = JSON.parse(trimmed);
+      if (parsed !== value) {
+        const parsedItems = normalizeStringArray(parsed);
+        if (parsedItems.length > 0) {
+          return parsedItems;
+        }
+      }
+    } catch {
+      // JSON 문자열이 아니면 구분자로 나눈다.
+    }
+
+    return trimmed
+      .split(/[,|/\n]/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+  }
+
+  if (
+    typeof value === "object" &&
+    value !== null &&
+    "name" in value
+  ) {
+    return normalizeStringArray(
+      (value as { name?: unknown }).name,
+    );
+  }
+
+  return [];
 }
 
 function isFiniteNumber(value: unknown): value is number {
@@ -480,7 +590,7 @@ function inferCategoryFromText(text: string): CategoryName {
   }
 
   if (
-    /(산책|걷기|걸어|공원|골목길|해변|강변|둘레길|동네 한 바퀴)/.test(
+    /(산책|걷기|걸어|공원|골목길|해변|강변|둘레길|동네 한 바퀴|여행|탐방|자연|등산)/.test(
       normalized,
     )
   ) {
@@ -496,7 +606,7 @@ function inferCategoryFromText(text: string): CategoryName {
   }
 
   if (
-    /(음악|영화|공연|전시|버스킹|미술관|박물관|감상|사진전|연극)/.test(
+    /(음악|영화|공연|전시|버스킹|미술관|박물관|감상|사진전|사진|그림|연극)/.test(
       normalized,
     )
   ) {
@@ -527,36 +637,40 @@ function normalizeCategory(
   textForInference: string,
 ): CategoryName {
   const category = rawCategory?.trim() ?? "";
+  const normalized = category.toLowerCase();
+  const inferred = inferCategoryFromText(textForInference);
+
+  let explicit: CategoryName | null = null;
 
   if (CATEGORIES.includes(category as CategoryName)) {
-    return category as CategoryName;
+    explicit = category as CategoryName;
+  } else if (/(카페|디저트|베이커리|빵)/.test(normalized)) {
+    explicit = "카페 및 디저트";
+  } else if (/(음식|식사|맛집|food)/.test(normalized)) {
+    explicit = "음식";
+  } else if (/(산책|걷기|여행|탐방|walk)/.test(normalized)) {
+    explicit = "산책";
+  } else if (/(배움|독서|학습|learn|study)/.test(normalized)) {
+    explicit = "배움";
+  } else if (/(감상|음악|영화|공연|전시|사진|culture)/.test(normalized)) {
+    explicit = "감상";
+  } else if (/(활동|운동|체험|activity|sport)/.test(normalized)) {
+    explicit = "활동";
+  } else if (/(휴식|명상|힐링|relax|rest)/.test(normalized)) {
+    explicit = "휴식";
   }
 
-  const normalized = category.toLowerCase();
-
-  if (/(카페|디저트|베이커리|빵)/.test(normalized)) {
-    return "카페 및 디저트";
-  }
-  if (/(음식|식사|맛집|food)/.test(normalized)) {
-    return "음식";
-  }
-  if (/(산책|걷기|walk)/.test(normalized)) {
-    return "산책";
-  }
-  if (/(배움|독서|학습|learn|study)/.test(normalized)) {
-    return "배움";
-  }
-  if (/(감상|음악|영화|공연|전시|culture)/.test(normalized)) {
-    return "감상";
-  }
-  if (/(활동|운동|체험|activity|sport)/.test(normalized)) {
-    return "활동";
-  }
-  if (/(휴식|명상|relax|rest)/.test(normalized)) {
-    return "휴식";
+  // 백엔드 분류가 한 카테고리로 몰려 있어도 제목과 안내가
+  // 다른 활동을 명확히 가리키면 실제 내용에 맞는 분류를 사용한다.
+  if (
+    inferred !== "기타" &&
+    explicit !== null &&
+    inferred !== explicit
+  ) {
+    return inferred;
   }
 
-  return inferCategoryFromText(textForInference);
+  return explicit ?? inferred;
 }
 
 function normalizeCostStatus(
@@ -678,16 +792,34 @@ function haversineDistanceKm(
   return earthRadiusKm * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
+
+function containsHangul(value: string | null | undefined) {
+  return /[가-힣]/.test(value ?? "");
+}
+
+function isKoreanMissionText(value: string | null | undefined) {
+  const text = String(value ?? "").trim();
+
+  if (!text) {
+    return false;
+  }
+
+  const hangulCount = (text.match(/[가-힣]/g) ?? []).length;
+  const latinCount = (text.match(/[A-Za-z]/g) ?? []).length;
+
+  return hangulCount > 0 && hangulCount >= latinCount;
+}
+
 function inferAtHomeMission(
   mission: ExtendedBackendMission,
   inferenceText: string,
   placeName: string | null | undefined,
 ) {
+  // requires_place=false는 "특정 장소가 필수는 아님"이라는 뜻일 뿐,
+  // 곧바로 집에서 하는 미션이라는 뜻은 아니므로 집 판정에서 제외한다.
   if (
     mission.at_home === true ||
-    mission.is_home === true ||
-    mission.requires_place === false ||
-    mission.requiresPlace === false
+    mission.is_home === true
   ) {
     return true;
   }
@@ -701,7 +833,9 @@ function inferAtHomeMission(
   if (
     locationType === "home" ||
     locationType === "at_home" ||
-    locationType.includes("집")
+    locationType === "indoor_home" ||
+    locationType.includes("자택") ||
+    locationType.includes("집에서")
   ) {
     return true;
   }
@@ -710,9 +844,734 @@ function inferAtHomeMission(
     .replace(/\s+/g, " ")
     .toLowerCase();
 
-  return /(내 집|집에서|집 안|방에서|자택|홈트|침대에서|주방에서)/.test(
+  return /(내 방|내 집|집에서|집 안에서|방에서|자택에서|홈트|침대에서|주방에서)/.test(
     normalized,
   );
+}
+
+function isGenericPlaceName(value: string | null | undefined) {
+  const normalized = String(value ?? "")
+    .replace(/\s+/g, "")
+    .toLowerCase();
+
+  return (
+    !normalized ||
+    normalized.includes("자유장소") ||
+    normalized.includes("어디서나") ||
+    normalized.includes("편한장소") ||
+    normalized.includes("현재위치주변") ||
+    normalized.includes("지역내")
+  );
+}
+
+function hasActualPlace(mission: HomeMission) {
+  if (mission.isAtHome) {
+    return mission.placeName === "내 방";
+  }
+
+  return (
+    Boolean(mission.placeName) &&
+    !isGenericPlaceName(mission.placeName) &&
+    isFiniteNumber(mission.placeLat) &&
+    isFiniteNumber(mission.placeLng)
+  );
+}
+
+function isUsableRecommendation(mission: HomeMission) {
+  // 시작할 수 없는 임시 AI 미션과 영어 제목은 추천 목록에서 제외한다.
+  return (
+    isUuid(mission.id) &&
+    containsHangul(mission.title) &&
+    mission.title.trim().length > 0
+  );
+}
+
+function balanceHomeMissions(
+  missions: HomeMission[],
+  limit = 10,
+  maxHomeCount = 2,
+) {
+  const outsideMissions = missions.filter(
+    (mission) => !mission.isAtHome,
+  );
+  const homeMissions = missions
+    .filter((mission) => mission.isAtHome)
+    .slice(0, maxHomeCount);
+
+  const balanced: HomeMission[] = [];
+  let outsideIndex = 0;
+  let homeIndex = 0;
+
+  while (balanced.length < limit) {
+    for (
+      let count = 0;
+      count < 3 && outsideIndex < outsideMissions.length;
+      count += 1
+    ) {
+      balanced.push(outsideMissions[outsideIndex]);
+      outsideIndex += 1;
+
+      if (balanced.length >= limit) {
+        break;
+      }
+    }
+
+    if (
+      balanced.length < limit &&
+      homeIndex < homeMissions.length
+    ) {
+      balanced.push(homeMissions[homeIndex]);
+      homeIndex += 1;
+    }
+
+    if (
+      outsideIndex >= outsideMissions.length &&
+      homeIndex >= homeMissions.length
+    ) {
+      break;
+    }
+  }
+
+  return balanced.slice(0, limit);
+}
+
+function normalizeComparableText(value: string | null | undefined) {
+  return String(value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "")
+    .replace(/[()\[\]{}.,·'"“”‘’_-]/g, "");
+}
+
+function getMissionRefreshKey(mission: HomeMission) {
+  if (isUuid(mission.id)) {
+    return `id:${mission.id}`;
+  }
+
+  return `title:${normalizeComparableText(mission.title)}`;
+}
+
+function getMissionPlaceKey(mission: HomeMission) {
+  if (mission.isAtHome || mission.isLocationFlexible) {
+    return "";
+  }
+
+  if (isUuid(mission.placeId)) {
+    return `place-id:${mission.placeId}`;
+  }
+
+  const placeName = normalizeComparableText(mission.placeName);
+  if (placeName && placeName !== "거리정보없음") {
+    return `place-name:${placeName}`;
+  }
+
+  if (
+    isFiniteNumber(mission.placeLat) &&
+    isFiniteNumber(mission.placeLng)
+  ) {
+    return `coord:${mission.placeLat.toFixed(4)},${mission.placeLng.toFixed(4)}`;
+  }
+
+  return "";
+}
+
+function diversifyMissionsByPlace(missions: HomeMission[]) {
+  const seenPlaces = new Set<string>();
+
+  return missions.filter((mission) => {
+    const placeKey = getMissionPlaceKey(mission);
+
+    if (!placeKey) {
+      return true;
+    }
+
+    if (seenPlaces.has(placeKey)) {
+      return false;
+    }
+
+    seenPlaces.add(placeKey);
+    return true;
+  });
+}
+
+function prioritizeFreshRecommendations({
+  candidates,
+  previous,
+  interests,
+  useInterestRanking,
+}: {
+  candidates: HomeMission[];
+  previous: HomeMission[];
+  interests: CategoryName[];
+  useInterestRanking: boolean;
+}) {
+  const previousMissionKeys = new Set(
+    previous.map(getMissionRefreshKey),
+  );
+  const previousPlaceKeys = new Set(
+    previous.map(getMissionPlaceKey).filter(Boolean),
+  );
+
+  const randomized = diversifyMissionsByPlace(
+    shuffle(candidates),
+  );
+
+  const fresh = randomized.filter((mission) => {
+    const missionKey = getMissionRefreshKey(mission);
+    const placeKey = getMissionPlaceKey(mission);
+
+    return (
+      !previousMissionKeys.has(missionKey) &&
+      (!placeKey || !previousPlaceKeys.has(placeKey))
+    );
+  });
+
+  const repeated = randomized.filter((mission) => {
+    const missionKey = getMissionRefreshKey(mission);
+    const placeKey = getMissionPlaceKey(mission);
+
+    return (
+      previousMissionKeys.has(missionKey) ||
+      Boolean(placeKey && previousPlaceKeys.has(placeKey))
+    );
+  });
+
+  const rank = (items: HomeMission[]) =>
+    useInterestRanking
+      ? rankMissionsByInterests(items, interests)
+      : items;
+
+  return [...rank(fresh), ...rank(repeated)];
+}
+
+function pointInRing(point: Coordinate, ring: LngLat[]) {
+  let inside = false;
+
+  for (
+    let currentIndex = 0, previousIndex = ring.length - 1;
+    currentIndex < ring.length;
+    previousIndex = currentIndex, currentIndex += 1
+  ) {
+    const [currentLng, currentLat] = ring[currentIndex];
+    const [previousLng, previousLat] = ring[previousIndex];
+
+    const intersects =
+      currentLat > point.lat !== previousLat > point.lat &&
+      point.lng <
+        ((previousLng - currentLng) *
+          (point.lat - currentLat)) /
+          (previousLat - currentLat || Number.EPSILON) +
+          currentLng;
+
+    if (intersects) {
+      inside = !inside;
+    }
+  }
+
+  return inside;
+}
+
+function pointInDistrict(
+  point: Coordinate,
+  polygons: DistrictPolygon[],
+) {
+  return polygons.some((polygon) => {
+    const [outerRing, ...holes] = polygon;
+
+    if (!outerRing || !pointInRing(point, outerRing)) {
+      return false;
+    }
+
+    return !holes.some((hole) => pointInRing(point, hole));
+  });
+}
+
+function decodeTopologyArc(topology: any, arcIndex: number) {
+  const shouldReverse = arcIndex < 0;
+  const resolvedIndex = shouldReverse ? ~arcIndex : arcIndex;
+  const rawArc = topology.arcs?.[resolvedIndex] ?? [];
+  const transform = topology.transform;
+  let x = 0;
+  let y = 0;
+
+  const points: LngLat[] = rawArc.map(
+    (coordinate: [number, number]) => {
+      if (transform?.scale && transform?.translate) {
+        x += coordinate[0];
+        y += coordinate[1];
+
+        return [
+          x * transform.scale[0] + transform.translate[0],
+          y * transform.scale[1] + transform.translate[1],
+        ];
+      }
+
+      return [coordinate[0], coordinate[1]];
+    },
+  );
+
+  return shouldReverse ? points.reverse() : points;
+}
+
+function joinTopologyArcs(topology: any, indexes: number[]) {
+  const joined: LngLat[] = [];
+
+  indexes.forEach((arcIndex, index) => {
+    const arc = decodeTopologyArc(topology, arcIndex);
+    joined.push(...(index === 0 ? arc : arc.slice(1)));
+  });
+
+  return joined;
+}
+
+let districtTopologyPromise: Promise<any> | null = null;
+const districtPolygonCache = new Map<
+  BusanDistrict,
+  DistrictPolygon[]
+>();
+
+async function loadDistrictPolygons(
+  district: BusanDistrict,
+): Promise<DistrictPolygon[]> {
+  const cached = districtPolygonCache.get(district);
+  if (cached) {
+    return cached;
+  }
+
+  if (!districtTopologyPromise) {
+    districtTopologyPromise = fetch(DISTRICT_TOPOJSON_URL).then(
+      async (response) => {
+        if (!response.ok) {
+          throw new Error("행정구역 경계 데이터를 불러오지 못했습니다.");
+        }
+
+        return response.json();
+      },
+    );
+  }
+
+  const topology = await districtTopologyPromise;
+  const topologyObject = Object.values(
+    topology.objects ?? {},
+  )[0] as any;
+  const geometries =
+    topologyObject?.type === "GeometryCollection"
+      ? topologyObject.geometries ?? []
+      : [topologyObject].filter(Boolean);
+
+  const targetCode = BUSAN_DISTRICT_CODES[district];
+
+  const geometry = geometries.find((item: any) => {
+    const properties = item?.properties ?? {};
+    const name = String(
+      properties.name ??
+        properties.NAME ??
+        properties.name_kr ??
+        "",
+    );
+    const codeCandidates = [
+      properties.code,
+      properties.CODE,
+      properties.adm_cd,
+      properties.sig_cd,
+      properties.SIG_CD,
+      item?.id,
+    ]
+      .map((value) => String(value ?? ""))
+      .filter(Boolean);
+
+    return (
+      codeCandidates.some((code) =>
+        code.startsWith(targetCode),
+      ) ||
+      (name === district &&
+        codeCandidates.some((code) => code.startsWith("26")))
+    );
+  });
+
+  if (!geometry?.arcs) {
+    return [];
+  }
+
+  const polygons: DistrictPolygon[] =
+    geometry.type === "MultiPolygon"
+      ? geometry.arcs.map((polygon: number[][]) =>
+          polygon.map((ring) =>
+            joinTopologyArcs(topology, ring),
+          ),
+        )
+      : [
+          geometry.arcs.map((ring: number[]) =>
+            joinTopologyArcs(topology, ring),
+          ),
+        ];
+
+  districtPolygonCache.set(district, polygons);
+  return polygons;
+}
+
+function getDistrictCenter(polygons: DistrictPolygon[]) {
+  const points = polygons.flatMap((polygon) =>
+    polygon.flatMap((ring) => ring),
+  );
+
+  if (points.length === 0) {
+    return null;
+  }
+
+  let minLng = Infinity;
+  let maxLng = -Infinity;
+  let minLat = Infinity;
+  let maxLat = -Infinity;
+
+  for (const [lng, lat] of points) {
+    minLng = Math.min(minLng, lng);
+    maxLng = Math.max(maxLng, lng);
+    minLat = Math.min(minLat, lat);
+    maxLat = Math.max(maxLat, lat);
+  }
+
+  return {
+    lat: (minLat + maxLat) / 2,
+    lng: (minLng + maxLng) / 2,
+  };
+}
+
+function inferPlaceCategory(place: any): CategoryName {
+  const name = String(place?.name ?? "");
+  const address = String(
+    place?.road_address_name ??
+      place?.address ??
+      place?.address_name ??
+      "",
+  );
+  const rawCategory = String(
+    place?.category ??
+      place?.category_name ??
+      place?.type ??
+      "",
+  );
+
+  return normalizeCategory(rawCategory, `${name} ${address}`);
+}
+
+async function fetchPlaceCandidates({
+  center,
+  radiusKm,
+  district,
+  districtPolygons,
+}: {
+  center: Coordinate | null;
+  radiusKm: number;
+  district: BusanDistrict | null;
+  districtPolygons: DistrictPolygon[];
+}): Promise<PlaceCandidate[]> {
+  let rows: any[] = [];
+
+  const extendedResult = await supabase
+    .from("places")
+    .select(
+      "id, name, latitude, longitude, address, address_name, road_address_name, category, category_name, district, gu",
+    )
+    .limit(500);
+
+  if (!extendedResult.error) {
+    rows = extendedResult.data ?? [];
+  } else {
+    const basicResult = await supabase
+      .from("places")
+      .select("id, name, latitude, longitude")
+      .limit(500);
+
+    if (basicResult.error) {
+      console.warn("실제 장소 목록 조회 실패:", basicResult.error);
+      return [];
+    }
+
+    rows = basicResult.data ?? [];
+  }
+
+  const districtCenter = district
+    ? BUSAN_DISTRICT_CENTERS[district]
+    : null;
+  const districtFallbackRadius =
+    district === "기장군" || district === "강서구"
+      ? 18
+      : district
+        ? 9
+        : 0;
+
+  return shuffle(
+    rows
+      .map((place): PlaceCandidate | null => {
+        const latitude =
+          toFiniteNumber(place.latitude) ??
+          toFiniteNumber(place.lat);
+        const longitude =
+          toFiniteNumber(place.longitude) ??
+          toFiniteNumber(place.lng);
+        const name = String(place.name ?? "").trim();
+
+        if (
+          !name ||
+          isGenericPlaceName(name) ||
+          latitude === null ||
+          longitude === null
+        ) {
+          return null;
+        }
+
+        const address = String(
+          place.road_address_name ??
+            place.address_name ??
+            place.address ??
+            "",
+        ).trim();
+        const districtName = String(
+          place.district ?? place.gu ?? "",
+        ).trim();
+
+        return {
+          id: String(place.id),
+          name,
+          latitude,
+          longitude,
+          address: address || undefined,
+          districtName:
+            district
+              ? `부산광역시 ${district}`
+              : districtName || undefined,
+          category: inferPlaceCategory(place),
+        };
+      })
+      .filter((place): place is PlaceCandidate => place !== null)
+      .filter((place) => {
+        if (district) {
+          const districtText = normalizeComparableText(
+            `${place.districtName ?? ""} ${place.address ?? ""}`,
+          );
+
+          if (
+            districtText.includes(
+              normalizeComparableText(district),
+            )
+          ) {
+            return true;
+          }
+
+          if (districtPolygons.length > 0) {
+            return pointInDistrict(
+              {
+                lat: place.latitude,
+                lng: place.longitude,
+              },
+              districtPolygons,
+            );
+          }
+
+          return districtCenter
+            ? haversineDistanceKm(districtCenter, {
+                lat: place.latitude,
+                lng: place.longitude,
+              }) <= districtFallbackRadius
+            : false;
+        }
+
+        if (center) {
+          return (
+            haversineDistanceKm(center, {
+              lat: place.latitude,
+              lng: place.longitude,
+            }) <= radiusKm
+          );
+        }
+
+        return true;
+      }),
+  );
+}
+
+async function hydrateMissionPlaces(
+  missions: HomeMission[],
+  center: Coordinate | null,
+) {
+  const placeIds = Array.from(
+    new Set(
+      missions
+        .map((mission) =>
+          isUuid(mission.placeId) ? mission.placeId! : "",
+        )
+        .filter(Boolean),
+    ),
+  );
+
+  if (placeIds.length === 0) {
+    return missions;
+  }
+
+  let data: any[] = [];
+  const extendedResult = await supabase
+    .from("places")
+    .select(
+      "id, name, latitude, longitude, address, address_name, road_address_name, district, gu",
+    )
+    .in("id", placeIds);
+
+  if (!extendedResult.error) {
+    data = extendedResult.data ?? [];
+  } else {
+    const basicResult = await supabase
+      .from("places")
+      .select("id, name, latitude, longitude")
+      .in("id", placeIds);
+
+    if (basicResult.error) {
+      console.warn("추천 장소 좌표 보완 실패:", basicResult.error);
+      return missions;
+    }
+
+    data = basicResult.data ?? [];
+  }
+
+  const placeMap = new Map(
+    data.map((place) => [String(place.id), place]),
+  );
+
+  return missions.map((mission) => {
+    if (!mission.placeId || mission.isAtHome) {
+      return mission;
+    }
+
+    const place = placeMap.get(mission.placeId);
+    if (!place) {
+      return mission;
+    }
+
+    const placeLat =
+      mission.placeLat ??
+      toFiniteNumber(place.latitude) ??
+      undefined;
+    const placeLng =
+      mission.placeLng ??
+      toFiniteNumber(place.longitude) ??
+      undefined;
+    const placeName =
+      mission.placeName ?? place.name ?? undefined;
+    const placeAddress =
+      mission.placeAddress ??
+      (String(
+        place.road_address_name ??
+          place.address_name ??
+          place.address ??
+          "",
+      ).trim() || undefined);
+    const districtName =
+      mission.districtName ??
+      (String(place.district ?? place.gu ?? "").trim() ||
+        undefined);
+    const dist =
+      center &&
+      isFiniteNumber(placeLat) &&
+      isFiniteNumber(placeLng)
+        ? `${haversineDistanceKm(center, {
+            lat: placeLat,
+            lng: placeLng,
+          }).toFixed(1)}km`
+        : mission.dist;
+
+    return {
+      ...mission,
+      placeLat,
+      placeLng,
+      placeName,
+      placeAddress,
+      districtName,
+      dist,
+      isLocationFlexible: false,
+    };
+  });
+}
+
+function assignActualPlaces(
+  missions: HomeMission[],
+  places: PlaceCandidate[],
+  center: Coordinate | null,
+) {
+  const usedPlaceIds = new Set<string>();
+
+  return missions
+    .map((mission): HomeMission | null => {
+      if (mission.isAtHome) {
+        return {
+          ...mission,
+          placeName: "내 방",
+          dist: "내 방",
+          placeId: undefined,
+          placeLat: undefined,
+          placeLng: undefined,
+          placeAddress: undefined,
+          districtName: undefined,
+          isLocationFlexible: false,
+        };
+      }
+
+      if (hasActualPlace(mission)) {
+        if (mission.placeId) {
+          usedPlaceIds.add(mission.placeId);
+        }
+        return {
+          ...mission,
+          isLocationFlexible: false,
+        };
+      }
+
+      const exactCategory = places.find(
+        (place) =>
+          !usedPlaceIds.has(place.id) &&
+          place.category === mission.cat,
+      );
+      const compatibleCategory = places.find(
+        (place) =>
+          !usedPlaceIds.has(place.id) &&
+          (mission.cat === "휴식"
+            ? place.category === "카페 및 디저트" ||
+              place.category === "산책"
+            : mission.cat === "감상"
+              ? place.category === "기타" ||
+                place.category === "배움"
+              : false),
+      );
+      const fallbackPlace = places.find(
+        (place) => !usedPlaceIds.has(place.id),
+      );
+      const place =
+        exactCategory ?? compatibleCategory ?? fallbackPlace;
+
+      if (!place) {
+        return null;
+      }
+
+      usedPlaceIds.add(place.id);
+      const dist = center
+        ? `${haversineDistanceKm(center, {
+            lat: place.latitude,
+            lng: place.longitude,
+          }).toFixed(1)}km`
+        : "장소 선택";
+
+      return {
+        ...mission,
+        placeId: place.id,
+        placeName: place.name,
+        placeLat: place.latitude,
+        placeLng: place.longitude,
+        placeAddress: place.address,
+        districtName: place.districtName,
+        dist,
+        isLocationFlexible: false,
+      };
+    })
+    .filter((mission): mission is HomeMission => mission !== null);
 }
 
 function isGenericRecommendationReason(value: string) {
@@ -815,26 +1674,40 @@ function mapBackendMission(
       "새로운 작은 경험",
   );
 
-  const desc = String(
+  const rawDesc = String(
     backendMission.short_description ??
       backendMission.description ??
       backendMission.desc ??
       "",
   ).trim();
 
-  const instructions = String(
+  const desc = isKoreanMissionText(rawDesc)
+    ? rawDesc
+    : "";
+
+  const rawInstructions = String(
     backendMission.instructions ??
       backendMission.detailed_description ??
       backendMission.mission_guide ??
-      desc ??
-      "미션 안내에 따라 경험을 진행해보세요.",
+      rawDesc ??
+      "",
   ).trim();
 
-  const rawRecommendationReason = String(
+  const instructions = isKoreanMissionText(rawInstructions)
+    ? rawInstructions
+    : desc || "미션 안내에 따라 경험을 진행해보세요.";
+
+  const rawRecommendationReasonCandidate = String(
     backendMission.recommendation_reason ??
       backendMission.reason ??
       "",
   ).trim();
+
+  const rawRecommendationReason = isKoreanMissionText(
+    rawRecommendationReasonCandidate,
+  )
+    ? rawRecommendationReasonCandidate
+    : "";
 
   const inferenceText = [
     title,
@@ -864,11 +1737,42 @@ function mapBackendMission(
     backendMission.place_name ??
     undefined;
 
+  const placeAddress =
+    String(
+      backendMission.place_address ??
+        backendMission.road_address_name ??
+        backendMission.road_address ??
+        backendMission.address_name ??
+        backendMission.address ??
+        "",
+    ).trim() || undefined;
+
+  const districtName =
+    String(
+      backendMission.district ??
+        backendMission.gu ??
+        backendMission.region_2depth_name ??
+        "",
+    ).trim() || undefined;
+
   const isAtHome = inferAtHomeMission(
     backendMission,
     inferenceText,
     rawPlaceName,
   );
+
+  const explicitRequiresPlace =
+    backendMission.requires_place ??
+    backendMission.requiresPlace;
+
+  const isLocationFlexible =
+    !isAtHome &&
+    (explicitRequiresPlace === false ||
+      (explicitRequiresPlace == null &&
+        !rawPlaceName &&
+        !backendMission.place_id &&
+        backendMission.place_lat == null &&
+        backendMission.latitude == null));
 
   const placeLat =
     toFiniteNumber(placeOverride?.latitude) ??
@@ -908,7 +1812,7 @@ function mapBackendMission(
   );
 
   const placeName = isAtHome
-    ? "내 집"
+    ? "내 방"
     : rawPlaceName;
 
   const recommendationReason =
@@ -939,7 +1843,7 @@ function mapBackendMission(
     durationMinutes,
     time,
     dist: isAtHome
-      ? "내 집"
+      ? "내 방"
       : distance !== null
         ? `${distance.toFixed(1)}km`
         : "거리 정보 없음",
@@ -957,7 +1861,10 @@ function mapBackendMission(
     placeLng:
       isAtHome ? undefined : placeLng ?? undefined,
     placeName,
+    placeAddress,
+    districtName,
     isAtHome,
+    isLocationFlexible,
     isFallback: !isUuid(id),
   };
 }
@@ -968,6 +1875,7 @@ function missionMatchesFilters(
   center: Coordinate | null,
   radiusKm: RadiusKm,
   district: BusanDistrict | null,
+  districtPolygons: DistrictPolygon[] | null = null,
 ) {
   if (
     filters.categories.length > 0 &&
@@ -1016,16 +1924,13 @@ function missionMatchesFilters(
   }
 
   if (center && !mission.isAtHome) {
-    if (
-      !isFiniteNumber(mission.placeLat) ||
-      !isFiniteNumber(mission.placeLng)
-    ) {
+    if (!hasActualPlace(mission)) {
       return false;
     }
 
     const distance = haversineDistanceKm(center, {
-      lat: mission.placeLat,
-      lng: mission.placeLng,
+      lat: mission.placeLat!,
+      lng: mission.placeLng!,
     });
 
     if (distance > radiusKm) {
@@ -1033,15 +1938,31 @@ function missionMatchesFilters(
     }
   }
 
-  if (district && !mission.isAtHome) {
-    if (!mission.placeName) {
+  if (district) {
+    if (mission.isAtHome || !hasActualPlace(mission)) {
       return false;
     }
 
-    const normalizedPlace = mission.placeName.replace(/\s/g, "");
-    if (!normalizedPlace.includes(district.replace(/\s/g, ""))) {
-      return false;
+    const districtKey = normalizeComparableText(district);
+    const locationText = normalizeComparableText(
+      `${mission.districtName ?? ""} ${mission.placeAddress ?? ""} ${mission.placeName ?? ""}`,
+    );
+
+    if (locationText.includes(districtKey)) {
+      return true;
     }
+
+    if (
+      districtPolygons &&
+      districtPolygons.length > 0
+    ) {
+      return pointInDistrict(
+        { lat: mission.placeLat!, lng: mission.placeLng! },
+        districtPolygons,
+      );
+    }
+
+    return false;
   }
 
   return true;
@@ -1126,6 +2047,176 @@ function rankMissionsByInterests(
   return result;
 }
 
+function applyLocationPresentation(
+  mission: HomeMission,
+  _locationMode: LocationMode,
+  _district: BusanDistrict | null,
+) {
+  if (mission.isAtHome) {
+    return {
+      ...mission,
+      placeName: "내 방",
+      dist: "내 방",
+      placeId: undefined,
+      placeLat: undefined,
+      placeLng: undefined,
+      placeAddress: undefined,
+      districtName: undefined,
+      isLocationFlexible: false,
+    };
+  }
+
+  return mission;
+}
+
+function selectDiverseRecommendations({
+  candidates,
+  interests,
+  locationMode,
+  district,
+  limit = 10,
+}: {
+  candidates: HomeMission[];
+  interests: CategoryName[];
+  locationMode: LocationMode;
+  district: BusanDistrict | null;
+  limit?: number;
+}) {
+  const maxHomeCount = locationMode === "district" ? 0 : 2;
+  const prepared = candidates.map((mission) =>
+    applyLocationPresentation(
+      mission,
+      locationMode,
+      district,
+    ),
+  );
+
+  const groups = new Map<CategoryName, HomeMission[]>();
+  for (const category of CATEGORIES) {
+    groups.set(category, []);
+  }
+  for (const mission of prepared) {
+    groups.get(mission.cat)?.push(mission);
+  }
+
+  const preferredCategories = CATEGORIES.filter((category) =>
+    interests.includes(category),
+  );
+  const otherCategories = CATEGORIES.filter(
+    (category) => !interests.includes(category),
+  );
+  const categoryOrder = [
+    ...preferredCategories,
+    ...otherCategories,
+  ];
+
+  const selected: HomeMission[] = [];
+  const selectedKeys = new Set<string>();
+  const selectedPlaces = new Set<string>();
+  const categoryCounts = new Map<CategoryName, number>();
+  let homeCount = 0;
+
+  const tryAdd = (
+    mission: HomeMission | undefined,
+    maxPerCategory: number,
+  ) => {
+    if (!mission || selected.length >= limit) {
+      return false;
+    }
+
+    const missionKey = getMissionRefreshKey(mission);
+    const placeKey = getMissionPlaceKey(mission);
+    const currentCategoryCount =
+      categoryCounts.get(mission.cat) ?? 0;
+
+    if (
+      selectedKeys.has(missionKey) ||
+      (placeKey && selectedPlaces.has(placeKey)) ||
+      currentCategoryCount >= maxPerCategory ||
+      (mission.isAtHome && homeCount >= maxHomeCount)
+    ) {
+      return false;
+    }
+
+    selected.push(mission);
+    selectedKeys.add(missionKey);
+    if (placeKey) {
+      selectedPlaces.add(placeKey);
+    }
+    categoryCounts.set(
+      mission.cat,
+      currentCategoryCount + 1,
+    );
+    if (mission.isAtHome) {
+      homeCount += 1;
+    }
+    return true;
+  };
+
+  const takeFromCategory = (
+    category: CategoryName,
+    maxPerCategory: number,
+  ) => {
+    const group = groups.get(category) ?? [];
+    while (group.length > 0) {
+      const mission = group.shift();
+      if (tryAdd(mission, maxPerCategory)) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  // 첫 바퀴에서는 관심 카테고리를 먼저 넣되 다른 카테고리도
+  // 최소한 한 번씩 섞어 초기 추천이 한 종류로 몰리지 않게 한다.
+  const firstRound: CategoryName[] = [];
+  const maxRoundLength = Math.max(
+    preferredCategories.length,
+    otherCategories.length,
+  );
+  for (let index = 0; index < maxRoundLength; index += 1) {
+    if (preferredCategories[index]) {
+      firstRound.push(preferredCategories[index]);
+    }
+    if (otherCategories[index]) {
+      firstRound.push(otherCategories[index]);
+    }
+  }
+
+  for (const category of firstRound) {
+    takeFromCategory(category, 2);
+    if (selected.length >= Math.min(limit, 6)) {
+      break;
+    }
+  }
+
+  // 관심사 2 : 그 외 1 비율로 채운다.
+  const weightedOrder = [
+    ...preferredCategories,
+    ...preferredCategories,
+    ...otherCategories,
+  ];
+  const fillOrder =
+    weightedOrder.length > 0 ? weightedOrder : categoryOrder;
+
+  for (const maxPerCategory of [2, 3, Number.POSITIVE_INFINITY]) {
+    let madeProgress = true;
+    while (selected.length < limit && madeProgress) {
+      madeProgress = false;
+      for (const category of fillOrder) {
+        if (takeFromCategory(category, maxPerCategory)) {
+          madeProgress = true;
+        }
+        if (selected.length >= limit) {
+          break;
+        }
+      }
+    }
+  }
+
+  return selected.slice(0, limit);
+}
+
 function getPreparationText(mission: HomeMission) {
   return mission.requiredItems.length > 0
     ? mission.requiredItems.join(", ")
@@ -1208,6 +2299,44 @@ function getPhotoContentType(
   return extension === "jpg"
     ? "image/jpeg"
     : `image/${extension}`;
+}
+
+async function prepareRecordPhotoForUpload(
+  photo: ImagePicker.ImagePickerAsset,
+) {
+  const originalExtension = getPhotoExtension(photo);
+  const originalContentType = getPhotoContentType(
+    photo,
+    originalExtension,
+  ).toLowerCase();
+  const shouldConvertToJpeg =
+    originalExtension === "heic" ||
+    originalExtension === "heif" ||
+    originalContentType === "image/heic" ||
+    originalContentType === "image/heif";
+
+  if (!shouldConvertToJpeg) {
+    return {
+      uri: photo.uri,
+      extension: originalExtension,
+      contentType: originalContentType,
+    };
+  }
+
+  const converted = await ImageManipulator.manipulateAsync(
+    photo.uri,
+    [],
+    {
+      compress: 0.88,
+      format: ImageManipulator.SaveFormat.JPEG,
+    },
+  );
+
+  return {
+    uri: converted.uri,
+    extension: "jpg",
+    contentType: "image/jpeg",
+  };
 }
 
 function getConditionSummary(
@@ -1430,209 +2559,9 @@ function LocationPickerMap({
   );
 }
 
-function DistrictBoundaryMap({
-  district,
-}: {
-  district: BusanDistrict;
-}) {
-  const html = useMemo(
-    () => `
-<!doctype html>
-<html lang="ko">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
-  <style>
-    html, body, #map { width: 100%; height: 100%; margin: 0; padding: 0; }
-    #loading {
-      position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
-      padding: 20px; text-align: center;
-      background: #f7f8fa; color: #5c5f6a; font-family: sans-serif; font-size: 13px; z-index: 10;
-    }
-  </style>
-</head>
-<body>
-  <div id="loading">선택한 구의 경계를 불러오는 중이에요</div>
-  <div id="map"></div>
-
-  <script src="https://dapi.kakao.com/v2/maps/sdk.js?appkey=${KAKAO_JS_KEY}&autoload=false"></script>
-  <script src="https://cdn.jsdelivr.net/npm/topojson-client@3/dist/topojson-client.min.js"></script>
-
-  <script>
-    const selectedDistrict = ${JSON.stringify(district)};
-    const topoUrl = ${JSON.stringify(DISTRICT_TOPOJSON_URL)};
-
-    const flattenPairs = (value, result = []) => {
-      if (
-        Array.isArray(value) &&
-        value.length >= 2 &&
-        typeof value[0] === 'number' &&
-        typeof value[1] === 'number'
-      ) {
-        result.push(value);
-        return result;
-      }
-
-      if (Array.isArray(value)) {
-        value.forEach((child) =>
-          flattenPairs(child, result)
-        );
-      }
-
-      return result;
-    };
-
-    const isBusanFeature = (feature) => {
-      const properties = feature.properties || {};
-      const name = String(
-        properties.name ||
-        properties.NAME ||
-        properties.name_kr ||
-        feature.id ||
-        ''
-      );
-      const code = String(
-        properties.code ||
-        properties.CODE ||
-        properties.adm_cd ||
-        ''
-      );
-
-      if (name !== selectedDistrict) {
-        return false;
-      }
-
-      if (code.startsWith('26')) {
-        return true;
-      }
-
-      const pairs = flattenPairs(
-        feature.geometry &&
-        feature.geometry.coordinates
-      );
-
-      if (pairs.length === 0) {
-        return false;
-      }
-
-      const averageLng =
-        pairs.reduce((sum, pair) => sum + pair[0], 0) /
-        pairs.length;
-      const averageLat =
-        pairs.reduce((sum, pair) => sum + pair[1], 0) /
-        pairs.length;
-
-      return (
-        averageLng >= 128.65 &&
-        averageLng <= 129.45 &&
-        averageLat >= 34.85 &&
-        averageLat <= 35.45
-      );
-    };
-
-    const toPath = (ring) =>
-      ring.map(
-        ([lng, lat]) => new kakao.maps.LatLng(lat, lng)
-      );
-
-    kakao.maps.load(async function () {
-      const loading = document.getElementById('loading');
-
-      try {
-        const map = new kakao.maps.Map(
-          document.getElementById('map'),
-          {
-            center: new kakao.maps.LatLng(35.1796, 129.0756),
-            level: 8,
-          }
-        );
-
-        const response = await fetch(topoUrl);
-
-        if (!response.ok) {
-          throw new Error('행정구역 데이터를 불러오지 못했습니다.');
-        }
-
-        const topology = await response.json();
-        const objectKey = Object.keys(topology.objects || {})[0];
-
-        if (!objectKey || !window.topojson) {
-          throw new Error('행정구역 데이터 형식을 읽지 못했습니다.');
-        }
-
-        const collection = window.topojson.feature(
-          topology,
-          topology.objects[objectKey]
-        );
-
-        const feature = (collection.features || []).find(
-          isBusanFeature
-        );
-
-        if (!feature || !feature.geometry) {
-          throw new Error(
-            selectedDistrict + ' 경계를 찾지 못했습니다.'
-          );
-        }
-
-        const bounds = new kakao.maps.LatLngBounds();
-        const geometries =
-          feature.geometry.type === 'MultiPolygon'
-            ? feature.geometry.coordinates
-            : [feature.geometry.coordinates];
-
-        geometries.forEach((polygonCoordinates) => {
-          const path = polygonCoordinates.map((ring) => {
-            const converted = toPath(ring);
-            converted.forEach((point) => bounds.extend(point));
-            return converted;
-          });
-
-          const polygon = new kakao.maps.Polygon({
-            map,
-            path,
-            strokeWeight: 3,
-            strokeColor: '#3D5AFE',
-            strokeOpacity: 1,
-            strokeStyle: 'solid',
-            fillColor: '#3D5AFE',
-            fillOpacity: 0.2,
-          });
-
-          polygon.setMap(map);
-        });
-
-        map.setBounds(bounds, 24, 24, 24, 24);
-        loading.style.display = 'none';
-      } catch (error) {
-        loading.textContent =
-          error && error.message
-            ? error.message
-            : '선택한 구의 경계를 표시하지 못했습니다.';
-      }
-    });
-  </script>
-</body>
-</html>`,
-    [district],
-  );
-
-  return (
-    <WebView
-      key={district}
-      originWhitelist={["*"]}
-      source={{ html }}
-      javaScriptEnabled
-      domStorageEnabled
-      mixedContentMode="always"
-      style={styles.locationPickerMap}
-    />
-  );
-}
-
 export default function HomeScreen() {
   const [missions, setMissions] =
-    useState<HomeMission[]>(FALLBACK_MISSIONS);
+    useState<HomeMission[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [userLocation, setUserLocation] =
@@ -1709,6 +2638,9 @@ export default function HomeScreen() {
   } = useMission();
 
   const locationRequested = useRef(false);
+  const recommendationsInitialized = useRef(false);
+  const recommendationsRef = useRef<HomeMission[]>([]);
+  const recommendationRequestIdRef = useRef(0);
   const sheetTranslateY = useRef(
     new Animated.Value(COLLAPSED_POSITION),
   ).current;
@@ -1725,6 +2657,10 @@ export default function HomeScreen() {
   const sectionContentAnimation = useRef(
     new Animated.Value(1),
   ).current;
+
+  useEffect(() => {
+    recommendationsRef.current = missions;
+  }, [missions]);
 
   useEffect(() => {
     if (
@@ -1763,6 +2699,7 @@ export default function HomeScreen() {
       locationHint,
       completedCount,
       showInitialLoading = false,
+      avoidCurrent = false,
     }: {
       filters: RecommendationFilters;
       center: Coordinate | null;
@@ -1772,7 +2709,13 @@ export default function HomeScreen() {
       locationHint?: Coordinate | null;
       completedCount: number;
       showInitialLoading?: boolean;
+      avoidCurrent?: boolean;
     }) => {
+      const requestId = ++recommendationRequestIdRef.current;
+      const previousRecommendations = avoidCurrent
+        ? recommendationsRef.current
+        : [];
+
       if (showInitialLoading) {
         setLoading(true);
       } else {
@@ -1786,6 +2729,21 @@ export default function HomeScreen() {
         const costOption = COST_OPTIONS.find(
           (item) => item.value === filters.cost,
         );
+        const districtPolygons =
+          locationMode === "district" && district
+            ? await loadDistrictPolygons(district).catch((error) => {
+                console.warn("선택 구 경계 로딩 실패:", error);
+                return [] as DistrictPolygon[];
+              })
+            : [];
+
+        const districtCenter =
+          locationMode === "district" && district
+            ? BUSAN_DISTRICT_CENTERS[district]
+            : districtPolygons.length > 0
+              ? getDistrictCenter(districtPolygons)
+              : null;
+
         const effectiveCenter =
           locationMode === "radius"
             ? center ?? locationHint ?? null
@@ -1800,8 +2758,24 @@ export default function HomeScreen() {
 
         const requestCoordinate =
           locationMode === "district"
-            ? locationHint ?? null
+            ? districtCenter ?? DEFAULT_CENTER
             : effectiveCenter;
+
+        const placeSearchCenter =
+          locationMode === "district"
+            ? districtCenter ?? DEFAULT_CENTER
+            : effectiveCenter;
+
+        const availablePlaces = await fetchPlaceCandidates({
+          center: placeSearchCenter,
+          radiusKm:
+            locationMode === "district"
+              ? 20
+              : effectiveRadiusKm,
+          district:
+            locationMode === "district" ? district : null,
+          districtPolygons,
+        });
 
         let interests = profileInterests;
 
@@ -1817,7 +2791,7 @@ export default function HomeScreen() {
               .eq("id", user.id)
               .maybeSingle();
 
-            const rawInterests = relationArray<string>(
+            const rawInterests = normalizeStringArray(
               profile?.interests,
             );
             interests = Array.from(
@@ -1830,6 +2804,19 @@ export default function HomeScreen() {
             setProfileInterests(interests);
           }
         }
+
+        const excludedMissionIds = previousRecommendations
+          .map((mission) => mission.id)
+          .filter(isUuid);
+        const excludedTitles = previousRecommendations.map(
+          (mission) => mission.title,
+        );
+        const excludedPlaceIds = previousRecommendations
+          .map((mission) => mission.placeId)
+          .filter((value): value is string => isUuid(value));
+        const excludedPlaceNames = previousRecommendations
+          .map((mission) => mission.placeName)
+          .filter((value): value is string => Boolean(value));
 
         const requestBody = {
           category:
@@ -1854,7 +2841,18 @@ export default function HomeScreen() {
             timeOption?.backendValue ?? "상관없음",
           cost:
             costOption?.backendValue ?? "무료/유료",
-          locationType: "실내/실외",
+          locationType: "실제 장소 또는 내 방",
+          actualPlaceRequired: true,
+          flexiblePlaceAllowed: false,
+          availablePlaces: availablePlaces.slice(0, 100).map((place) => ({
+            id: place.id,
+            name: place.name,
+            latitude: place.latitude,
+            longitude: place.longitude,
+            address: place.address,
+            district: place.districtName,
+            category: place.category,
+          })),
           latitude: requestCoordinate?.lat,
           longitude: requestCoordinate?.lng,
           locationMode:
@@ -1870,19 +2868,72 @@ export default function HomeScreen() {
               ? undefined
               : effectiveRadiusKm,
           district:
-            locationMode === "district"
-              ? district
+            locationMode === "district" && district
+              ? `부산광역시 ${district}`
               : undefined,
           gu:
             locationMode === "district"
               ? district
               : undefined,
+          sido:
+            locationMode === "district"
+              ? "부산광역시"
+              : undefined,
+          city:
+            locationMode === "district"
+              ? "부산광역시"
+              : undefined,
+          region_1depth_name:
+            locationMode === "district"
+              ? "부산광역시"
+              : undefined,
+          region_2depth_name:
+            locationMode === "district"
+              ? district
+              : undefined,
+          administrativeCode:
+            locationMode === "district" && district
+              ? BUSAN_DISTRICT_CODES[district]
+              : undefined,
+          categoryMode:
+            filters.categories.length === 0
+              ? "interest_weighted_diverse"
+              : "selected_categories",
+          categoryDiversityRequired: true,
+          minimumCategoryCount: 4,
+          maxPerCategory: 2,
+          interestPreferenceRatio: 0.6,
+          excludeMissionIds: excludedMissionIds,
+          exclude_mission_ids: excludedMissionIds,
+          excludeTitles: excludedTitles,
+          excludePlaceIds: excludedPlaceIds,
+          exclude_place_ids: excludedPlaceIds,
+          excludePlaceNames: excludedPlaceNames,
+          language: "ko",
+          locale: "ko-KR",
+          outputLanguage: "Korean",
+          koreanOnly: true,
+          homeMissionLimit: 2,
+          atHomeMissionLimit: 2,
           includeRecommendationReason: true,
           recommendationReasonRequired: true,
           recommendationReasonInstruction:
-            "각 미션마다 가장 핵심적인 추천 이유 하나만 recommendation_reason 필드에 15~30자 길이의 짧은 한 문장으로 작성해주세요. 미션마다 서로 다른 이유를 쓰고 같은 문장을 반복하지 마세요.",
-          limit: 10,
+            "각 미션마다 가장 핵심적인 추천 이유 하나만 recommendation_reason 필드에 15~30자 길이의 짧은 한국어 한 문장으로 작성해주세요. 미션마다 서로 다른 이유를 쓰고 같은 문장을 반복하지 마세요.",
+          generationInstruction:
+            `제목, 설명, 미션 안내, 추천 이유를 모두 자연스러운 한국어로 작성하세요. 카테고리를 상관없음으로 선택했을 때는 사용자의 초기 관심 카테고리를 약 60% 비중으로 우선하되, 관심사 밖의 카테고리도 반드시 섞으세요. 가능한 경우 최소 4개 이상의 서로 다른 카테고리를 포함하고 같은 카테고리는 최대 2개까지만 포함하세요. 장소 정보는 availablePlaces에 포함된 실제 장소의 이름과 ID를 사용하거나, 집에서 하는 미션이면 정확히 '내 방'만 사용하세요. '자유 장소', '지역 내 어디서나', '현재 위치 주변의 편한 장소' 같은 가상의 장소 표현은 절대 만들지 마세요. 집에서 하는 미션은 전체 10개 중 최대 2개만 포함하세요. 반드시 데이터베이스에 저장된 UUID 미션만 반환하세요. ${
+              avoidCurrent
+                ? "직전 추천에 나온 미션과 장소는 가능한 한 제외하고 새로운 조합을 반환하세요."
+                : ""
+            } ${
+              locationMode === "district" && district
+                ? `대한민국의 다른 동명 지역은 제외하고 모든 지역 정보는 반드시 부산광역시 ${district}로 한정하세요. 울산광역시나 다른 시도의 ${district}는 절대 사용하지 마세요.`
+                : ""
+            }`,
+          randomize: true,
+          sort: "random",
+          limit: 40,
           refreshToken: Date.now(),
+          randomSeed: `${Date.now()}-${Math.random()}`,
         };
 
         let aiCandidates: HomeMission[] = [];
@@ -1904,14 +2955,15 @@ export default function HomeScreen() {
             data?.missions ?? data?.recommendations,
           );
 
-          aiCandidates = rawMissions.map(
-            (mission, index) =>
+          aiCandidates = rawMissions
+            .map((mission, index) =>
               mapBackendMission(
                 mission as ExtendedBackendMission,
                 index,
                 effectiveCenter,
               ),
-          );
+            )
+            .filter(isUsableRecommendation);
         } catch (error) {
           console.warn(
             "AI 추천 호출 실패, DB 추천으로 대체:",
@@ -1924,18 +2976,19 @@ export default function HomeScreen() {
         try {
           const databaseMissions =
             await getRecommendedMissions(
-              20,
+              120,
               completedCount,
             );
 
-          databaseCandidates = databaseMissions.map(
-            (mission, index) =>
+          databaseCandidates = databaseMissions
+            .map((mission, index) =>
               mapBackendMission(
                 mission as ExtendedBackendMission,
                 index,
                 effectiveCenter,
               ),
-          );
+            )
+            .filter(isUsableRecommendation);
         } catch (error) {
           console.warn(
             "DB 추천 조회 실패:",
@@ -1943,72 +2996,52 @@ export default function HomeScreen() {
           );
         }
 
-        const filtered = dedupeMissions([
-          ...aiCandidates,
-          ...shuffle(databaseCandidates),
-        ]).filter((mission) =>
+        const hydratedCandidates = await hydrateMissionPlaces(
+          dedupeMissions([
+            ...aiCandidates,
+            ...shuffle(databaseCandidates),
+          ]),
+          placeSearchCenter,
+        );
+
+        const placedCandidates = assignActualPlaces(
+          hydratedCandidates,
+          availablePlaces,
+          placeSearchCenter,
+        );
+
+        const filtered = placedCandidates.filter((mission) =>
+          hasActualPlace(mission) &&
           missionMatchesFilters(
             mission,
             filters,
             effectiveCenter,
             effectiveRadiusKm,
             locationMode === "district" ? district : null,
+            districtPolygons,
           ),
         );
 
-        const ranked =
-          filters.categories.length === 0
-            ? rankMissionsByInterests(filtered, interests)
-            : filtered;
+        const freshFirst = prioritizeFreshRecommendations({
+          candidates: filtered,
+          previous: previousRecommendations,
+          interests,
+          useInterestRanking: filters.categories.length === 0,
+        });
 
-        if (ranked.length > 0) {
-          setMissions(ranked.slice(0, 10));
-        } else {
-          const fallbackCandidates =
-            effectiveCenter
-              ? FALLBACK_MISSIONS.map((mission) => {
-                  if (
-                    mission.isAtHome ||
-                    !isFiniteNumber(mission.placeLat) ||
-                    !isFiniteNumber(mission.placeLng)
-                  ) {
-                    return mission;
-                  }
+        const balanced = selectDiverseRecommendations({
+          candidates: freshFirst,
+          interests:
+            filters.categories.length === 0
+              ? interests
+              : filters.categories,
+          locationMode,
+          district,
+          limit: 10,
+        });
 
-                  return {
-                    ...mission,
-                    dist: `${haversineDistanceKm(
-                      effectiveCenter,
-                      {
-                        lat: mission.placeLat,
-                        lng: mission.placeLng,
-                      },
-                    ).toFixed(1)}km`,
-                  };
-                }).filter((mission) =>
-                  missionMatchesFilters(
-                    mission,
-                    filters,
-                    effectiveCenter,
-                    effectiveRadiusKm,
-                    locationMode === "district"
-                      ? district
-                      : null,
-                  ),
-                )
-              : FALLBACK_MISSIONS.filter((mission) =>
-                  missionMatchesFilters(
-                    mission,
-                    filters,
-                    null,
-                    effectiveRadiusKm,
-                    locationMode === "district"
-                      ? district
-                      : null,
-                  ),
-                );
-
-          setMissions(fallbackCandidates.slice(0, 10));
+        if (requestId === recommendationRequestIdRef.current) {
+          setMissions(balanced);
         }
       } catch (error) {
         console.error("추천 미션 새로고침 실패:", error);
@@ -2020,8 +3053,10 @@ export default function HomeScreen() {
           ),
         );
       } finally {
-        setLoading(false);
-        setRefreshing(false);
+        if (requestId === recommendationRequestIdRef.current) {
+          setLoading(false);
+          setRefreshing(false);
+        }
       }
     },
     [profileInterests],
@@ -2331,6 +3366,12 @@ export default function HomeScreen() {
   );
 
   useEffect(() => {
+    if (recommendationsInitialized.current) {
+      return;
+    }
+
+    recommendationsInitialized.current = true;
+
     const initialize = async () => {
       let coordinate: Coordinate | null = null;
 
@@ -2388,7 +3429,7 @@ export default function HomeScreen() {
     );
     const sharedIsAtHome =
       shared.isAtHome === true ||
-      /(내 집|집에서|집 안|방에서|자택)/.test(
+      /(내 방|내 집|집에서|집 안|방에서|자택)/.test(
         `${sharedTitle} ${sharedDescription} ${sharedInstructions}`,
       );
 
@@ -2403,7 +3444,7 @@ export default function HomeScreen() {
             title: sharedTitle,
             category: sharedCategory,
             placeName: sharedIsAtHome
-              ? "내 집"
+              ? "내 방"
               : shared.placeName,
             time: String(shared.time ?? "시간 자유"),
             cost:
@@ -2420,7 +3461,7 @@ export default function HomeScreen() {
       ),
       time: String(shared.time ?? "시간 자유"),
       dist: sharedIsAtHome
-        ? "내 집"
+        ? "내 방"
         : String(shared.dist ?? "거리 정보 없음"),
       cost:
         shared.cost === "무료" ||
@@ -2442,7 +3483,7 @@ export default function HomeScreen() {
         ? undefined
         : toFiniteNumber(shared.placeLng) ?? undefined,
       placeName: sharedIsAtHome
-        ? "내 집"
+        ? "내 방"
         : shared.placeName,
       isAtHome: sharedIsAtHome,
       isFallback: !isUuid(String(shared.id)),
@@ -2792,7 +3833,7 @@ export default function HomeScreen() {
     ) {
       Alert.alert(
         "구를 선택해주세요",
-        "추천받을 부산 지역을 하나 선택해주세요.",
+        "추천받을 부산광역시 구·군을 하나 선택해주세요.",
       );
       setConditionStep(0);
       return;
@@ -2833,6 +3874,7 @@ export default function HomeScreen() {
           : null,
       locationHint: userLocation,
       completedCount: completedMissionCount,
+      avoidCurrent: true,
     });
   };
 
@@ -2846,6 +3888,7 @@ export default function HomeScreen() {
       district: recommendationDistrict,
       locationHint: userLocation,
       completedCount: completedMissionCount,
+      avoidCurrent: true,
     });
   };
 
@@ -3072,6 +4115,13 @@ export default function HomeScreen() {
         await ImagePicker.launchCameraAsync({
           mediaTypes: ["images"],
           quality: 0.85,
+          ...(Platform.OS === "ios"
+            ? {
+                preferredAssetRepresentationMode:
+                  ImagePicker.UIImagePickerPreferredAssetRepresentationMode
+                    .Compatible,
+              }
+            : {}),
         });
 
       if (!result.canceled) {
@@ -3106,6 +4156,13 @@ export default function HomeScreen() {
           mediaTypes: ["images"],
           allowsMultipleSelection: true,
           quality: 0.85,
+          ...(Platform.OS === "ios"
+            ? {
+                preferredAssetRepresentationMode:
+                  ImagePicker.UIImagePickerPreferredAssetRepresentationMode
+                    .Compatible,
+              }
+            : {}),
         });
 
       if (!result.canceled) {
@@ -3144,16 +4201,14 @@ export default function HomeScreen() {
         index += 1
       ) {
         const photo = photos[index];
-        const extension = getPhotoExtension(photo);
-        const contentType = getPhotoContentType(
-          photo,
-          extension,
-        );
+        const preparedPhoto =
+          await prepareRecordPhotoForUpload(photo);
+        const { extension, contentType, uri } = preparedPhoto;
         const uniquePart = `${Date.now()}-${index}-${Math.random()
           .toString(36)
           .slice(2, 8)}`;
         const storagePath = `${userId}/${recordId}/${uniquePart}.${extension}`;
-        const response = await fetch(photo.uri);
+        const response = await fetch(uri);
 
         if (!response.ok) {
           throw new Error(
@@ -3575,8 +4630,9 @@ export default function HomeScreen() {
     (item) => item.key === selectedItemKey,
   );
   const mapCenter =
-    selectedItem?.mission.placeLat &&
-    selectedItem?.mission.placeLng
+    selectedItem &&
+    isFiniteNumber(selectedItem.mission.placeLat) &&
+    isFiniteNumber(selectedItem.mission.placeLng)
       ? {
           lat: selectedItem.mission.placeLat,
           lng: selectedItem.mission.placeLng,
@@ -3599,8 +4655,10 @@ export default function HomeScreen() {
   return (
     <View style={styles.container}>
       <KakaoMapView
+        key={`home-map-${mapCenter.lat.toFixed(5)}-${mapCenter.lng.toFixed(5)}-${selectedItemKey ?? "none"}`}
         latitude={mapCenter.lat}
         longitude={mapCenter.lng}
+        userLocation={userLocation}
         style={styles.mapPlaceholder}
         markers={mapMissions
           .filter(
@@ -3888,14 +4946,14 @@ export default function HomeScreen() {
               {conditionStep === 0 ? (
                 <>
                   <Text style={styles.conditionHelp}>
-                    상관없음은 현재 위치 3km를 사용하고, 직접 반경이나 부산의 구를 선택할 수도 있어요.
+                    상관없음은 현재 위치 3km를 사용하고, 직접 반경이나 부산광역시의 구·군을 선택할 수도 있어요.
                   </Text>
 
                   <View style={styles.locationModeRow}>
                     {([
                       ["any", "상관없음"],
                       ["radius", "반경"],
-                      ["district", "구 선택"],
+                      ["district", "구·군 선택"],
                     ] as const).map(([mode, label]) => {
                       const selected =
                         draftLocationMode === mode;
@@ -4014,7 +5072,7 @@ export default function HomeScreen() {
                   ) : draftLocationMode === "district" ? (
                     <>
                       <Text style={styles.locationSubLabel}>
-                        부산 지역
+                        부산광역시 구·군
                       </Text>
                       <View style={styles.optionWrap}>
                         {BUSAN_DISTRICTS.map((district) => {
@@ -4047,25 +5105,20 @@ export default function HomeScreen() {
                         })}
                       </View>
                       {draftDistrict ? (
-                        <>
-                          <View style={styles.locationMapWrapper}>
-                            <DistrictBoundaryMap
-                              district={draftDistrict}
-                            />
-                            <View style={styles.radiusBadge}>
-                              <Text style={styles.radiusBadgeText}>
-                                부산 {draftDistrict}
-                              </Text>
-                            </View>
-                          </View>
-
-                          <Text style={styles.selectedCoordinateText}>
-                            파란색으로 표시된 {draftDistrict} 안의 장소를 우선 추천해요.
+                        <View style={styles.locationAnyBox}>
+                          <Text style={styles.locationAnyEmoji}>
+                            📍
                           </Text>
-                        </>
+                          <Text style={styles.locationAnyTitle}>
+                            부산광역시 {draftDistrict}
+                          </Text>
+                          <Text style={styles.locationAnyDescription}>
+                            선택한 부산 구·군 안에 등록된 실제 장소 미션만 추천해요.
+                          </Text>
+                        </View>
                       ) : (
                         <Text style={styles.selectedCoordinateText}>
-                          추천받을 구를 하나 선택해주세요.
+                          부산광역시 구·군을 하나 선택해주세요.
                         </Text>
                       )}
                     </>
@@ -4078,7 +5131,7 @@ export default function HomeScreen() {
                         현재 위치 주변에서 추천받아요
                       </Text>
                       <Text style={styles.locationAnyDescription}>
-                        상관없음을 선택하면 현재 위치를 기준으로 반경 {DEFAULT_ANY_RADIUS_KM}km 안의 미션과 집에서 할 수 있는 미션을 보여줘요.
+                        상관없음을 선택하면 현재 위치를 기준으로 반경 {DEFAULT_ANY_RADIUS_KM}km 안의 실제 장소 미션과 내 방에서 할 수 있는 미션을 보여줘요.
                       </Text>
                     </View>
                   )}
