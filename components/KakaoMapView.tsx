@@ -15,13 +15,16 @@ type MapMarker = {
 };
 
 type UserLocation = { lat: number; lng: number } | null;
+type PickedLocation = { lat: number; lng: number } | null;
 
 type Props = {
   latitude: number;
   longitude: number;
   markers?: MapMarker[];
   userLocation?: UserLocation;
+  pickedLocation?: PickedLocation;
   onMarkerPress?: (id: string | number) => void;
+  onMapPress?: (lat: number, lng: number) => void;
   style?: any;
 };
 
@@ -30,7 +33,9 @@ export function KakaoMapView({
   longitude,
   markers = [],
   userLocation,
+  pickedLocation,
   onMarkerPress,
+  onMapPress,
   style,
 }: Props) {
   const html = useMemo(
@@ -58,38 +63,14 @@ export function KakaoMapView({
           const errorElement = document.getElementById('error');
 
           const CATEGORY_STYLES = {
-            "음식": {
-              color: "#F97316",
-              svg: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 3v7a2 2 0 0 0 2 2h0a2 2 0 0 0 2-2V3"/><path d="M9 12v9"/><path d="M17 3c-1.7 0-3 2-3 5s1.3 5 3 5 3-2 3-5-1.3-5-3-5z"/><path d="M17 13v8"/></svg>'
-            },
-            "카페 및 디저트": {
-              color: "#8B5E3C",
-              svg: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9h13v6a4 4 0 0 1-4 4H8a4 4 0 0 1-4-4V9z"/><path d="M17 10h2a2 2 0 0 1 0 4h-2"/><path d="M6 3c-.5 1 -.5 1.5 0 2.5"/><path d="M10 3c-.5 1 -.5 1.5 0 2.5"/></svg>'
-            },
-            "산책": {
-              color: "#22C55E",
-              svg: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="13" cy="4" r="1.6" fill="white" stroke="none"/><path d="M11 8l-2 3 2 2 -1 6"/><path d="M11 8l3 1 2 4"/><path d="M9 13l-3 2"/><path d="M13 11l2 5"/></svg>'
-            },
-            "배움": {
-              color: "#7C3AED",
-              svg: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H12v16H6.5A2.5 2.5 0 0 0 4 21.5"/><path d="M20 5.5A2.5 2.5 0 0 0 17.5 3H12v16h5.5a2.5 2.5 0 0 1 2.5 2.5"/></svg>'
-            },
-            "감상": {
-              color: "#EC4899",
-              svg: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a9 8 0 0 0 -9 8 8 7 0 0 0 8 7c0-1 1-2 2-2h5a2 2 0 0 0 2-2c0-6-4-11-8-11z"/><circle cx="8" cy="10" r="0.8" fill="white" stroke="none"/><circle cx="12" cy="7.5" r="0.8" fill="white" stroke="none"/><circle cx="16" cy="10" r="0.8" fill="white" stroke="none"/></svg>'
-            },
-            "활동": {
-              color: "#EF4444",
-              svg: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="15" cy="4" r="1.6" fill="white" stroke="none"/><path d="M4 17l3-3 2 2 4-5"/><path d="M10 11l2-3 3 1 2 3"/><path d="M17 12l3 2"/></svg>'
-            },
-            "휴식": {
-              color: "#4338CA",
-              svg: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a7 7 0 1 0 9 9 7 7 0 0 1 -9 -9z"/><path d="M17 3l0.7 1.6 1.6 0.7 -1.6 0.7 -0.7 1.6 -0.7 -1.6 -1.6 -0.7 1.6 -0.7z"/></svg>'
-            },
-            "기타": {
-              color: "#0D9488",
-              svg: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 4l2 2-2.5 2.5"/><path d="M17.5 8.5l-6 6"/><circle cx="9" cy="17.5" r="4.5"/><circle cx="9" cy="17.5" r="1.8" fill="white" stroke="none"/></svg>'
-            }
+            "음식": { color: "#F97316", svg: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 3v7a2 2 0 0 0 2 2h0a2 2 0 0 0 2-2V3"/><path d="M9 12v9"/><path d="M17 3c-1.7 0-3 2-3 5s1.3 5 3 5 3-2 3-5-1.3-5-3-5z"/><path d="M17 13v8"/></svg>' },
+            "카페 및 디저트": { color: "#8B5E3C", svg: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9h13v6a4 4 0 0 1-4 4H8a4 4 0 0 1-4-4V9z"/><path d="M17 10h2a2 2 0 0 1 0 4h-2"/><path d="M6 3c-.5 1 -.5 1.5 0 2.5"/><path d="M10 3c-.5 1 -.5 1.5 0 2.5"/></svg>' },
+            "산책": { color: "#22C55E", svg: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="13" cy="4" r="1.6" fill="white" stroke="none"/><path d="M11 8l-2 3 2 2 -1 6"/><path d="M11 8l3 1 2 4"/><path d="M9 13l-3 2"/><path d="M13 11l2 5"/></svg>' },
+            "배움": { color: "#7C3AED", svg: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H12v16H6.5A2.5 2.5 0 0 0 4 21.5"/><path d="M20 5.5A2.5 2.5 0 0 0 17.5 3H12v16h5.5a2.5 2.5 0 0 1 2.5 2.5"/></svg>' },
+            "감상": { color: "#EC4899", svg: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a9 8 0 0 0 -9 8 8 7 0 0 0 8 7c0-1 1-2 2-2h5a2 2 0 0 0 2-2c0-6-4-11-8-11z"/><circle cx="8" cy="10" r="0.8" fill="white" stroke="none"/><circle cx="12" cy="7.5" r="0.8" fill="white" stroke="none"/><circle cx="16" cy="10" r="0.8" fill="white" stroke="none"/></svg>' },
+            "활동": { color: "#EF4444", svg: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="15" cy="4" r="1.6" fill="white" stroke="none"/><path d="M4 17l3-3 2 2 4-5"/><path d="M10 11l2-3 3 1 2 3"/><path d="M17 12l3 2"/></svg>' },
+            "휴식": { color: "#4338CA", svg: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a7 7 0 1 0 9 9 7 7 0 0 1 -9 -9z"/><path d="M17 3l0.7 1.6 1.6 0.7 -1.6 0.7 -0.7 1.6 -0.7 -1.6 -1.6 -0.7 1.6 -0.7z"/></svg>' },
+            "기타": { color: "#0D9488", svg: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 4l2 2-2.5 2.5"/><path d="M17.5 8.5l-6 6"/><circle cx="9" cy="17.5" r="4.5"/><circle cx="9" cy="17.5" r="1.8" fill="white" stroke="none"/></svg>' }
           };
 
           if (typeof kakao === 'undefined') {
@@ -120,6 +101,27 @@ export function KakaoMapView({
                   xAnchor: 0.5,
                   yAnchor: 0.5,
                   zIndex: 10,
+                });
+              }
+
+              const pickedLoc = ${JSON.stringify(pickedLocation)};
+              if (pickedLoc && pickedLoc.lat && pickedLoc.lng) {
+                const pin = document.createElement('div');
+                pin.style.width = '28px';
+                pin.style.height = '28px';
+                pin.style.borderRadius = '14px 14px 14px 0';
+                pin.style.transform = 'rotate(45deg)';
+                pin.style.backgroundColor = '#EC4899';
+                pin.style.border = '2.5px solid #ffffff';
+                pin.style.boxShadow = '0 2px 6px rgba(0,0,0,0.3)';
+
+                new kakao.maps.CustomOverlay({
+                  map: map,
+                  position: new kakao.maps.LatLng(pickedLoc.lat, pickedLoc.lng),
+                  content: pin,
+                  xAnchor: 0.5,
+                  yAnchor: 1,
+                  zIndex: 15,
                 });
               }
 
@@ -182,6 +184,15 @@ export function KakaoMapView({
                 });
               });
 
+              kakao.maps.event.addListener(map, 'click', function (mouseEvent) {
+                const latlng = mouseEvent.latLng;
+                window.ReactNativeWebView.postMessage(JSON.stringify({
+                  type: 'mapClick',
+                  lat: latlng.getLat(),
+                  lng: latlng.getLng(),
+                }));
+              });
+
               errorElement.style.display = 'none';
             });
           }
@@ -189,7 +200,7 @@ export function KakaoMapView({
       </body>
     </html>
   `,
-    [latitude, longitude, JSON.stringify(markers), JSON.stringify(userLocation)]
+    [latitude, longitude, JSON.stringify(markers), JSON.stringify(userLocation), JSON.stringify(pickedLocation)]
   );
 
   return (
@@ -203,6 +214,9 @@ export function KakaoMapView({
           const data = JSON.parse(event.nativeEvent.data);
           if (data.type === "markerPress" && onMarkerPress) {
             onMarkerPress(data.id);
+          }
+          if (data.type === "mapClick" && onMapPress) {
+            onMapPress(data.lat, data.lng);
           }
         } catch {}
       }}
