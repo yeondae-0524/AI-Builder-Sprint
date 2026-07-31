@@ -1,6 +1,6 @@
 import Ionicons from "@expo/vector-icons/Ionicons";
-import { useRouter } from "expo-router";
-import { useEffect, useRef, useState } from "react";
+import { useFocusEffect, useRouter } from "expo-router";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Alert,
   Animated,
@@ -78,21 +78,21 @@ const JOURNEY_OPTIONS: JourneyOption[] = [
     title: "1주의 여정",
     durationDays: 7,
     targetRecordCount: 4,
-    description: "7일 동안 4번 기록",
+    description: "7일 동안 4일 기록",
   },
   {
     label: "2주",
     title: "2주의 여정",
     durationDays: 14,
     targetRecordCount: 7,
-    description: "14일 동안 7번 기록",
+    description: "14일 동안 7일 기록",
   },
   {
     label: "한 달",
     title: "한 달의 여정",
     durationDays: 30,
     targetRecordCount: 15,
-    description: "30일 동안 15번 기록",
+    description: "30일 동안 15일 기록",
   },
 ];
 
@@ -107,6 +107,30 @@ function toDateKey(date: Date) {
 function parseDateKey(dateKey: string) {
   const [year, month, day] = dateKey.split("-").map(Number);
   return new Date(year, month - 1, day);
+}
+
+function getRecordDateKey(
+  recordedAt: string | null | undefined,
+) {
+  if (!recordedAt) {
+    return "";
+  }
+
+  return recordedAt.slice(0, 10);
+}
+
+function getCompletedDayCount(
+  records: Array<{
+    recorded_at?: string | null;
+  }>,
+) {
+  return new Set(
+    records
+      .map((record) =>
+        getRecordDateKey(record.recorded_at),
+      )
+      .filter(Boolean),
+  ).size;
 }
 
 function getLocalDayFromTimestamp(timestamp: string) {
@@ -131,7 +155,7 @@ export default function CalendarScreen() {
   const [records, setRecords] = useState<CalendarRecord[]>([]);
   const [startedMissions, setStartedMissions] = useState<StartedMission[]>([]);
   const [journey, setJourney] = useState<Journey | null>(null);
-  const [journeyRecordCount, setJourneyRecordCount] = useState(0);
+  const [journeyCompletedDayCount, setJourneyCompletedDayCount] = useState(0);
   const [isLoading, setIsLoading] = useState(true);
   const [isCreatingJourney, setIsCreatingJourney] = useState(false);
   const [isStoppingJourney, setIsStoppingJourney] = useState(false);
@@ -160,10 +184,11 @@ export default function CalendarScreen() {
   const monthStartKey = toDateKey(monthStart);
   const nextMonthStartKey = toDateKey(nextMonthStart);
 
-  useEffect(() => {
-    let isMounted = true;
+  useFocusEffect(
+    useCallback(() => {
+      let isMounted = true;
 
-    const loadCalendarData = async () => {
+      const loadCalendarData = async () => {
       setIsLoading(true);
 
       const {
@@ -202,12 +227,13 @@ export default function CalendarScreen() {
           supabase
             .from("records")
             .select(
-              "id, mission_attempt_id, recorded_at, emotion, content",
+              "id, mission_attempt_id, recorded_at, created_at, emotion, content",
             )
             .eq("user_id", user.id)
             .gte("recorded_at", monthStartKey)
             .lt("recorded_at", nextMonthStartKey)
-            .order("recorded_at", { ascending: true }),
+            .order("recorded_at", { ascending: true })
+            .order("created_at", { ascending: true }),
 
           supabase
             .from("mission_attempts")
@@ -249,22 +275,29 @@ export default function CalendarScreen() {
       const rawRecords = recordsResult.data ?? [];
       const rawStartedMissions = startedResult.data ?? [];
 
-      let currentJourneyRecordCount = 0;
+      let currentJourneyCompletedDayCount = 0;
 
       if (currentJourney) {
-        const { count, error: countError } = await supabase
+        const {
+          data: journeyRecords,
+          error: journeyRecordsError,
+        } = await supabase
           .from("records")
-          .select("id", { count: "exact", head: true })
+          .select("recorded_at")
           .eq("user_id", user.id)
-          .eq("journey_id", currentJourney.id);
+          .eq("journey_id", currentJourney.id)
+          .order("recorded_at", { ascending: true });
 
-        if (countError) {
+        if (journeyRecordsError) {
           console.error(
-            "여정 기록 수 조회 실패:",
-            countError.message,
+            "여정 기록 날짜 조회 실패:",
+            journeyRecordsError.message,
           );
         } else {
-          currentJourneyRecordCount = count ?? 0;
+          currentJourneyCompletedDayCount =
+            getCompletedDayCount(
+              journeyRecords ?? [],
+            );
         }
       }
 
@@ -428,18 +461,19 @@ export default function CalendarScreen() {
       }
 
       setJourney(currentJourney);
-      setJourneyRecordCount(currentJourneyRecordCount);
+      setJourneyCompletedDayCount(currentJourneyCompletedDayCount);
       setRecords(normalizedRecords);
       setStartedMissions(normalizedStartedMissions);
       setIsLoading(false);
     };
 
-    loadCalendarData();
+      void loadCalendarData();
 
-    return () => {
-      isMounted = false;
-    };
-  }, [monthStartKey, nextMonthStartKey, todayKey]);
+      return () => {
+        isMounted = false;
+      };
+    }, [monthStartKey, nextMonthStartKey, todayKey]),
+  );
 
   useEffect(() => {
     if (!isSheetOpen) {
@@ -531,7 +565,9 @@ export default function CalendarScreen() {
     selectedDateKey === null
       ? null
       : records.find(
-          (record) => record.recorded_at === selectedDateKey,
+          (record) =>
+            getRecordDateKey(record.recorded_at) ===
+            selectedDateKey,
         ) ?? null;
 
   const selectedStartedMission =
@@ -543,8 +579,12 @@ export default function CalendarScreen() {
             selectedDay,
         ) ?? null;
 
-  const completedDays = new Set(
-    records.map((record) => parseDateKey(record.recorded_at).getDate()),
+  const completedDateKeys = new Set(
+    records
+      .map((record) =>
+        getRecordDateKey(record.recorded_at),
+      )
+      .filter(Boolean),
   );
   const startedDays = new Set(
     startedMissions.map((mission) =>
@@ -553,14 +593,15 @@ export default function CalendarScreen() {
   );
 
   const journeyTarget = journey?.target_record_count ?? 0;
-  const remainingRecords = Math.max(
-    journeyTarget - journeyRecordCount,
+  const remainingDays = Math.max(
+    journeyTarget - journeyCompletedDayCount,
     0,
   );
   const progressPercentage = (
     journeyTarget > 0
       ? `${Math.min(
-          (journeyRecordCount / journeyTarget) * 100,
+          (journeyCompletedDayCount / journeyTarget) *
+            100,
           100,
         )}%`
       : "0%"
@@ -579,7 +620,7 @@ export default function CalendarScreen() {
   const handleStartJourney = (option: JourneyOption) => {
     Alert.alert(
       `${option.label} 여정 시작`,
-      `오늘부터 ${option.durationDays}일 동안 ${option.targetRecordCount}번의 경험을 기록하면 완주해요. 시작할까요?`,
+      `오늘부터 ${option.durationDays}일 동안 ${option.targetRecordCount}일의 경험을 기록하면 완주해요. 시작할까요?`,
       [
         {
           text: "취소",
@@ -640,7 +681,7 @@ export default function CalendarScreen() {
               }
 
               setJourney(data as Journey);
-              setJourneyRecordCount(0);
+              setJourneyCompletedDayCount(0);
 
               Alert.alert(
                 "여정 시작",
@@ -689,7 +730,7 @@ export default function CalendarScreen() {
               // journeys만 중단 상태로 변경합니다.
               // records와 record_photos는 삭제하거나 수정하지 않습니다.
               setJourney(null);
-              setJourneyRecordCount(0);
+              setJourneyCompletedDayCount(0);
 
               Alert.alert(
                 "여정이 중단됐어요",
@@ -787,12 +828,12 @@ export default function CalendarScreen() {
 
                 <View style={styles.progressInfoRow}>
                   <Text style={styles.progressDescription}>
-                    {journeyTarget}번 중 {journeyRecordCount}번의 경험을
-                    기록했어요
+                    {journeyTarget}일 중 {journeyCompletedDayCount}일의
+                    경험을 기록했어요
                   </Text>
 
                   <Text style={styles.progressCount}>
-                    {journeyRecordCount}/{journeyTarget}
+                    {journeyCompletedDayCount}/{journeyTarget}
                   </Text>
                 </View>
 
@@ -809,7 +850,7 @@ export default function CalendarScreen() {
                   <Text style={styles.essayNoticeText}>
                     에세이 완성까지{" "}
                     <Text style={styles.essayNoticeStrong}>
-                      {remainingRecords}번
+                      {remainingDays}일
                     </Text>{" "}
                     더 남았어요
                   </Text>
@@ -958,10 +999,17 @@ export default function CalendarScreen() {
                 day,
               );
               const dateKey = toDateKey(date);
-              const dayRecord = records.find(
-                (record) => record.recorded_at === dateKey,
+              const dayRecords = records.filter(
+                (record) =>
+                  getRecordDateKey(record.recorded_at) ===
+                  dateKey,
               );
-              const isCompleted = completedDays.has(day);
+              const dayPhotoUrl =
+                dayRecords.find(
+                  (record) => record.photoUrl,
+                )?.photoUrl ?? null;
+              const isCompleted =
+                completedDateKeys.has(dateKey);
               const isStarted = startedDays.has(day) && !isCompleted;
               const isToday = dateKey === todayKey;
               const isFuture = date.getTime() > todayStart.getTime();
@@ -1028,17 +1076,14 @@ export default function CalendarScreen() {
                     <View
                       style={[
                         styles.completedImageWrapper,
-                        !dayRecord?.photoUrl && {
-                          alignItems: "center",
-                          justifyContent: "center",
-                          backgroundColor: COLORS.primaryLight,
-                        },
+                        !dayPhotoUrl && styles.completedCheckWrapper,
+                        isToday && styles.todayCompletedWrapper,
                         isSelected && styles.selectedImageWrapper,
                       ]}
                     >
-                      {dayRecord?.photoUrl ? (
+                      {dayPhotoUrl ? (
                         <Image
-                          source={{ uri: dayRecord.photoUrl }}
+                          source={{ uri: dayPhotoUrl }}
                           style={styles.completedImage}
                         />
                       ) : (
@@ -1578,17 +1623,32 @@ const styles = StyleSheet.create({
   completedImageWrapper: {
     position: "relative",
     zIndex: 1,
-    width: 34,
-    height: 34,
 
+    width: 36,
+    height: 36,
+
+    alignItems: "center",
+    justifyContent: "center",
     overflow: "hidden",
 
-    borderWidth: 2.5,
-    borderColor: "transparent",
-    borderRadius: 17,
+    backgroundColor: COLORS.white,
+
+    borderWidth: 2,
+    borderColor: "rgba(61, 90, 254, 0.22)",
+    borderRadius: 18,
+  },
+
+  completedCheckWrapper: {
+    backgroundColor: COLORS.primaryLight,
+  },
+
+  todayCompletedWrapper: {
+    borderWidth: 3.5,
+    borderColor: COLORS.primary,
   },
 
   selectedImageWrapper: {
+    borderWidth: 3,
     borderColor: COLORS.primary,
   },
 
@@ -1596,7 +1656,9 @@ const styles = StyleSheet.create({
     width: "100%",
     height: "100%",
 
+    resizeMode: "cover",
     backgroundColor: COLORS.border,
+    borderRadius: 18,
   },
 
   completedDot: {
