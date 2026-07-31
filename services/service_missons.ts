@@ -69,10 +69,15 @@ export async function createDiscoverPost(input: CreatePostInput): Promise<string
     const extension = (photo.mimeType?.split("/")[1] || "jpg").replace("jpeg", "jpg");
     const path = `${user.id}/${postId}/${Date.now()}-${i}.${extension}`;
 
+    console.log("업로드 경로:", path, "user.id:", user.id);
     const { error: uploadError } = await supabase.storage
       .from("discover-photos")
       .upload(path, arrayBuffer, { contentType: photo.mimeType || "image/jpeg", upsert: false });
-    if (uploadError) throw uploadError;
+    if (uploadError) {
+      console.log("❌ 업로드 에러 상세:", JSON.stringify(uploadError));
+      throw uploadError;
+    }
+    console.log("✅ 업로드 성공");
 
     const { error: photoRowError } = await supabase.from("discover_post_photos").insert({
       post_id: postId,
