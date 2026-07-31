@@ -1,93 +1,281 @@
-import { supabase } from "@/lib/supabase";
+import { supabase } from "../lib/supabase";
 
-// 🏆 티어 계산기 (포인트에 따라 티어 반환)
-const calculateTier = (points: number): string => {
-  if (points >= 30) return "PRISM";
-  if (points >= 15) return "GOLD";
-  if (points >= 7) return "SILVER";
-  if (points >= 3) return "BRONZE";
-  return "LOCKED";
+export type BadgeTier =
+  | "LOCKED"
+  | "BRONZE"
+  | "SILVER"
+  | "GOLD"
+  | "PRISM";
+
+export type Badge = {
+  id: string;
+  name: string;
+  icon: string;
+  description: string | null;
+  created_at: string | null;
 };
 
-/**
- * [뱃지 포인트 추가 함수]
- * 미션에 연결된 뱃지 ID 배열을 받아 각각 포인트를 +1 하고 티어를 업데이트합니다.
- */
-export const addBadgePoints = async (userId: string, badgeIds: string[]) => {
-  try {
-    if (!badgeIds || badgeIds.length === 0) return { success: true };
+export type UserBadge = {
+  id: string | null;
+  user_id: string;
+  badge_id: string;
+  points: number;
+  tier: BadgeTier;
+  updated_at: string | null;
+  badge: Badge;
+};
 
-    for (const badgeId of badgeIds) {
-      // 1. 유저의 현재 뱃지 상태 조회
-      const { data: userBadge } = await supabase
-        .from("user_badges")
-        .select("points")
-        .eq("user_id", userId)
-        .eq("badge_id", badgeId)
-        .maybeSingle();
+export type BadgeProgress = UserBadge & {
+  nextTier: Exclude<BadgeTier, "LOCKED"> | null;
+  nextTierPoints: number | null;
+  pointsToNextTier: number;
+};
 
-      const currentPoints = userBadge ? userBadge.points : 0;
-      const newPoints = currentPoints + 1; // 포인트 1 증가
-      const newTier = calculateTier(newPoints); // 새로운 티어 계산
+const TIER_THRESHOLDS = {
+  BRONZE: 3,
+  SILVER: 7,
+  GOLD: 15,
+  PRISM: 30,
+} as const;
 
-      // 2. 포인트와 티어 DB에 덮어쓰기(upsert)
-      const { error } = await supabase
-        .from("user_badges")
-        .upsert({
-          user_id: userId,
-          badge_id: badgeId,
-          points: newPoints,
-          tier: newTier,
-          updated_at: new Date().toISOString(),
-        }, { onConflict: "user_id, badge_id" });
+async function getCurrentUserId(): Promise<string> {
+  const {
+    data: { user },
+    error,
+  } = await supabase.auth.getUser();
 
-      if (error) {
-        console.error(`뱃지 업데이트 에러 (${badgeId}):`, error.message);
-      }
-    }
-
-    return { success: true };
-  } catch (error) {
-    console.error("addBadgePoints Error:", error);
-    return { success: false, error };
+  if (error) {
+    throw error;
   }
-};
+
+  if (!user) {
+    throw new Error("로그인이 필요합니다.");
+  }
+
+  return user.id;
+}
+
+function normalizeTier(value: unknown): BadgeTier {
+  if (
+    value === "BRONZE" ||
+    value === "SILVER" ||
+    value === "GOLD" ||
+    value === "PRISM"
+  ) {
+    return value;
+  }
+
+  return "LOCKED";
+}
+
+function getNextTier(
+  points: number,
+): {
+  nextTier: Exclude<BadgeTier, "LOCKED"> | null;
+  nextTierPoints: number | null;
+  pointsToNextTier: number;
+} {
+  if (points < TIER_THRESHOLDS.BRONZE) {
+    return {
+      nextTier: "BRONZE",
+      nextTierPoints: TIER_THRESHOLDS.BRONZE,
+      pointsToNextTier:
+        TIER_THRESHOLDS.BRONZE - points,
+    };
+  }
+
+  if (points < TIER_THRESHOLDS.SILVER) {
+    return {
+      nextTier: "SILVER",
+      nextTierPoints: TIER_THRESHOLDS.SILVER,
+      pointsToNextTier:
+        TIER_THRESHOLDS.SILVER - points,
+    };
+  }
+
+  if (points < TIER_THRESHOLDS.GOLD) {
+    return {
+      nextTier: "GOLD",
+      nextTierPoints: TIER_THRESHOLDS.GOLD,
+      pointsToNextTier:
+        TIER_THRESHOLDS.GOLD - points,
+    };
+  }
+
+  if (points < TIER_THRESHOLDS.PRISM) {
+    return {
+      nextTier: "PRISM",
+      nextTierPoints: TIER_THRESHOLDS.PRISM,
+      pointsToNextTier:
+        TIER_THRESHOLDS.PRISM - points,
+    };
+  }
+
+  return {
+    nextTier: null,
+    nextTierPoints: null,
+    pointsToNextTier: 0,
+  };
+}
 
 /**
- * [내 뱃지 보관함 조회 함수]
- * 프론트엔드에서 뱃지 화면을 그릴 때 사용합니다.
+ * 모든 배지 정의를 조회한다.
  */
-export const getMyBadges = async (userId: string) => {
-  try {
-    // 뱃지 마스터 테이블과 유저 뱃지 테이블을 조인해서 가져옴
-    const { data, error } = await supabase
-      .from("badges")
-      .select(`
+export async function getBadges(): Promise<Badge[]> {
+  const { data, error } = await supabase
+    .from("badges")
+    .select(
+      `
         id,
         name,
         icon,
         description,
-        user_badges ( points, tier )
-      `);
-
-    if (error) throw error;
-
-    // 프론트엔드가 쓰기 편하게 데이터 가공
-    const formattedBadges = data.map((badge: any) => {
-      const userBadgeInfo = badge.user_badges?.find((ub: any) => ub) || { points: 0, tier: "LOCKED" };
-      return {
-        id: badge.id,
-        name: badge.name,
-        icon: badge.icon,
-        description: badge.description,
-        points: userBadgeInfo.points,
-        tier: userBadgeInfo.tier,
-      };
+        created_at
+      `,
+    )
+    .order("created_at", {
+      ascending: true,
+      nullsFirst: true,
     });
 
-    return { success: true, data: formattedBadges };
-  } catch (error) {
-    console.error("getMyBadges Error:", error);
-    return { success: false, error };
+  if (error) {
+    console.error("getBadges Error:", error);
+    throw error;
   }
-};
+
+  return (data ?? []) as Badge[];
+}
+
+/**
+ * 현재 사용자의 전체 배지 목록을 조회한다.
+ *
+ * user_badges 행이 아직 없는 배지도
+ * points 0, tier LOCKED 상태로 함께 반환한다.
+ */
+export async function getMyBadges(): Promise<UserBadge[]> {
+  const userId = await getCurrentUserId();
+
+  const [badgesResult, userBadgesResult] =
+    await Promise.all([
+      supabase
+        .from("badges")
+        .select(
+          `
+            id,
+            name,
+            icon,
+            description,
+            created_at
+          `,
+        )
+        .order("created_at", {
+          ascending: true,
+          nullsFirst: true,
+        }),
+
+      supabase
+        .from("user_badges")
+        .select(
+          `
+            id,
+            user_id,
+            badge_id,
+            points,
+            tier,
+            updated_at
+          `,
+        )
+        .eq("user_id", userId),
+    ]);
+
+  if (badgesResult.error) {
+    console.error(
+      "getMyBadges badges Error:",
+      badgesResult.error,
+    );
+    throw badgesResult.error;
+  }
+
+  if (userBadgesResult.error) {
+    console.error(
+      "getMyBadges user_badges Error:",
+      userBadgesResult.error,
+    );
+    throw userBadgesResult.error;
+  }
+
+  const userBadgeByBadgeId = new Map(
+    (userBadgesResult.data ?? []).map(
+      (row) => [String(row.badge_id), row],
+    ),
+  );
+
+  return (badgesResult.data ?? []).map(
+    (badge) => {
+      const userBadge =
+        userBadgeByBadgeId.get(String(badge.id));
+
+      return {
+        id: userBadge
+          ? String(userBadge.id)
+          : null,
+        user_id: userId,
+        badge_id: String(badge.id),
+        points: userBadge?.points ?? 0,
+        tier: normalizeTier(userBadge?.tier),
+        updated_at:
+          userBadge?.updated_at ?? null,
+        badge: badge as Badge,
+      };
+    },
+  );
+}
+
+/**
+ * 현재 사용자의 배지와 다음 등급까지의 진행도를 조회한다.
+ */
+export async function getMyBadgeProgress(): Promise<
+  BadgeProgress[]
+> {
+  const badges = await getMyBadges();
+
+  return badges.map((badge) => ({
+    ...badge,
+    ...getNextTier(badge.points),
+  }));
+}
+
+/**
+ * 현재 사용자가 잠금 해제한 배지만 조회한다.
+ */
+export async function getMyUnlockedBadges(): Promise<
+  UserBadge[]
+> {
+  const badges = await getMyBadges();
+
+  return badges.filter(
+    (badge) => badge.tier !== "LOCKED",
+  );
+}
+
+/**
+ * 특정 배지의 현재 사용자 상태를 조회한다.
+ */
+export async function getMyBadgeById(
+  badgeId: string,
+): Promise<UserBadge> {
+  if (!badgeId.trim()) {
+    throw new Error("badgeId가 필요합니다.");
+  }
+
+  const badges = await getMyBadges();
+  const badge = badges.find(
+    (item) => item.badge_id === badgeId,
+  );
+
+  if (!badge) {
+    throw new Error("배지를 찾을 수 없습니다.");
+  }
+
+  return badge;
+}

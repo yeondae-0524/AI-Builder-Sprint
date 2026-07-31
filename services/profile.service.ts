@@ -21,22 +21,70 @@ export type UpdateProfileInput = {
   interests?: string[];
 };
 
-/**
- * 현재 사용자의 프로필 조회
- */
-export async function getMyProfile(): Promise<Profile> {
+async function getCurrentUserId(): Promise<string> {
   const {
     data: { user },
-    error: userError,
+    error,
   } = await supabase.auth.getUser();
 
-  if (userError) {
-    throw userError;
+  if (error) {
+    throw error;
   }
 
   if (!user) {
     throw new Error("로그인이 필요합니다.");
   }
+
+  return user.id;
+}
+
+function normalizeNullableText(
+  value: string | null | undefined,
+): string | null | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (value === null) {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function normalizeInterests(
+  interests: string[] | null | undefined,
+): string[] {
+  if (!Array.isArray(interests)) {
+    return [];
+  }
+
+  return Array.from(
+    new Set(
+      interests
+        .map((interest) => interest.trim())
+        .filter((interest) => interest.length > 0),
+    ),
+  );
+}
+
+function normalizeProfile(
+  profile: Omit<Profile, "interests"> & {
+    interests: string[] | null;
+  },
+): Profile {
+  return {
+    ...profile,
+    interests: normalizeInterests(profile.interests),
+  };
+}
+
+/**
+ * 현재 로그인한 사용자의 프로필을 조회한다.
+ */
+export async function getMyProfile(): Promise<Profile> {
+  const userId = await getCurrentUserId();
 
   const { data, error } = await supabase
     .from("profiles")
@@ -53,34 +101,32 @@ export async function getMyProfile(): Promise<Profile> {
         updated_at
       `,
     )
-    .eq("id", user.id)
-    .single();
+    .eq("id", userId)
+    .maybeSingle();
 
   if (error) {
+    console.error("getMyProfile Error:", error);
     throw error;
   }
 
-  return data as Profile;
+  if (!data) {
+    throw new Error("프로필을 찾을 수 없습니다.");
+  }
+
+  return normalizeProfile(
+    data as Omit<Profile, "interests"> & {
+      interests: string[] | null;
+    },
+  );
 }
 
 /**
- * 현재 사용자의 프로필 수정
+ * 현재 로그인한 사용자의 프로필을 수정한다.
  */
 export async function updateMyProfile(
   input: UpdateProfileInput,
 ): Promise<Profile> {
-  const {
-    data: { user },
-    error: userError,
-  } = await supabase.auth.getUser();
-
-  if (userError) {
-    throw userError;
-  }
-
-  if (!user) {
-    throw new Error("로그인이 필요합니다.");
-  }
+  const userId = await getCurrentUserId();
 
   if (
     input.nickname !== undefined &&
@@ -89,18 +135,55 @@ export async function updateMyProfile(
     throw new Error("닉네임을 입력해주세요.");
   }
 
-  const updateData: UpdateProfileInput = {
-    ...input,
+  const updateData: {
+    nickname?: string;
+    bio?: string | null;
+    avatar_url?: string | null;
+    activity_region?: string | null;
+    selected_title_id?: string | null;
+    interests?: string[];
+    updated_at: string;
+  } = {
+    updated_at: new Date().toISOString(),
   };
 
   if (input.nickname !== undefined) {
     updateData.nickname = input.nickname.trim();
   }
 
+  if (input.bio !== undefined) {
+    updateData.bio =
+      normalizeNullableText(input.bio) ?? null;
+  }
+
+  if (input.avatar_url !== undefined) {
+    updateData.avatar_url =
+      normalizeNullableText(input.avatar_url) ?? null;
+  }
+
+  if (input.activity_region !== undefined) {
+    updateData.activity_region =
+      normalizeNullableText(input.activity_region) ??
+      null;
+  }
+
+  if (input.selected_title_id !== undefined) {
+    updateData.selected_title_id =
+      normalizeNullableText(
+        input.selected_title_id,
+      ) ?? null;
+  }
+
+  if (input.interests !== undefined) {
+    updateData.interests = normalizeInterests(
+      input.interests,
+    );
+  }
+
   const { data, error } = await supabase
     .from("profiles")
     .update(updateData)
-    .eq("id", user.id)
+    .eq("id", userId)
     .select(
       `
         id,
@@ -114,11 +197,22 @@ export async function updateMyProfile(
         updated_at
       `,
     )
-    .single();
+    .maybeSingle();
 
   if (error) {
+    console.error("updateMyProfile Error:", error);
     throw error;
   }
 
-  return data as Profile;
+  if (!data) {
+    throw new Error(
+      "프로필을 찾을 수 없거나 수정 권한이 없습니다.",
+    );
+  }
+
+  return normalizeProfile(
+    data as Omit<Profile, "interests"> & {
+      interests: string[] | null;
+    },
+  );
 }

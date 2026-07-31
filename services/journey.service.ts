@@ -24,13 +24,32 @@ export type CreateJourneyInput = {
   startDate?: Date;
 };
 
-const TARGET_RECORD_COUNT: Record<
+export type ActiveJourneyProgress = {
+  journey: Journey | null;
+  recordCount: number;
+};
+
+type JourneyConfig = {
+  title: string;
+  targetRecordCount: number;
+};
+
+const JOURNEY_CONFIG: Record<
   DurationDays,
-  number
+  JourneyConfig
 > = {
-  7: 4,
-  14: 7,
-  30: 15,
+  7: {
+    title: "1주의 여정",
+    targetRecordCount: 4,
+  },
+  14: {
+    title: "2주의 여정",
+    targetRecordCount: 7,
+  },
+  30: {
+    title: "한 달의 여정",
+    targetRecordCount: 15,
+  },
 };
 
 /**
@@ -71,6 +90,25 @@ async function getCurrentUserId(): Promise<string> {
 }
 
 /**
+ * 기간에 따른 Journey 제목을 반환한다.
+ */
+export function getJourneyTitle(
+  durationDays: DurationDays,
+): string {
+  return JOURNEY_CONFIG[durationDays].title;
+}
+
+/**
+ * 기간에 따른 목표 기록 수를 반환한다.
+ */
+export function getJourneyTargetRecordCount(
+  durationDays: DurationDays,
+): number {
+  return JOURNEY_CONFIG[durationDays]
+    .targetRecordCount;
+}
+
+/**
  * 새로운 활동 여정을 생성한다.
  */
 export async function createJourney({
@@ -99,12 +137,14 @@ export async function createJourney({
     end.getDate() + durationDays - 1,
   );
 
+  const config = JOURNEY_CONFIG[durationDays];
+
   const newJourney = {
     user_id: userId,
-    title: `${durationDays}일의 여정`,
+    title: config.title,
     duration_days: durationDays,
     target_record_count:
-      TARGET_RECORD_COUNT[durationDays],
+      config.targetRecordCount,
     start_date: formatLocalDate(start),
     end_date: formatLocalDate(end),
     status: "active" as const,
@@ -150,6 +190,60 @@ export async function getActiveJourney(): Promise<
 }
 
 /**
+ * 진행 중인 여정과 해당 여정의 기록 수를 함께 조회한다.
+ */
+export async function getActiveJourneyProgress(): Promise<
+  ActiveJourneyProgress
+> {
+  const userId = await getCurrentUserId();
+
+  const { data: journeyData, error: journeyError } =
+    await supabase
+      .from("journeys")
+      .select("*")
+      .eq("user_id", userId)
+      .eq("status", "active")
+      .order("created_at", {
+        ascending: false,
+      })
+      .limit(1)
+      .maybeSingle();
+
+  if (journeyError) {
+    throw journeyError;
+  }
+
+  const journey =
+    (journeyData as Journey | null) ?? null;
+
+  if (!journey) {
+    return {
+      journey: null,
+      recordCount: 0,
+    };
+  }
+
+  const { count, error: countError } =
+    await supabase
+      .from("records")
+      .select("id", {
+        count: "exact",
+        head: true,
+      })
+      .eq("user_id", userId)
+      .eq("journey_id", journey.id);
+
+  if (countError) {
+    throw countError;
+  }
+
+  return {
+    journey,
+    recordCount: count ?? 0,
+  };
+}
+
+/**
  * 현재 로그인 사용자의 전체 여정을 조회한다.
  */
 export async function getMyJourneys(): Promise<
@@ -191,6 +285,38 @@ export async function completeJourney(
     })
     .eq("id", journeyId)
     .eq("user_id", userId)
+    .eq("status", "active")
+    .select("*")
+    .single();
+
+  if (error) {
+    throw error;
+  }
+
+  return data as Journey;
+}
+
+/**
+ * 선택한 진행 중 여정을 중단 상태로 변경한다.
+ * 기록과 사진은 삭제하지 않는다.
+ */
+export async function cancelJourney(
+  journeyId: string,
+): Promise<Journey> {
+  const userId = await getCurrentUserId();
+
+  if (!journeyId.trim()) {
+    throw new Error("여정 ID가 필요합니다.");
+  }
+
+  const { data, error } = await supabase
+    .from("journeys")
+    .update({
+      status: "cancelled",
+    })
+    .eq("id", journeyId)
+    .eq("user_id", userId)
+    .eq("status", "active")
     .select("*")
     .single();
 

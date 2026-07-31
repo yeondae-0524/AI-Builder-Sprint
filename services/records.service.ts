@@ -1,16 +1,192 @@
 import { supabase } from "@/lib/supabase";
+import { getRecordPhotoUrls } from "./storage.service";
 
 export type RecordVisibility =
   | "private"
   | "anonymous"
   | "nickname";
 
+export type RecordEmotion =
+  | "comfortable"
+  | "joyful"
+  | "new"
+  | "uncomfortable"
+  | "unsure";
+
 export interface CreateRecordDTO {
   missionAttemptId: string;
-  emotion: string;
+  emotion: RecordEmotion;
   content: string;
   visibility?: RecordVisibility;
   placeId?: string | null;
+}
+
+export type UpdateRecordInput = {
+  emotion?: RecordEmotion;
+  content?: string;
+  visibility?: RecordVisibility;
+  placeId?: string | null;
+};
+
+type RecordPhotoRow = {
+  id: string;
+  storage_path: string;
+  sort_order: number;
+  is_cover: boolean;
+  created_at?: string;
+};
+
+export type RecordPhotoWithUrl = RecordPhotoRow & {
+  signed_url: string | null;
+};
+
+const ALLOWED_EMOTIONS: RecordEmotion[] = [
+  "comfortable",
+  "joyful",
+  "new",
+  "uncomfortable",
+  "unsure",
+];
+
+async function getCurrentUserId(): Promise<string> {
+  const {
+    data: { user },
+    error,
+  } = await supabase.auth.getUser();
+
+  if (error) {
+    throw error;
+  }
+
+  if (!user) {
+    throw new Error("로그인이 필요합니다.");
+  }
+
+  return user.id;
+}
+
+function requireId(value: string, label: string) {
+  if (!value.trim()) {
+    throw new Error(`${label}가 필요합니다.`);
+  }
+}
+
+function validateEmotion(
+  emotion: string,
+): asserts emotion is RecordEmotion {
+  if (
+    !ALLOWED_EMOTIONS.includes(
+      emotion as RecordEmotion,
+    )
+  ) {
+    throw new Error("허용되지 않은 감정 코드입니다.");
+  }
+}
+
+function getPhotoRows(
+  value: unknown,
+): RecordPhotoRow[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.filter(
+    (photo): photo is RecordPhotoRow =>
+      typeof photo === "object" &&
+      photo !== null &&
+      "id" in photo &&
+      "storage_path" in photo &&
+      typeof photo.storage_path === "string",
+  );
+}
+
+/**
+ * record_photos.storage_path를 private Storage Signed URL로 변환한다.
+ *
+ * Signed URL 생성에 실패하더라도 기록 조회 자체는 유지하고
+ * 각 사진의 signed_url을 null로 반환한다.
+ */
+async function attachSignedPhotoUrls<
+  T extends {
+    record_photos?: unknown;
+  },
+>(
+  records: T[],
+): Promise<
+  Array<
+    Omit<T, "record_photos"> & {
+      record_photos: RecordPhotoWithUrl[];
+    }
+  >
+> {
+  const paths = Array.from(
+    new Set(
+      records.flatMap((record) =>
+        getPhotoRows(record.record_photos)
+          .map((photo) => photo.storage_path)
+          .filter((path) => path.trim().length > 0),
+      ),
+    ),
+  );
+
+  const signedUrlByPath = new Map<
+    string,
+    string
+  >();
+
+  if (paths.length > 0) {
+    try {
+      const signedItems =
+        await getRecordPhotoUrls(paths);
+
+      signedItems.forEach((item) => {
+        if (
+          item.storagePath &&
+          item.signedUrl
+        ) {
+          signedUrlByPath.set(
+            item.storagePath,
+            item.signedUrl,
+          );
+        }
+      });
+    } catch (error) {
+      console.error(
+        "기록 사진 Signed URL 생성 실패:",
+        error,
+      );
+    }
+  }
+
+  return records.map((record) => {
+    const photos = getPhotoRows(
+      record.record_photos,
+    )
+      .map((photo) => ({
+        ...photo,
+        signed_url:
+          signedUrlByPath.get(
+            photo.storage_path,
+          ) ?? null,
+      }))
+      .sort((a, b) => {
+        if (a.is_cover !== b.is_cover) {
+          return a.is_cover ? -1 : 1;
+        }
+
+        return a.sort_order - b.sort_order;
+      });
+
+    const {
+      record_photos: _recordPhotos,
+      ...rest
+    } = record;
+
+    return {
+      ...rest,
+      record_photos: photos,
+    };
+  });
 }
 
 /**
@@ -18,6 +194,7 @@ export interface CreateRecordDTO {
  *
  * - records 생성
  * - mission_attempts 완료 처리
+ * - 배지 포인트 증가
  * - Journey 목표 달성 시 completed 처리
  */
 export async function createRecord({
@@ -28,36 +205,45 @@ export async function createRecord({
   placeId = null,
 }: CreateRecordDTO) {
   try {
-    if (!missionAttemptId) {
-      throw new Error("missionAttemptId가 필요합니다.");
-    }
+    requireId(
+      missionAttemptId,
+      "missionAttemptId",
+    );
 
-    if (!emotion.trim()) {
-      throw new Error("감정을 선택해야 합니다.");
-    }
+    validateEmotion(emotion);
 
     if (!content.trim()) {
-      throw new Error("기록 내용을 입력해야 합니다.");
+      throw new Error(
+        "기록 내용을 입력해야 합니다.",
+      );
     }
 
-    const { data: recordId, error } = await supabase.rpc(
-      "complete_mission_with_record",
-      {
-        p_mission_attempt_id: missionAttemptId,
-        p_emotion: emotion.trim(),
-        p_content: content.trim(),
-        p_visibility: visibility,
-        p_place_id: placeId,
-      },
-    );
+    const { data: recordId, error } =
+      await supabase.rpc(
+        "complete_mission_with_record",
+        {
+          p_mission_attempt_id:
+            missionAttemptId,
+          p_emotion: emotion,
+          p_content: content.trim(),
+          p_visibility: visibility,
+          p_place_id: placeId,
+        },
+      );
 
     if (error) {
       throw error;
     }
 
+    if (!recordId) {
+      throw new Error(
+        "생성된 기록 ID를 확인하지 못했습니다.",
+      );
+    }
+
     return {
       success: true as const,
-      recordId: recordId as string,
+      recordId: String(recordId),
     };
   } catch (error) {
     console.error("createRecord Error:", error);
@@ -71,20 +257,11 @@ export async function createRecord({
 
 /**
  * 현재 로그인한 사용자의 기록을 최신순으로 조회한다.
+ *
+ * record_photos에는 storage_path와 signed_url이 함께 반환된다.
  */
 export async function getMyRecords() {
-  const {
-    data: { user },
-    error: userError,
-  } = await supabase.auth.getUser();
-
-  if (userError) {
-    throw userError;
-  }
-
-  if (!user) {
-    throw new Error("로그인이 필요합니다.");
-  }
+  const userId = await getCurrentUserId();
 
   const { data, error } = await supabase
     .from("records")
@@ -123,7 +300,7 @@ export async function getMyRecords() {
         road_address
       )
     `)
-    .eq("user_id", user.id)
+    .eq("user_id", userId)
     .order("recorded_at", {
       ascending: false,
     })
@@ -132,11 +309,14 @@ export async function getMyRecords() {
     });
 
   if (error) {
-    console.error("getMyRecords Error:", error);
+    console.error(
+      "getMyRecords Error:",
+      error,
+    );
     throw error;
   }
 
-  return data ?? [];
+  return attachSignedPhotoUrls(data ?? []);
 }
 
 /**
@@ -150,7 +330,9 @@ export async function getRecordsByMonth(
   month: number,
 ) {
   if (!Number.isInteger(year) || year < 2000) {
-    throw new Error("올바른 연도를 입력해야 합니다.");
+    throw new Error(
+      "올바른 연도를 입력해야 합니다.",
+    );
   }
 
   if (
@@ -158,23 +340,17 @@ export async function getRecordsByMonth(
     month < 1 ||
     month > 12
   ) {
-    throw new Error("월은 1부터 12까지 입력해야 합니다.");
+    throw new Error(
+      "월은 1부터 12까지 입력해야 합니다.",
+    );
   }
 
-  const {
-    data: { user },
-    error: userError,
-  } = await supabase.auth.getUser();
+  const userId = await getCurrentUserId();
 
-  if (userError) {
-    throw userError;
-  }
-
-  if (!user) {
-    throw new Error("로그인이 필요합니다.");
-  }
-
-  const startMonth = String(month).padStart(2, "0");
+  const startMonth = String(month).padStart(
+    2,
+    "0",
+  );
   const startDate = `${year}-${startMonth}-01`;
 
   const nextMonthDate = new Date(
@@ -215,10 +391,13 @@ export async function getRecordsByMonth(
         name
       )
     `)
-    .eq("user_id", user.id)
+    .eq("user_id", userId)
     .gte("recorded_at", startDate)
     .lt("recorded_at", endDate)
     .order("recorded_at", {
+      ascending: true,
+    })
+    .order("created_at", {
       ascending: true,
     });
 
@@ -227,11 +406,10 @@ export async function getRecordsByMonth(
       "getRecordsByMonth Error:",
       error,
     );
-
     throw error;
   }
 
-  return data ?? [];
+  return attachSignedPhotoUrls(data ?? []);
 }
 
 /**
@@ -240,22 +418,9 @@ export async function getRecordsByMonth(
 export async function getRecordById(
   recordId: string,
 ) {
-  if (!recordId.trim()) {
-    throw new Error("recordId가 필요합니다.");
-  }
+  requireId(recordId, "recordId");
 
-  const {
-    data: { user },
-    error: userError,
-  } = await supabase.auth.getUser();
-
-  if (userError) {
-    throw userError;
-  }
-
-  if (!user) {
-    throw new Error("로그인이 필요합니다.");
-  }
+  const userId = await getCurrentUserId();
 
   const { data, error } = await supabase
     .from("records")
@@ -309,11 +474,14 @@ export async function getRecordById(
       )
     `)
     .eq("id", recordId)
-    .eq("user_id", user.id)
+    .eq("user_id", userId)
     .maybeSingle();
 
   if (error) {
-    console.error("getRecordById Error:", error);
+    console.error(
+      "getRecordById Error:",
+      error,
+    );
     throw error;
   }
 
@@ -323,7 +491,10 @@ export async function getRecordById(
     );
   }
 
-  return data;
+  const [recordWithPhotoUrls] =
+    await attachSignedPhotoUrls([data]);
+
+  return recordWithPhotoUrls;
 }
 
 /**
@@ -332,22 +503,9 @@ export async function getRecordById(
 export async function getRecordsByJourney(
   journeyId: string,
 ) {
-  if (!journeyId.trim()) {
-    throw new Error("journeyId가 필요합니다.");
-  }
+  requireId(journeyId, "journeyId");
 
-  const {
-    data: { user },
-    error: userError,
-  } = await supabase.auth.getUser();
-
-  if (userError) {
-    throw userError;
-  }
-
-  if (!user) {
-    throw new Error("로그인이 필요합니다.");
-  }
+  const userId = await getCurrentUserId();
 
   const { data, error } = await supabase
     .from("records")
@@ -383,7 +541,7 @@ export async function getRecordsByJourney(
         category_name
       )
     `)
-    .eq("user_id", user.id)
+    .eq("user_id", userId)
     .eq("journey_id", journeyId)
     .order("recorded_at", {
       ascending: true,
@@ -400,15 +558,8 @@ export async function getRecordsByJourney(
     throw error;
   }
 
-  return data ?? [];
+  return attachSignedPhotoUrls(data ?? []);
 }
-
-export type UpdateRecordInput = {
-  emotion?: "comfortable" | "joyful" | "new" | "uncomfortable" | "unsure";
-  content?: string;
-  visibility?: "private" | "anonymous" | "nickname";
-  placeId?: string | null;
-};
 
 /**
  * 본인의 기록을 수정한다.
@@ -417,34 +568,27 @@ export async function updateRecord(
   recordId: string,
   input: UpdateRecordInput,
 ) {
-  if (!recordId.trim()) {
-    throw new Error("recordId가 필요합니다.");
-  }
+  requireId(recordId, "recordId");
 
-  const {
-    data: { user },
-    error: userError,
-  } = await supabase.auth.getUser();
-
-  if (userError) {
-    throw userError;
-  }
-
-  if (!user) {
-    throw new Error("로그인이 필요합니다.");
-  }
+  const userId = await getCurrentUserId();
 
   if (
     input.content !== undefined &&
     !input.content.trim()
   ) {
-    throw new Error("기록 내용은 비워둘 수 없습니다.");
+    throw new Error(
+      "기록 내용은 비워둘 수 없습니다.",
+    );
+  }
+
+  if (input.emotion !== undefined) {
+    validateEmotion(input.emotion);
   }
 
   const updateData: {
-    emotion?: UpdateRecordInput["emotion"];
+    emotion?: RecordEmotion;
     content?: string;
-    visibility?: UpdateRecordInput["visibility"];
+    visibility?: RecordVisibility;
     place_id?: string | null;
     updated_at: string;
   } = {
@@ -456,11 +600,13 @@ export async function updateRecord(
   }
 
   if (input.content !== undefined) {
-    updateData.content = input.content.trim();
+    updateData.content =
+      input.content.trim();
   }
 
   if (input.visibility !== undefined) {
-    updateData.visibility = input.visibility;
+    updateData.visibility =
+      input.visibility;
   }
 
   if (input.placeId !== undefined) {
@@ -471,7 +617,7 @@ export async function updateRecord(
     .from("records")
     .update(updateData)
     .eq("id", recordId)
-    .eq("user_id", user.id)
+    .eq("user_id", userId)
     .select(`
       id,
       journey_id,
@@ -487,7 +633,10 @@ export async function updateRecord(
     .maybeSingle();
 
   if (error) {
-    console.error("updateRecord Error:", error);
+    console.error(
+      "updateRecord Error:",
+      error,
+    );
     throw error;
   }
 
@@ -506,22 +655,9 @@ export async function updateRecord(
 export async function deleteRecord(
   recordId: string,
 ) {
-  if (!recordId.trim()) {
-    throw new Error("recordId가 필요합니다.");
-  }
+  requireId(recordId, "recordId");
 
-  const {
-    data: { user },
-    error: userError,
-  } = await supabase.auth.getUser();
-
-  if (userError) {
-    throw userError;
-  }
-
-  if (!user) {
-    throw new Error("로그인이 필요합니다.");
-  }
+  const userId = await getCurrentUserId();
 
   // 삭제 전에 본인 기록인지 확인하고 사진 경로 조회
   const { data: record, error: recordError } =
@@ -534,7 +670,7 @@ export async function deleteRecord(
         )
       `)
       .eq("id", recordId)
-      .eq("user_id", user.id)
+      .eq("user_id", userId)
       .maybeSingle();
 
   if (recordError) {
@@ -558,10 +694,10 @@ export async function deleteRecord(
     .filter(
       (path): path is string =>
         typeof path === "string" &&
-        path.length > 0,
+        path.trim().length > 0,
     );
 
-  // Storage 정책상 records 행이 존재할 때 사진부터 삭제해야 함
+  // Storage 정책상 records 행이 존재할 때 사진부터 삭제해야 한다.
   if (storagePaths.length > 0) {
     const { error: storageError } =
       await supabase.storage
@@ -577,13 +713,13 @@ export async function deleteRecord(
     }
   }
 
-  // 기록 삭제 시 record_photos, likes, saves,
-  // essay_items는 CASCADE로 함께 삭제됨
-  const { error: deleteError } = await supabase
-    .from("records")
-    .delete()
-    .eq("id", recordId)
-    .eq("user_id", user.id);
+  // records 삭제 시 연결 데이터는 DB의 FK 설정에 따라 함께 삭제된다.
+  const { error: deleteError } =
+    await supabase
+      .from("records")
+      .delete()
+      .eq("id", recordId)
+      .eq("user_id", userId);
 
   if (deleteError) {
     console.error(
