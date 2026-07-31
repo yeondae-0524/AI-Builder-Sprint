@@ -378,7 +378,7 @@ export default function CalendarScreen() {
               );
             } else {
               (signedPhotos ?? []).forEach((photo) => {
-                if (photo.signedUrl) {
+                if (photo.path && photo.signedUrl) {
                   signedUrlByPath.set(
                     photo.path,
                     photo.signedUrl,
