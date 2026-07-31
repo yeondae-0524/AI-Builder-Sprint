@@ -22,8 +22,10 @@ import {
 } from "react-native";
 import { KakaoMapView } from "../../components/KakaoMapView";
 import { useMission } from "../../contexts/mission-context";
+import { supabase } from "../../lib/supabase";
 import {
   createDiscoverPost,
+  deleteDiscoverPost,
   generateMissionFromPost,
   getDiscoverPhotoUrl,
   getNearbyDiscoverPosts,
@@ -64,8 +66,8 @@ const EMOTIONS: Array<{ label: string; value: EmotionValue; emoji: string }> = [
 
 // 백엔드 연결 실패 시 대체용 (기존 목업)
 const MOCK_BUBBLES = [
-  { id: "mock-1", place: "연남동 카페 봄날", lat: 35.1795543, lng: 129.0806416, mission: "조용한 카페에서 30분 독서", time: "2일 전", nick: "소리의 탐험가", emotion: "차분함", note: "창가 자리에서 책 읽으니 딴 세상 같았어요.", likes: 12, category: "휴식", photo: "https://images.unsplash.com/photo-1493857671505-72967e2e2760?w=200&h=200&fit=crop" },
-  { id: "mock-2", place: "경의선 숲길", lat: 35.1825543, lng: 129.0756416, mission: "공원 산책하며 계절 사진 찍기", time: "1일 전", nick: "산책러", emotion: "상쾌함", note: "노을 질 때가 진짜 예뻐요.", likes: 8, category: "산책", photo: "https://images.unsplash.com/photo-1441974231531-c6227db76b6e?w=200&h=200&fit=crop" },
+  { id: "mock-1", user_id: null, place: "연남동 카페 봄날", lat: 35.1795543, lng: 129.0806416, mission: "조용한 카페에서 30분 독서", time: "2일 전", nick: "소리의 탐험가", emotion: "차분함", note: "창가 자리에서 책 읽으니 딴 세상 같았어요.", likes: 12, category: "휴식", photo: "https://images.unsplash.com/photo-1493857671505-72967e2e2760?w=200&h=200&fit=crop" },
+  { id: "mock-2", user_id: null, place: "경의선 숲길", lat: 35.1825543, lng: 129.0756416, mission: "공원 산책하며 계절 사진 찍기", time: "1일 전", nick: "산책러", emotion: "상쾌함", note: "노을 질 때가 진짜 예뻐요.", likes: 8, category: "산책", photo: "https://images.unsplash.com/photo-1441974231531-c6227db76b6e?w=200&h=200&fit=crop" },
 ];
 
 function haversineM(lat1: number, lng1: number, lat2: number, lng2: number) {
@@ -91,6 +93,7 @@ async function buildBubbleList(posts: any[]) {
       }
       return {
         id: p.id,
+        user_id: p.user_id,
         place: p.place_name,
         lat: p.lat,
         lng: p.lng,
@@ -121,6 +124,8 @@ export default function DiscoverScreen() {
   const [userLocation, setUserLocation] = useState<{ lat: number; lng: number } | null>(null);
   const [mapCenter, setMapCenter] = useState(DEFAULT_CENTER);
   const [tryingMission, setTryingMission] = useState(false);
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   const [pickerVisible, setPickerVisible] = useState(false);
   const [pickedLocation, setPickedLocation] = useState<{ lat: number; lng: number } | null>(null);
@@ -154,6 +159,11 @@ export default function DiscoverScreen() {
 
   useEffect(() => {
     const init = async () => {
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      setCurrentUserId(user?.id ?? null);
+
       let lat = DEFAULT_CENTER.lat;
       let lng = DEFAULT_CENTER.lng;
 
@@ -282,6 +292,32 @@ export default function DiscoverScreen() {
     } finally {
       setTryingMission(false);
     }
+  };
+
+  const handleDeletePost = () => {
+    if (!sheetBubble) return;
+    Alert.alert("기록을 삭제할까요?", "삭제하면 되돌릴 수 없어요.", [
+      { text: "취소", style: "cancel" },
+      {
+        text: "삭제",
+        style: "destructive",
+        onPress: async () => {
+          setDeleting(true);
+          try {
+            await deleteDiscoverPost(sheetBubble.id);
+            closeSheet();
+            if (userLocation) {
+              const posts = await getNearbyDiscoverPosts(userLocation.lat, userLocation.lng, 5);
+              setBubbles(posts.length > 0 ? await buildBubbleList(posts) : MOCK_BUBBLES);
+            }
+          } catch (error) {
+            Alert.alert("삭제 실패", error instanceof Error ? error.message : "");
+          } finally {
+            setDeleting(false);
+          }
+        },
+      },
+    ]);
   };
 
   const handleSelectSearchResult = (bubble) => {
@@ -534,9 +570,21 @@ export default function DiscoverScreen() {
                   {tryingMission ? "미션 만드는 중..." : "나도 해볼래요"}
                 </Text>
               </Pressable>
-              <Pressable style={styles.secondaryBtn}>
-                <Text style={{ color: T1, fontSize: 13 }}>저장</Text>
-              </Pressable>
+              {sheetBubble.real && sheetBubble.user_id === currentUserId ? (
+                <Pressable
+                  style={[styles.deleteBtn, deleting && { opacity: 0.6 }]}
+                  onPress={handleDeletePost}
+                  disabled={deleting}
+                >
+                  <Text style={{ color: "#EF4444", fontSize: 13, fontWeight: "700" }}>
+                    {deleting ? "삭제 중..." : "삭제"}
+                  </Text>
+                </Pressable>
+              ) : (
+                <Pressable style={styles.secondaryBtn}>
+                  <Text style={{ color: T1, fontSize: 13 }}>저장</Text>
+                </Pressable>
+              )}
             </View>
           </View>
         </Animated.View>
@@ -741,7 +789,7 @@ const styles = StyleSheet.create({
   searchResultPlace: { fontSize: 13, fontWeight: "600", color: T0 },
   searchResultMission: { fontSize: 11, color: T1, marginTop: 2 },
   searchEmptyText: { padding: 14, fontSize: 12, color: T2, textAlign: "center" },
-  sheet: { position: "absolute", bottom: 0, left: 0, right: 0, backgroundColor: WH, borderTopLeftRadius: 24, borderTopRightRadius: 24, paddingBottom: 100 },
+  sheet: { position: "absolute", bottom: 0, left: 0, right: 0, backgroundColor: WH, borderTopLeftRadius: 24, borderTopRightRadius: 24, paddingBottom: 100, zIndex: 30, elevation: 30 },
   dragArea: { height: 40, alignItems: "center", justifyContent: "center" },
   handle: { width: 40, height: 4, borderRadius: 2, backgroundColor: T3 },
   sheetPhoto: { width: "100%", height: 176, borderRadius: 14, backgroundColor: T3, marginBottom: 14 },
@@ -752,8 +800,9 @@ const styles = StyleSheet.create({
   note: { fontSize: 13, color: T1, lineHeight: 20, marginBottom: 16 },
   primaryBtn: { flex: 1, backgroundColor: BL, borderRadius: 12, paddingVertical: 12, alignItems: "center" },
   secondaryBtn: { backgroundColor: "#F3F4F6", borderRadius: 12, paddingVertical: 12, paddingHorizontal: 14, alignItems: "center" },
+  deleteBtn: { backgroundColor: "#FEF2F2", borderRadius: 12, paddingVertical: 12, paddingHorizontal: 14, alignItems: "center" },
 
-  fabWrap: { position: "absolute", right: 26, bottom: 110, width: 60, height: 60, alignItems: "center", justifyContent: "center", zIndex: 20 },
+  fabWrap: { position: "absolute", right: 26, bottom: 110, width: 60, height: 60, alignItems: "center", justifyContent: "center", zIndex: 10 },
   fabGlow: { position: "absolute", width: 60, height: 60, borderRadius: 30, backgroundColor: PINK },
   fabBtn: { width: 60, height: 60, borderRadius: 30, backgroundColor: PINK, alignItems: "center", justifyContent: "center", borderWidth: 2, borderColor: WH, shadowColor: "#000", shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.25, shadowRadius: 5, elevation: 6 },
 
