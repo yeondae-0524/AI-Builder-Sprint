@@ -6095,6 +6095,27 @@ export default function HomeScreen() {
               mimeType: photo.mimeType,
             })),
           });
+
+          // 발견 탭에서 미션 기록임을 구분하고, 내용 일부가 아니라
+          // 실제 미션명을 제목으로 표시할 수 있도록 메타데이터를 연결한다.
+          const { error: discoverMetadataError } =
+            await retrySupabaseResultOnJwt(() =>
+              supabase.rpc("set_latest_discover_post_metadata", {
+                p_place_name: savedLocationName,
+                p_content: recordContent.trim(),
+                p_title: recordMission.title,
+                p_source_kind: "mission",
+                p_source_mission_id: isUuid(recordMission.id)
+                  ? recordMission.id
+                  : null,
+              }),
+            );
+
+          if (discoverMetadataError) {
+            throw new Error(
+              `발견 기록의 미션 제목을 저장하지 못했습니다: ${discoverMetadataError.message}`,
+            );
+          }
         } catch (discoverError) {
           console.error(
             "발견 탭 익명 공유 실패:",

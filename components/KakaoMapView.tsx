@@ -35,6 +35,8 @@ type Props = {
   markers?: MapMarker[];
   userLocation?: UserLocation;
   pickedLocation?: PickedLocation;
+  /** true면 전달된 마커가 모두 보이도록 지도 범위를 자동 조정합니다. */
+  fitAllMarkers?: boolean;
   selectedMarkerId?: string | number | null;
   /** 양수면 선택 위치가 화면 위쪽으로, 음수면 아래쪽으로 이동합니다. */
   focusOffsetY?: number;
@@ -42,6 +44,7 @@ type Props = {
   onMarkerClose?: () => void;
   onMarkerAction?: (id: string | number) => void;
   onMapPress?: (lat: number, lng: number) => void;
+  onMapIdle?: (lat: number, lng: number, level: number) => void;
   style?: any;
 };
 
@@ -51,12 +54,14 @@ export function KakaoMapView({
   markers = [],
   userLocation,
   pickedLocation,
+  fitAllMarkers = false,
   selectedMarkerId = null,
   focusOffsetY = 0,
   onMarkerPress,
   onMarkerClose,
   onMarkerAction,
   onMapPress,
+  onMapIdle,
   style,
 }: Props) {
   const webViewRef = useRef<WebView>(null);
@@ -658,6 +663,37 @@ export function KakaoMapView({
                 };
               });
 
+              if (${fitAllMarkers ? "true" : "false"} && markers.length > 0) {
+                const bounds = new kakao.maps.LatLngBounds();
+                let validMarkerCount = 0;
+
+                markers.forEach(function (marker) {
+                  const lat = Number(marker.lat);
+                  const lng = Number(marker.lng);
+                  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+                  bounds.extend(new kakao.maps.LatLng(lat, lng));
+                  validMarkerCount += 1;
+                });
+
+                if (validMarkerCount === 1) {
+                  const onlyMarker = markers.find(function (marker) {
+                    return Number.isFinite(Number(marker.lat)) &&
+                      Number.isFinite(Number(marker.lng));
+                  });
+                  if (onlyMarker) {
+                    map.setCenter(
+                      new kakao.maps.LatLng(
+                        Number(onlyMarker.lat),
+                        Number(onlyMarker.lng)
+                      )
+                    );
+                    map.setLevel(4);
+                  }
+                } else if (validMarkerCount > 1) {
+                  map.setBounds(bounds, 64, 34, 90, 34);
+                }
+              }
+
               kakao.maps.event.addListener(map, 'click', function (mouseEvent) {
                 const latlng = mouseEvent.latLng;
                 post({
@@ -665,6 +701,26 @@ export function KakaoMapView({
                   lat: latlng.getLat(),
                   lng: latlng.getLng(),
                 });
+              });
+
+              // 사용자가 지도 이동·확대·축소를 마친 뒤 현재 중심을
+              // React Native로 전달합니다. 발견 탭은 이 좌표를 기준으로
+              // 주변 기록을 다시 조회합니다.
+              let idleMessageTimer = null;
+              kakao.maps.event.addListener(map, 'idle', function () {
+                if (idleMessageTimer) {
+                  clearTimeout(idleMessageTimer);
+                }
+
+                idleMessageTimer = setTimeout(function () {
+                  const center = map.getCenter();
+                  post({
+                    type: 'mapIdle',
+                    lat: center.getLat(),
+                    lng: center.getLng(),
+                    level: map.getLevel(),
+                  });
+                }, 120);
               });
 
               errorElement.style.display = 'none';
@@ -675,7 +731,7 @@ export function KakaoMapView({
       </body>
     </html>
   `,
-    [markersJson, userLocationJson, pickedLocationJson],
+    [markersJson, userLocationJson, pickedLocationJson, fitAllMarkers],
   );
 
   const webViewSource = useMemo(() => ({ html }), [html]);
@@ -716,6 +772,9 @@ export function KakaoMapView({
           }
           if (data.type === "mapClick" && onMapPress) {
             onMapPress(data.lat, data.lng);
+          }
+          if (data.type === "mapIdle" && onMapIdle) {
+            onMapIdle(data.lat, data.lng, data.level);
           }
         } catch {
           // 지도 내부의 알 수 없는 메시지는 무시합니다.

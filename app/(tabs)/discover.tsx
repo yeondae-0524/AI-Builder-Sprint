@@ -51,6 +51,8 @@ const SCREEN_HEIGHT = Dimensions.get("window").height;
 const SHEET_CLOSE_POSITION = SCREEN_HEIGHT * 0.6;
 const MAX_PHOTOS = 5;
 const SEARCH_RESULT_RADIUS_KM = 0.5;
+const MAP_AUTO_SEARCH_RADIUS_KM = 5;
+const MAP_AUTO_SEARCH_MIN_MOVE_M = 80;
 const KAKAO_PLACE_CATEGORY_CODES = [
   "MT1",
   "CS2",
@@ -76,7 +78,7 @@ const KAKAO_PLACE_CANDIDATE_LIMIT = 5;
 
 const DEFAULT_CENTER = { lat: 35.1795543, lng: 129.0756416 };
 
-const FILTERS = ["방 안 기록", "가까운 기록", "최근 기록", "내 취향", "새로운 분야", "산책"];
+const FILTERS = ["방 안 기록", "내 기록", "가까운 기록", "최근 기록", "내 취향", "새로운 분야", "산책"];
 
 const CATEGORIES = ["음식", "카페 및 디저트", "산책", "배움", "감상", "활동", "휴식", "기타"];
 
@@ -140,11 +142,31 @@ type HomeRoomRecord = {
   source: "discover" | "mission";
   userId: string | null;
   isMine: boolean;
+  title: string;
   content: string;
   emotion: string;
   category: string;
   visibility: string;
   createdAt: string;
+  likes: number;
+  sourceKind: "independent" | "mission";
+};
+
+type MyRecordItem = {
+  key: string;
+  id: string;
+  source: "discover" | "mission";
+  discoverPostId: string | null;
+  title: string;
+  content: string;
+  placeName: string;
+  emotion: string;
+  category: string;
+  visibility: string;
+  createdAt: string;
+  likes: number;
+  lat: number | null;
+  lng: number | null;
 };
 
 type DiscoverPostPhoto = {
@@ -154,11 +176,15 @@ type DiscoverPostPhoto = {
 
 type DiscoverBubble = {
   id: string;
+  discoverPostId?: string | null;
+  canLike?: boolean;
+  canDelete?: boolean;
   user_id: string | null;
   place: string;
   lat: number;
   lng: number;
   mission: string;
+  sourceKind: "independent" | "mission";
   time: string;
   nick: string;
   emotion: string;
@@ -188,8 +214,8 @@ const EMOTION_LABEL: Record<string, string> = {
 };
 
 const MOCK_BUBBLES: DiscoverBubble[] = [
-  { id: "mock-1", user_id: null, place: "연남동 카페 봄날", lat: 35.1795543, lng: 129.0806416, mission: "조용한 카페에서 30분 독서", time: "2일 전", nick: "소리의 탐험가", emotion: "차분함", note: "창가 자리에서 책 읽으니 딴 세상 같았어요.", likes: 12, category: "휴식", photo: "https://images.unsplash.com/photo-1493857671505-72967e2e2760?w=200&h=200&fit=crop" },
-  { id: "mock-2", user_id: null, place: "경의선 숲길", lat: 35.1825543, lng: 129.0756416, mission: "공원 산책하며 계절 사진 찍기", time: "1일 전", nick: "산책러", emotion: "상쾌함", note: "노을 질 때가 진짜 예뻐요.", likes: 8, category: "산책", photo: "https://images.unsplash.com/photo-1441974231531-c6227db76b6e?w=200&h=200&fit=crop" },
+  { id: "mock-1", user_id: null, place: "연남동 카페 봄날", lat: 35.1795543, lng: 129.0806416, mission: "조용한 카페에서 30분 독서", sourceKind: "mission", time: "2일 전", nick: "소리의 탐험가", emotion: "차분함", note: "창가 자리에서 책 읽으니 딴 세상 같았어요.", likes: 12, category: "휴식", photo: "https://images.unsplash.com/photo-1493857671505-72967e2e2760?w=200&h=200&fit=crop" },
+  { id: "mock-2", user_id: null, place: "경의선 숲길", lat: 35.1825543, lng: 129.0756416, mission: "공원 산책하며 계절 사진 찍기", sourceKind: "mission", time: "1일 전", nick: "산책러", emotion: "상쾌함", note: "노을 질 때가 진짜 예뻐요.", likes: 8, category: "산책", photo: "https://images.unsplash.com/photo-1441974231531-c6227db76b6e?w=200&h=200&fit=crop" },
 ];
 
 function haversineM(lat1: number, lng1: number, lat2: number, lng2: number) {
@@ -436,6 +462,33 @@ async function buildBubbleList(posts: any[]): Promise<DiscoverBubble[]> {
     );
   });
 
+  const postIds = mapPosts
+    .map((post) => String(post?.id ?? ""))
+    .filter(Boolean);
+  const metadataById = new Map<
+    string,
+    { title: string; sourceKind: "independent" | "mission" }
+  >();
+
+  if (postIds.length > 0) {
+    const { data: metadataRows, error: metadataError } = await supabase.rpc(
+      "get_discover_post_display_metadata",
+      { p_post_ids: postIds },
+    );
+
+    if (metadataError) {
+      console.log("발견 기록 제목 조회 실패:", metadataError.message);
+    } else {
+      for (const row of metadataRows ?? []) {
+        metadataById.set(String(row.id), {
+          title: String(row.title ?? "").trim(),
+          sourceKind:
+            row.source_kind === "mission" ? "mission" : "independent",
+        });
+      }
+    }
+  }
+
   return Promise.all(
     mapPosts.map(async (p) => {
       const photos: DiscoverPostPhoto[] = Array.isArray(p.photos)
@@ -458,17 +511,32 @@ async function buildBubbleList(posts: any[]): Promise<DiscoverBubble[]> {
         photoUrl = undefined;
       }
 
+      const id = String(p.id);
+      const content = String(p.content ?? "");
+      const metadata = metadataById.get(id);
+      const title =
+        metadata?.title ||
+        String(p.title ?? "").trim() ||
+        content.slice(0, 40) ||
+        "기록";
+
       return {
-        id: String(p.id),
+        id,
+        discoverPostId: id,
+        canLike: true,
+        canDelete: true,
         user_id: p.user_id ? String(p.user_id) : null,
         place: String(p.place_name ?? "장소"),
         lat: Number(p.lat),
         lng: Number(p.lng),
-        mission: String(p.content ?? "").slice(0, 20),
+        mission: title,
+        sourceKind:
+          metadata?.sourceKind ||
+          (p.source_kind === "mission" ? "mission" : "independent"),
         time: new Date(p.created_at).toLocaleDateString("ko-KR"),
         nick: p.visibility === "anonymous" ? "익명" : "작성자",
         emotion: EMOTION_LABEL[p.emotion] ?? String(p.emotion ?? ""),
-        note: String(p.content ?? ""),
+        note: content,
         likes: Number(p.likes_count ?? 0),
         category: String(p.category ?? "기타"),
         photo: photoUrl,
@@ -477,7 +545,6 @@ async function buildBubbleList(posts: any[]): Promise<DiscoverBubble[]> {
     }),
   );
 }
-
 
 function isFiniteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
@@ -659,6 +726,59 @@ function normalizeInterests(value: unknown): string[] {
   return [];
 }
 
+function isArchiveFilter(value: string) {
+  return value === "방 안 기록";
+}
+
+function isPersonalMapFilter(value: string) {
+  return value === "내 기록";
+}
+
+async function getMissionTitlesByAttemptIds(attemptIds: string[]) {
+  const result = new Map<string, string>();
+  const uniqueAttemptIds = Array.from(new Set(attemptIds.filter(Boolean)));
+
+  if (uniqueAttemptIds.length === 0) return result;
+
+  const { data: attempts, error: attemptsError } = await supabase
+    .from("mission_attempts")
+    .select("id, mission_id")
+    .in("id", uniqueAttemptIds);
+
+  if (attemptsError) {
+    console.log("미션 연결 조회 실패:", attemptsError.message);
+    return result;
+  }
+
+  const missionIds = Array.from(
+    new Set((attempts ?? []).map((row) => String(row.mission_id)).filter(Boolean)),
+  );
+  if (missionIds.length === 0) return result;
+
+  const { data: missions, error: missionsError } = await supabase
+    .from("missions")
+    .select("id, title")
+    .in("id", missionIds);
+
+  if (missionsError) {
+    console.log("미션 제목 조회 실패:", missionsError.message);
+    return result;
+  }
+
+  const titleByMissionId = new Map(
+    (missions ?? []).map((row) => [String(row.id), String(row.title ?? "미션 기록")]),
+  );
+
+  for (const attempt of attempts ?? []) {
+    result.set(
+      String(attempt.id),
+      titleByMissionId.get(String(attempt.mission_id)) ?? "미션 기록",
+    );
+  }
+
+  return result;
+}
+
 export default function DiscoverScreen() {
   const router = useRouter();
   const { shareMissionToHome } = useMission();
@@ -667,12 +787,15 @@ export default function DiscoverScreen() {
   const [bubbles, setBubbles] = useState<DiscoverBubble[]>(MOCK_BUBBLES);
   const [activeBubble, setActiveBubble] = useState<DiscoverBubble | null>(null);
   const [sheetBubble, setSheetBubble] = useState<DiscoverBubble | null>(null);
-  const [liked, setLiked] = useState<string[]>([]);
+  const [likedPostIds, setLikedPostIds] = useState<string[]>([]);
+  const [likeUpdatingIds, setLikeUpdatingIds] = useState<string[]>([]);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState<KakaoPlace[]>([]);
   const [searching, setSearching] = useState(false);
   const [userLocation, setUserLocation] = useState<{ lat: number; lng: number } | null>(null);
   const [mapCenter, setMapCenter] = useState(DEFAULT_CENTER);
+  const [mapRecordsLoading, setMapRecordsLoading] = useState(false);
+  const [mapRefreshAvailable, setMapRefreshAvailable] = useState(false);
   const [tryingMission, setTryingMission] = useState(false);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
@@ -687,12 +810,18 @@ export default function DiscoverScreen() {
   const [placeCandidates, setPlaceCandidates] = useState<PlaceCandidate[]>([]);
   const [selectedPlace, setSelectedPlace] = useState<PlaceCandidate | null>(null);
   const [placesLoading, setPlacesLoading] = useState(false);
+  const [pickerPlaceQuery, setPickerPlaceQuery] = useState("");
+  const [pickerPlaceSearchResults, setPickerPlaceSearchResults] = useState<PlaceCandidate[]>([]);
+  const [pickerPlaceSearching, setPickerPlaceSearching] = useState(false);
   const [sharedHomeRecords, setSharedHomeRecords] = useState<HomeRoomRecord[]>([]);
   const [myHomeRecords, setMyHomeRecords] = useState<HomeRoomRecord[]>([]);
   const [homeArchiveTab, setHomeArchiveTab] = useState<HomeArchiveTab>("shared");
   const [homeRecordsLoading, setHomeRecordsLoading] = useState(false);
+  const [myRecords, setMyRecords] = useState<MyRecordItem[]>([]);
+  const [myRecordsLoading, setMyRecordsLoading] = useState(false);
 
   const [registerVisible, setRegisterVisible] = useState(false);
+  const [recordTitle, setRecordTitle] = useState("");
   const [placeName, setPlaceName] = useState("");
   const [category, setCategory] = useState("");
   const [content, setContent] = useState("");
@@ -704,7 +833,20 @@ export default function DiscoverScreen() {
   const sheetTranslateY = useRef(new Animated.Value(SHEET_CLOSE_POSITION)).current;
   const dragStart = useRef(0);
   const searchDebounce = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pickerPlaceSearchDebounce = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const mapSearchSequence = useRef(0);
+  const mapCenterRef = useRef<Coordinate>(DEFAULT_CENTER);
+  const lastMapSearchCenterRef = useRef<Coordinate | null>(null);
+  const activeFilterRef = useRef(activeFilter);
   const placeSearchSequence = useRef(0);
+
+  useEffect(() => {
+    mapCenterRef.current = mapCenter;
+  }, [mapCenter]);
+
+  useEffect(() => {
+    activeFilterRef.current = activeFilter;
+  }, [activeFilter]);
 
   const glowAnim = useRef(new Animated.Value(0)).current;
   useEffect(() => {
@@ -721,6 +863,20 @@ export default function DiscoverScreen() {
   const glowOpacity = glowAnim.interpolate({ inputRange: [0, 1], outputRange: [0.55, 0] });
   const btnScale = glowAnim.interpolate({ inputRange: [0, 1], outputRange: [1, 1.08] });
 
+  const loadLikedPostIds = useCallback(async (userId: string) => {
+    const { data, error } = await supabase
+      .from("discover_post_likes")
+      .select("post_id")
+      .eq("user_id", userId);
+
+    if (error) {
+      console.log("좋아요 상태 조회 실패:", error.message);
+      return;
+    }
+
+    setLikedPostIds((data ?? []).map((row) => String(row.post_id)));
+  }, []);
+
   const loadHomeRecords = useCallback(async (userId: string) => {
     setHomeRecordsLoading(true);
 
@@ -730,7 +886,7 @@ export default function DiscoverScreen() {
         supabase
           .from("records")
           .select(
-            "id, content, emotion, visibility, recorded_at, created_at, location_type, location_name",
+            "id, mission_attempt_id, content, emotion, visibility, recorded_at, created_at, location_type, location_name",
           )
           .eq("user_id", userId)
           .eq("location_type", "home")
@@ -748,7 +904,7 @@ export default function DiscoverScreen() {
         const fallbackResult = await supabase
           .from("discover_posts")
           .select(
-            "id, user_id, content, emotion, category, visibility, created_at, place_name",
+            "id, user_id, title, source_kind, content, emotion, category, visibility, likes_count, created_at, place_name",
           )
           .eq("place_name", "내 방")
           .or(`visibility.eq.anonymous,user_id.eq.${userId}`)
@@ -769,38 +925,54 @@ export default function DiscoverScreen() {
         console.log("내 방 미션 기록 조회 실패:", missionResult.error.message);
       }
 
+      const missionTitleByAttemptId = await getMissionTitlesByAttemptIds(
+        (missionResult.data ?? [])
+          .map((row) => String(row.mission_attempt_id ?? ""))
+          .filter(Boolean),
+      );
+
       const discoverRecords: HomeRoomRecord[] = discoverRows.map((row) => {
         const ownerId = row.user_id ? String(row.user_id) : null;
+        const content = String(row.content ?? "");
 
         return {
           id: String(row.id),
           source: "discover",
           userId: ownerId,
           isMine: ownerId === userId,
-          content: String(row.content ?? ""),
+          title: String(row.title ?? "").trim() || content.slice(0, 40) || "방 안 기록",
+          content,
           emotion:
             EMOTION_LABEL[String(row.emotion ?? "")] ??
             String(row.emotion ?? ""),
           category: String(row.category ?? "기타"),
           visibility: String(row.visibility ?? "private"),
           createdAt: String(row.created_at ?? ""),
+          likes: Number(row.likes_count ?? 0),
+          sourceKind: row.source_kind === "mission" ? "mission" : "independent",
         };
       });
 
       const missionRecords: HomeRoomRecord[] = (missionResult.data ?? []).map(
-        (row) => ({
-          id: String(row.id),
-          source: "mission",
-          userId,
-          isMine: true,
-          content: String(row.content ?? ""),
-          emotion:
-            EMOTION_LABEL[String(row.emotion ?? "")] ??
-            String(row.emotion ?? ""),
-          category: "미션 기록",
-          visibility: String(row.visibility ?? "private"),
-          createdAt: String(row.recorded_at ?? row.created_at ?? ""),
-        }),
+        (row) => {
+          const attemptId = String(row.mission_attempt_id ?? "");
+          return {
+            id: String(row.id),
+            source: "mission",
+            userId,
+            isMine: true,
+            title: missionTitleByAttemptId.get(attemptId) ?? "미션 기록",
+            content: String(row.content ?? ""),
+            emotion:
+              EMOTION_LABEL[String(row.emotion ?? "")] ??
+              String(row.emotion ?? ""),
+            category: "미션 기록",
+            visibility: String(row.visibility ?? "private"),
+            createdAt: String(row.recorded_at ?? row.created_at ?? ""),
+            likes: 0,
+            sourceKind: "mission",
+          };
+        },
       );
 
       const byNewest = (a: HomeRoomRecord, b: HomeRoomRecord) =>
@@ -822,6 +994,106 @@ export default function DiscoverScreen() {
     }
   }, []);
 
+  const loadMyRecords = useCallback(async (userId: string) => {
+    setMyRecordsLoading(true);
+
+    try {
+      const [discoverResult, recordsResult] = await Promise.all([
+        supabase
+          .from("discover_posts")
+          .select(
+            "id, title, source_kind, content, emotion, category, visibility, likes_count, created_at, place_name, lat, lng",
+          )
+          .eq("user_id", userId)
+          .order("created_at", { ascending: false }),
+        supabase
+          .from("records")
+          .select(
+            "id, mission_attempt_id, content, emotion, visibility, recorded_at, created_at, location_name, location_type, location_latitude, location_longitude",
+          )
+          .eq("user_id", userId)
+          .order("recorded_at", { ascending: false }),
+      ]);
+
+      if (discoverResult.error) {
+        console.log("내 발견 기록 조회 실패:", discoverResult.error.message);
+      }
+      if (recordsResult.error) {
+        console.log("내 미션 기록 조회 실패:", recordsResult.error.message);
+      }
+
+      const missionTitleByAttemptId = await getMissionTitlesByAttemptIds(
+        (recordsResult.data ?? [])
+          .map((row) => String(row.mission_attempt_id ?? ""))
+          .filter(Boolean),
+      );
+
+      const independentRecords: MyRecordItem[] = (discoverResult.data ?? [])
+        .filter((row) => row.source_kind !== "mission")
+        .map((row) => {
+          const content = String(row.content ?? "");
+          return {
+            key: `discover-${row.id}`,
+            id: String(row.id),
+            source: "discover",
+            discoverPostId: String(row.id),
+            title: String(row.title ?? "").trim() || content.slice(0, 40) || "기록",
+            content,
+            placeName: String(row.place_name ?? "장소 정보 없음"),
+            emotion:
+              EMOTION_LABEL[String(row.emotion ?? "")] ??
+              String(row.emotion ?? ""),
+            category: String(row.category ?? "기타"),
+            visibility: String(row.visibility ?? "private"),
+            createdAt: String(row.created_at ?? ""),
+            likes: Number(row.likes_count ?? 0),
+            lat: Number.isFinite(Number(row.lat)) ? Number(row.lat) : null,
+            lng: Number.isFinite(Number(row.lng)) ? Number(row.lng) : null,
+          };
+        });
+
+      const missionRecords: MyRecordItem[] = (recordsResult.data ?? []).map(
+        (row) => {
+          const attemptId = String(row.mission_attempt_id ?? "");
+          return {
+            key: `mission-${row.id}`,
+            id: String(row.id),
+            source: "mission",
+            discoverPostId: null,
+            title: missionTitleByAttemptId.get(attemptId) ?? "미션 기록",
+            content: String(row.content ?? ""),
+            placeName:
+              String(row.location_name ?? "").trim() ||
+              (row.location_type === "home" ? "내 방" : "장소 정보 없음"),
+            emotion:
+              EMOTION_LABEL[String(row.emotion ?? "")] ??
+              String(row.emotion ?? ""),
+            category: "미션 기록",
+            visibility: String(row.visibility ?? "private"),
+            createdAt: String(row.recorded_at ?? row.created_at ?? ""),
+            likes: 0,
+            lat: Number.isFinite(Number(row.location_latitude))
+              ? Number(row.location_latitude)
+              : null,
+            lng: Number.isFinite(Number(row.location_longitude))
+              ? Number(row.location_longitude)
+              : null,
+          };
+        },
+      );
+
+      setMyRecords(
+        [...independentRecords, ...missionRecords].sort(
+          (a, b) =>
+            new Date(b.createdAt).getTime() -
+            new Date(a.createdAt).getTime(),
+        ),
+      );
+    } finally {
+      setMyRecordsLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     const init = async () => {
       const {
@@ -836,7 +1108,11 @@ export default function DiscoverScreen() {
           .eq("id", user.id)
           .maybeSingle();
         setMyInterests(normalizeInterests(profileData?.interests));
-        await loadHomeRecords(user.id);
+        await Promise.all([
+          loadHomeRecords(user.id),
+          loadMyRecords(user.id),
+          loadLikedPostIds(user.id),
+        ]);
       }
 
       let lat = DEFAULT_CENTER.lat;
@@ -847,12 +1123,19 @@ export default function DiscoverScreen() {
         const loc = await Location.getCurrentPositionAsync({});
         lat = loc.coords.latitude;
         lng = loc.coords.longitude;
-        setUserLocation({ lat, lng });
-        setMapCenter({ lat, lng });
+        const currentCoordinate = { lat, lng };
+        setUserLocation(currentCoordinate);
+        setMapCenter(currentCoordinate);
+        mapCenterRef.current = currentCoordinate;
       }
 
       try {
-        const posts = await getNearbyDiscoverPosts(lat, lng, 5);
+        lastMapSearchCenterRef.current = { lat, lng };
+        const posts = await getNearbyDiscoverPosts(
+          lat,
+          lng,
+          MAP_AUTO_SEARCH_RADIUS_KM,
+        );
         if (posts.length > 0) {
           setBubbles(await buildBubbleList(posts));
         }
@@ -861,29 +1144,39 @@ export default function DiscoverScreen() {
       }
     };
     void init();
-  }, [loadHomeRecords]);
+  }, [loadHomeRecords, loadLikedPostIds, loadMyRecords]);
 
   useFocusEffect(
     useCallback(() => {
       let isActive = true;
 
       const refreshDiscoverPosts = async () => {
-        const lat = userLocation?.lat ?? DEFAULT_CENTER.lat;
-        const lng = userLocation?.lng ?? DEFAULT_CENTER.lng;
+        const { lat, lng } = mapCenterRef.current;
 
         const {
           data: { user },
         } = await supabase.auth.getUser();
         if (user && isActive) {
           setCurrentUserId(user.id);
-          await loadHomeRecords(user.id);
+          await Promise.all([
+            loadHomeRecords(user.id),
+            loadMyRecords(user.id),
+            loadLikedPostIds(user.id),
+          ]);
         }
 
         try {
-          const posts = await getNearbyDiscoverPosts(lat, lng, 5);
+          const posts = await getNearbyDiscoverPosts(
+            lat,
+            lng,
+            MAP_AUTO_SEARCH_RADIUS_KM,
+          );
           const nextBubbles = posts.length > 0 ? await buildBubbleList(posts) : [];
 
+          lastMapSearchCenterRef.current = { lat, lng };
+
           if (isActive) {
+            setMapRefreshAvailable(false);
             setBubbles(nextBubbles);
           }
         } catch (error) {
@@ -899,7 +1192,7 @@ export default function DiscoverScreen() {
       return () => {
         isActive = false;
       };
-    }, [loadHomeRecords, userLocation?.lat, userLocation?.lng])
+    }, [loadHomeRecords, loadLikedPostIds, loadMyRecords])
   );
 
   useEffect(() => {
@@ -931,6 +1224,77 @@ export default function DiscoverScreen() {
       if (searchDebounce.current) clearTimeout(searchDebounce.current);
     };
   }, [searchQuery]);
+
+  useEffect(() => {
+    if (pickerPlaceSearchDebounce.current) {
+      clearTimeout(pickerPlaceSearchDebounce.current);
+    }
+
+    if (!pickerVisible || pickerMode !== "place" || !pickerPlaceQuery.trim()) {
+      setPickerPlaceSearchResults([]);
+      setPickerPlaceSearching(false);
+      return;
+    }
+
+    pickerPlaceSearchDebounce.current = setTimeout(async () => {
+      setPickerPlaceSearching(true);
+      const center = pickedLocation ?? pickerCenter;
+
+      try {
+        const url =
+          "https://dapi.kakao.com/v2/local/search/keyword.json" +
+          `?query=${encodeURIComponent(pickerPlaceQuery.trim())}` +
+          `&x=${encodeURIComponent(String(center.lng))}` +
+          `&y=${encodeURIComponent(String(center.lat))}` +
+          "&sort=distance&size=8";
+        const response = await fetch(url, {
+          headers: { Authorization: `KakaoAK ${KAKAO_REST_API_KEY}` },
+        });
+        const data = (await response.json()) as {
+          documents?: KakaoPlaceDocument[];
+        };
+        const nextResults = (data.documents ?? [])
+          .map((document, index): PlaceCandidate | null => {
+            const latitude = Number(document.y);
+            const longitude = Number(document.x);
+            if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+              return null;
+            }
+            return {
+              id: String(document.id ?? `search-${index}-${latitude}-${longitude}`),
+              name: String(document.place_name ?? "장소"),
+              latitude,
+              longitude,
+              address: String(
+                document.road_address_name || document.address_name || "",
+              ),
+              categoryDetail: String(
+                document.category_name || document.category_group_name || "장소",
+              ),
+              distanceM:
+                Number(document.distance) ||
+                haversineM(center.lat, center.lng, latitude, longitude),
+            };
+          })
+          .filter((place): place is PlaceCandidate => place !== null);
+        setPickerPlaceSearchResults(nextResults);
+      } catch (error) {
+        console.log(
+          "기록 장소 검색 실패:",
+          error instanceof Error ? error.message : error,
+        );
+        setPickerPlaceSearchResults([]);
+      } finally {
+        setPickerPlaceSearching(false);
+      }
+    }, 350);
+
+    return () => {
+      if (pickerPlaceSearchDebounce.current) {
+        clearTimeout(pickerPlaceSearchDebounce.current);
+      }
+    };
+  }, [pickerPlaceQuery, pickerVisible, pickerMode, pickerCenter, pickedLocation]);
 
   useEffect(() => {
     if (activeBubble) {
@@ -979,8 +1343,130 @@ export default function DiscoverScreen() {
         } as any)
       : undefined;
 
+  const handleMapIdle = useCallback((lat: number, lng: number) => {
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+      return;
+    }
+
+    const nextCenter = { lat, lng };
+    mapCenterRef.current = nextCenter;
+    setMapCenter(nextCenter);
+
+    if (
+      isArchiveFilter(activeFilterRef.current) ||
+      isPersonalMapFilter(activeFilterRef.current)
+    ) {
+      setMapRefreshAvailable(false);
+      return;
+    }
+
+    const lastCenter = lastMapSearchCenterRef.current;
+    const movedFarEnough =
+      !lastCenter ||
+      haversineM(lastCenter.lat, lastCenter.lng, lat, lng) >=
+        MAP_AUTO_SEARCH_MIN_MOVE_M;
+
+    // 지도 이동만으로는 데이터를 다시 요청하지 않습니다.
+    // 마지막 검색 중심에서 충분히 이동했을 때 버튼만 표시합니다.
+    setMapRefreshAvailable(movedFarEnough);
+  }, []);
+
+  const handleRefreshAtMapCenter = useCallback(async () => {
+    if (
+      mapRecordsLoading ||
+      isArchiveFilter(activeFilterRef.current) ||
+      isPersonalMapFilter(activeFilterRef.current)
+    ) {
+      return;
+    }
+
+    const { lat, lng } = mapCenterRef.current;
+    const requestId = ++mapSearchSequence.current;
+    setMapRecordsLoading(true);
+
+    try {
+      const posts = await getNearbyDiscoverPosts(
+        lat,
+        lng,
+        MAP_AUTO_SEARCH_RADIUS_KM,
+      );
+      const nextBubbles =
+        posts.length > 0 ? await buildBubbleList(posts) : [];
+
+      if (requestId !== mapSearchSequence.current) {
+        return;
+      }
+
+      lastMapSearchCenterRef.current = { lat, lng };
+      setBubbles(nextBubbles);
+      setMapRefreshAvailable(false);
+    } catch (error) {
+      if (requestId === mapSearchSequence.current) {
+        console.log(
+          "현재 지도 위치 기록 조회 실패:",
+          error instanceof Error ? error.message : error,
+        );
+        Alert.alert(
+          "새로고침 실패",
+          "이 위치의 기록을 불러오지 못했어요. 잠시 후 다시 시도해주세요.",
+        );
+      }
+    } finally {
+      if (requestId === mapSearchSequence.current) {
+        setMapRecordsLoading(false);
+      }
+    }
+  }, [mapRecordsLoading]);
+
+  const myRecordBubbles = useMemo<DiscoverBubble[]>(
+    () =>
+      myRecords.flatMap((record) => {
+        if (
+          record.placeName === "내 방" ||
+          record.lat === null ||
+          record.lng === null ||
+          !Number.isFinite(record.lat) ||
+          !Number.isFinite(record.lng) ||
+          (record.lat === 0 && record.lng === 0)
+        ) {
+          return [];
+        }
+
+        const discoverPostId = record.discoverPostId;
+
+        return [
+          {
+            id: discoverPostId ?? `mission-record-${record.id}`,
+            discoverPostId,
+            canLike:
+              Boolean(discoverPostId) && record.visibility === "anonymous",
+            canDelete: Boolean(discoverPostId),
+            user_id: currentUserId,
+            place: record.placeName,
+            lat: record.lat,
+            lng: record.lng,
+            mission: record.title,
+            sourceKind:
+              record.source === "mission" ? "mission" : "independent",
+            time: record.createdAt
+              ? new Date(record.createdAt).toLocaleDateString("ko-KR")
+              : "날짜 정보 없음",
+            nick: "내 기록",
+            emotion: record.emotion,
+            note: record.content,
+            likes: record.likes,
+            category:
+              record.category === "미션 기록" ? "기타" : record.category,
+            real: Boolean(discoverPostId),
+          },
+        ];
+      }),
+    [currentUserId, myRecords],
+  );
+
   const filteredBubbles = useMemo(() => {
-    if (activeFilter === "방 안 기록") return [];
+    if (isArchiveFilter(activeFilter)) return [];
+    if (activeFilter === "내 기록") return myRecordBubbles;
     if (activeFilter === "내 취향") {
       if (myInterests.length === 0) return bubbles;
       return bubbles.filter((b) => myInterests.includes(b.category));
@@ -994,10 +1480,98 @@ export default function DiscoverScreen() {
     }
     // 가까운 기록 / 최근 기록은 조회 시점에 이미 그렇게 정렬/제한되어 있어요
     return bubbles;
-  }, [activeFilter, bubbles, myInterests]);
+  }, [activeFilter, bubbles, myInterests, myRecordBubbles]);
 
   const visibleHomeRecords =
     homeArchiveTab === "shared" ? sharedHomeRecords : myHomeRecords;
+
+  const applyLikeResult = useCallback(
+    (postId: string, liked: boolean, likesCount: number) => {
+      setLikedPostIds((current) =>
+        liked
+          ? current.includes(postId)
+            ? current
+            : [...current, postId]
+          : current.filter((id) => id !== postId),
+      );
+      setBubbles((current) =>
+        current.map((item) =>
+          item.id === postId ? { ...item, likes: likesCount } : item,
+        ),
+      );
+      setSheetBubble((current) =>
+        current?.id === postId ? { ...current, likes: likesCount } : current,
+      );
+      setSharedHomeRecords((current) =>
+        current.map((item) =>
+          item.id === postId ? { ...item, likes: likesCount } : item,
+        ),
+      );
+      setMyHomeRecords((current) =>
+        current.map((item) =>
+          item.id === postId ? { ...item, likes: likesCount } : item,
+        ),
+      );
+      setMyRecords((current) =>
+        current.map((item) =>
+          item.discoverPostId === postId
+            ? { ...item, likes: likesCount }
+            : item,
+        ),
+      );
+    },
+    [],
+  );
+
+  const handleToggleLike = useCallback(
+    async (postId: string) => {
+      if (!currentUserId) {
+        Alert.alert("로그인이 필요해요", "좋아요를 누르려면 먼저 로그인해주세요.");
+        return;
+      }
+      if (likeUpdatingIds.includes(postId)) return;
+
+      if (postId.startsWith("mock-")) {
+        const nextLiked = !likedPostIds.includes(postId);
+        const currentCount =
+          bubbles.find((item) => item.id === postId)?.likes ?? 0;
+        applyLikeResult(
+          postId,
+          nextLiked,
+          Math.max(0, currentCount + (nextLiked ? 1 : -1)),
+        );
+        return;
+      }
+
+      setLikeUpdatingIds((current) => [...current, postId]);
+      try {
+        const { data, error } = await supabase.rpc(
+          "toggle_discover_post_like",
+          { p_post_id: postId },
+        );
+        if (error) throw error;
+        const row = Array.isArray(data) ? data[0] : data;
+        applyLikeResult(
+          postId,
+          Boolean(row?.liked),
+          Number(row?.likes_count ?? 0),
+        );
+      } catch (error) {
+        Alert.alert(
+          "좋아요 실패",
+          error instanceof Error ? error.message : "좋아요를 저장하지 못했어요.",
+        );
+      } finally {
+        setLikeUpdatingIds((current) => current.filter((id) => id !== postId));
+      }
+    }, [
+      applyLikeResult,
+      bubbles,
+      currentUserId,
+      likedPostIds,
+      likeUpdatingIds,
+    ],
+  );
 
   const handleTryMission = async () => {
     if (!sheetBubble) return;
@@ -1063,7 +1637,7 @@ export default function DiscoverScreen() {
   };
 
   const handleDeletePost = () => {
-    if (!sheetBubble) return;
+    if (!sheetBubble?.discoverPostId) return;
     Alert.alert("기록을 삭제할까요?", "삭제하면 되돌릴 수 없어요.", [
       { text: "취소", style: "cancel" },
       {
@@ -1072,11 +1646,20 @@ export default function DiscoverScreen() {
         onPress: async () => {
           setDeleting(true);
           try {
-            await deleteDiscoverPost(sheetBubble.id);
+            await deleteDiscoverPost(sheetBubble.discoverPostId!);
             closeSheet();
+            if (currentUserId) {
+              await loadMyRecords(currentUserId);
+            }
             if (userLocation) {
-              const posts = await getNearbyDiscoverPosts(userLocation.lat, userLocation.lng, 5);
-              setBubbles(posts.length > 0 ? await buildBubbleList(posts) : MOCK_BUBBLES);
+              const posts = await getNearbyDiscoverPosts(
+                userLocation.lat,
+                userLocation.lng,
+                5,
+              );
+              setBubbles(
+                posts.length > 0 ? await buildBubbleList(posts) : [],
+              );
             }
           } catch (error) {
             Alert.alert("삭제 실패", error instanceof Error ? error.message : "");
@@ -1092,7 +1675,11 @@ export default function DiscoverScreen() {
     const lat = parseFloat(place.y);
     const lng = parseFloat(place.x);
 
-    setMapCenter({ lat, lng });
+    const selectedCenter = { lat, lng };
+    mapCenterRef.current = selectedCenter;
+    lastMapSearchCenterRef.current = selectedCenter;
+    setMapRefreshAvailable(false);
+    setMapCenter(selectedCenter);
     setSearchQuery("");
     setSearchResults([]);
     Keyboard.dismiss();
@@ -1107,6 +1694,7 @@ export default function DiscoverScreen() {
   };
 
   const resetRecordForm = () => {
+    setRecordTitle("");
     setCategory("");
     setContent("");
     setEmotion("");
@@ -1125,6 +1713,9 @@ export default function DiscoverScreen() {
     setPickedLocation(null);
     setSelectedPlace(null);
     setPlaceCandidates([]);
+    setPickerPlaceQuery("");
+    setPickerPlaceSearchResults([]);
+    setPickerPlaceSearching(false);
     setPlacesLoading(false);
     resetRecordForm();
 
@@ -1135,7 +1726,7 @@ export default function DiscoverScreen() {
       return;
     }
 
-    const center = userLocation ?? mapCenter ?? DEFAULT_CENTER;
+    const center = mapCenterRef.current ?? mapCenter ?? userLocation ?? DEFAULT_CENTER;
     setPickerMode(kind);
     setPickerCenter(center);
     setPlaceName(kind === "map" ? "거리" : "");
@@ -1186,6 +1777,18 @@ export default function DiscoverScreen() {
     };
     setSelectedPlace(place);
     setPickedLocation(coordinate);
+  };
+
+  const selectPickerSearchResult = (place: PlaceCandidate) => {
+    selectPlaceCandidate(place);
+    setPickerCenter({ lat: place.latitude, lng: place.longitude });
+    setPlaceCandidates((current) => [
+      place,
+      ...current.filter((item) => item.id !== place.id),
+    ]);
+    setPickerPlaceQuery("");
+    setPickerPlaceSearchResults([]);
+    Keyboard.dismiss();
   };
 
   const confirmPickedLocation = () => {
@@ -1275,6 +1878,10 @@ export default function DiscoverScreen() {
       Alert.alert("위치를 선택해주세요", "지도에서 기록한 위치를 선택해주세요.");
       return;
     }
+    if (!recordTitle.trim()) {
+      Alert.alert("제목을 입력해주세요", "이 기록을 한눈에 알아볼 수 있는 제목을 적어주세요.");
+      return;
+    }
     if (!category) {
       Alert.alert("카테고리를 선택해주세요", "어떤 종류의 경험인지 골라주세요.");
       return;
@@ -1316,6 +1923,20 @@ export default function DiscoverScreen() {
         })),
       });
 
+      const { error: metadataError } = await supabase.rpc(
+        "set_latest_discover_post_metadata",
+        {
+          p_place_name: effectivePlaceName,
+          p_content: content.trim(),
+          p_title: recordTitle.trim(),
+          p_source_kind: "independent",
+          p_source_mission_id: null,
+        },
+      );
+      if (metadataError) {
+        throw new Error(`기록 제목 저장 실패: ${metadataError.message}`);
+      }
+
       closeRegister(true);
 
       if (locationKind === "home") {
@@ -1323,7 +1944,10 @@ export default function DiscoverScreen() {
           data: { user },
         } = await supabase.auth.getUser();
         if (user) {
-          await loadHomeRecords(user.id);
+          await Promise.all([
+            loadHomeRecords(user.id),
+            loadMyRecords(user.id),
+          ]);
         }
         setHomeArchiveTab(
           effectiveVisibility === "anonymous" ? "shared" : "mine",
@@ -1336,6 +1960,9 @@ export default function DiscoverScreen() {
             : "내 방 기록에 저장했어요. 다른 사람에게는 보이지 않아요.",
         );
       } else {
+        if (currentUserId) {
+          await loadMyRecords(currentUserId);
+        }
         Alert.alert("저장 완료", "기록을 저장했어요.");
         if (userLocation) {
           try {
@@ -1386,6 +2013,24 @@ export default function DiscoverScreen() {
     ]);
   };
 
+  const handleFilterPress = (nextFilter: string) => {
+    if (nextFilter === activeFilter) {
+      return;
+    }
+
+    closeSheet();
+    setActiveFilter(nextFilter);
+    setMapRefreshAvailable(false);
+
+    if (nextFilter === "내 기록" && myRecordBubbles.length > 0) {
+      const newestRecord = myRecordBubbles[0];
+      const nextCenter = { lat: newestRecord.lat, lng: newestRecord.lng };
+      mapCenterRef.current = nextCenter;
+      setMapCenter(nextCenter);
+    }
+  };
+
+
 
   return (
     <View style={styles.container}>
@@ -1393,6 +2038,7 @@ export default function DiscoverScreen() {
         latitude={mapCenter.lat}
         longitude={mapCenter.lng}
         userLocation={userLocation}
+        fitAllMarkers={activeFilter === "내 기록"}
         markers={filteredBubbles.map((b) => ({
           id: b.id,
           lat: b.lat,
@@ -1401,8 +2047,9 @@ export default function DiscoverScreen() {
           count: b.multi ? b.count : undefined,
           category: b.category,
         }))}
+        onMapIdle={handleMapIdle}
         onMarkerPress={(id) => {
-          const bubble = bubbles.find((b) => b.id === id);
+          const bubble = filteredBubbles.find((b) => b.id === id);
           if (bubble) setActiveBubble(bubble);
         }}
       />
@@ -1451,15 +2098,60 @@ export default function DiscoverScreen() {
         )}
 
         {searchQuery.trim().length === 0 && (
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 6 }}>
-            {FILTERS.map((f) => (
-              <Pressable key={f} onPress={() => setActiveFilter(f)} style={[styles.chip, activeFilter === f && styles.chipActive]}>
-                <Text style={{ fontSize: 11, color: activeFilter === f ? WH : T1, fontWeight: activeFilter === f ? "700" : "400" }}>
-                  {f === "방 안 기록" ? "🛏️ 방 안 기록" : f}
-                </Text>
-              </Pressable>
-            ))}
-          </ScrollView>
+          <>
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={styles.filterScrollContent}
+            >
+              {FILTERS.map((f) => (
+                <Pressable
+                  key={f}
+                  onPress={() => handleFilterPress(f)}
+                  style={[
+                    styles.chip,
+                    activeFilter === f && styles.chipActive,
+                  ]}
+                >
+                  <Text
+                    style={[
+                      styles.chipText,
+                      activeFilter === f && styles.chipTextActive,
+                    ]}
+                  >
+                    {f === "방 안 기록" ? "🛏️ 방 안 기록" : f}
+                  </Text>
+                </Pressable>
+              ))}
+            </ScrollView>
+
+            {mapRefreshAvailable &&
+              !isArchiveFilter(activeFilter) &&
+              !isPersonalMapFilter(activeFilter) && (
+              <View style={styles.mapRefreshButtonRow}>
+                <Pressable
+                  disabled={mapRecordsLoading}
+                  onPress={() => void handleRefreshAtMapCenter()}
+                  style={({ pressed }) => [
+                    styles.mapRefreshButton,
+                    pressed && styles.mapRefreshButtonPressed,
+                    mapRecordsLoading && styles.mapRefreshButtonDisabled,
+                  ]}
+                >
+                  {mapRecordsLoading ? (
+                    <ActivityIndicator size="small" color={BL} />
+                  ) : (
+                    <Ionicons name="refresh" size={17} color={BL} />
+                  )}
+                  <Text style={styles.mapRefreshButtonText}>
+                    {mapRecordsLoading
+                      ? "이 위치의 기록 불러오는 중..."
+                      : "이 위치로 새로고침"}
+                  </Text>
+                </Pressable>
+              </View>
+            )}
+          </>
         )}
       </View>
 
@@ -1591,6 +2283,8 @@ export default function DiscoverScreen() {
                     ) : null}
                   </View>
 
+                  <Text style={styles.homeRecordTitle}>{record.title}</Text>
+
                   <View style={styles.homeRecordTags}>
                     <View style={styles.homeRecordTag}>
                       <Text style={styles.homeRecordTagText}>
@@ -1609,10 +2303,47 @@ export default function DiscoverScreen() {
                   <Text style={styles.homeRecordContent}>
                     {record.content || "작성한 내용이 없어요."}
                   </Text>
+
+                  {record.source === "discover" &&
+                  record.visibility === "anonymous" ? (
+                    <Pressable
+                      onPress={() => void handleToggleLike(record.id)}
+                      disabled={likeUpdatingIds.includes(record.id)}
+                      style={({ pressed }) => [
+                        styles.archiveLikeButton,
+                        pressed && styles.pressed,
+                      ]}
+                    >
+                      <Ionicons
+                        name={
+                          likedPostIds.includes(record.id)
+                            ? "heart"
+                            : "heart-outline"
+                        }
+                        size={17}
+                        color={PINK}
+                      />
+                      <Text style={styles.archiveLikeText}>{record.likes}</Text>
+                    </Pressable>
+                  ) : null}
                 </View>
               ))}
             </ScrollView>
           )}
+        </View>
+      )}
+
+      {activeFilter === "내 기록" && (
+        <View pointerEvents="none" style={styles.myRecordsMapSummary}>
+          <Ionicons name="location-outline" size={15} color={BL} />
+          <Text style={styles.myRecordsMapSummaryText}>
+            지도에 표시 가능한 내 기록 {myRecordBubbles.length}개
+          </Text>
+          {myRecords.length > myRecordBubbles.length ? (
+            <Text style={styles.myRecordsMapSummaryMuted}>
+              · 방 안·위치 없는 기록 {myRecords.length - myRecordBubbles.length}개
+            </Text>
+          ) : null}
         </View>
       )}
 
@@ -1632,20 +2363,31 @@ export default function DiscoverScreen() {
                   {sheetBubble.place} · {sheetBubble.time} · {sheetBubble.nick}
                 </Text>
               </View>
-              <Pressable
-                onPress={() =>
-                  setLiked((l) => (l.includes(sheetBubble.id) ? l.filter((x) => x !== sheetBubble.id) : [...l, sheetBubble.id]))
-                }
-                style={{ alignItems: "center" }}
-              >
-                <Text style={{ fontSize: 16 }}>{liked.includes(sheetBubble.id) ? "♥" : "♡"}</Text>
-                <Text style={{ fontSize: 11, color: T2 }}>{sheetBubble.likes + (liked.includes(sheetBubble.id) ? 1 : 0)}</Text>
-              </Pressable>
+              {sheetBubble.canLike !== false && sheetBubble.discoverPostId ? (
+                <Pressable
+                  onPress={() =>
+                    void handleToggleLike(sheetBubble.discoverPostId!)
+                  }
+                  disabled={likeUpdatingIds.includes(
+                    sheetBubble.discoverPostId,
+                  )}
+                  style={{ alignItems: "center" }}
+                >
+                  <Text style={{ fontSize: 16 }}>
+                    {likedPostIds.includes(sheetBubble.discoverPostId)
+                      ? "♥"
+                      : "♡"}
+                  </Text>
+                  <Text style={{ fontSize: 11, color: T2 }}>
+                    {sheetBubble.likes}
+                  </Text>
+                </Pressable>
+              ) : null}
             </View>
             <View style={styles.emotionTag}>
               <Text style={{ fontSize: 11, color: BL, fontWeight: "700" }}>{sheetBubble.emotion}</Text>
             </View>
-            <Text style={styles.note}>"{sheetBubble.note}"</Text>
+            <Text style={styles.note}>{sheetBubble.note}</Text>
 
             <View style={{ flexDirection: "row", gap: 8, marginTop: 8 }}>
               <Pressable
@@ -1657,7 +2399,9 @@ export default function DiscoverScreen() {
                   {tryingMission ? "미션 만드는 중..." : "나도 해볼래요"}
                 </Text>
               </Pressable>
-              {sheetBubble.real && sheetBubble.user_id === currentUserId ? (
+              {sheetBubble.canDelete !== false &&
+              sheetBubble.discoverPostId &&
+              sheetBubble.user_id === currentUserId ? (
                 <Pressable
                   style={[styles.deleteBtn, deleting && { opacity: 0.6 }]}
                   onPress={handleDeletePost}
@@ -1749,9 +2493,68 @@ export default function DiscoverScreen() {
           />
 
           <View style={styles.pickerTopBar}>
+            {pickerMode === "place" ? (
+              <>
+                <View style={styles.pickerSearchBox}>
+                  <Ionicons name="search" size={18} color={T2} />
+                  <TextInput
+                    value={pickerPlaceQuery}
+                    onChangeText={setPickerPlaceQuery}
+                    placeholder="기록할 실제 장소 검색"
+                    placeholderTextColor={T2}
+                    returnKeyType="search"
+                    style={styles.pickerSearchInput}
+                  />
+                  {pickerPlaceSearching ? (
+                    <ActivityIndicator size="small" color={BL} />
+                  ) : pickerPlaceQuery ? (
+                    <Pressable onPress={() => setPickerPlaceQuery("")} hitSlop={8}>
+                      <Ionicons name="close-circle" size={18} color={T2} />
+                    </Pressable>
+                  ) : null}
+                </View>
+
+                {pickerPlaceQuery.trim().length > 0 ? (
+                  <View style={styles.pickerSearchDropdown}>
+                    {pickerPlaceSearching ? (
+                      <Text style={styles.pickerSearchEmpty}>검색 중...</Text>
+                    ) : pickerPlaceSearchResults.length > 0 ? (
+                      pickerPlaceSearchResults.map((place) => (
+                        <Pressable
+                          key={`picker-search-${place.id}`}
+                          onPress={() => selectPickerSearchResult(place)}
+                          style={({ pressed }) => [
+                            styles.pickerSearchResult,
+                            pressed && styles.pressed,
+                          ]}
+                        >
+                          <View style={styles.pickerSearchResultIcon}>
+                            <Ionicons name="location" size={16} color={BL} />
+                          </View>
+                          <View style={{ flex: 1 }}>
+                            <Text numberOfLines={1} style={styles.pickerSearchResultName}>
+                              {place.name}
+                            </Text>
+                            <Text numberOfLines={1} style={styles.pickerSearchResultAddress}>
+                              {place.address || place.categoryDetail || "장소"}
+                            </Text>
+                          </View>
+                          <Text style={styles.pickerSearchResultDistance}>
+                            {formatDistance(place.distanceM)}
+                          </Text>
+                        </Pressable>
+                      ))
+                    ) : (
+                      <Text style={styles.pickerSearchEmpty}>검색 결과가 없어요</Text>
+                    )}
+                  </View>
+                ) : null}
+              </>
+            ) : null}
+
             <Text style={styles.pickerGuide}>
               {pickerMode === "place"
-                ? "지도에서 경험한 위치를 눌러주세요. 주변 실제 장소를 거리순으로 보여드려요."
+                ? "장소를 검색하거나 지도에서 경험한 위치를 눌러주세요."
                 : "지도에서 경험한 위치를 눌러주세요."}
             </Text>
           </View>
@@ -1893,6 +2696,17 @@ export default function DiscoverScreen() {
                 ) : null}
               </View>
 
+              <Text style={styles.fieldLabel}>기록 제목</Text>
+              <TextInput
+                value={recordTitle}
+                onChangeText={setRecordTitle}
+                maxLength={60}
+                placeholder="예: 비 오는 날 발견한 조용한 카페"
+                placeholderTextColor={T2}
+                style={styles.recordTitleInput}
+              />
+              <Text style={styles.recordTitleCount}>{recordTitle.length}/60</Text>
+
               <Text style={styles.fieldLabel}>카테고리</Text>
               <View style={styles.emotionWrap}>
                 {CATEGORIES.map((c) => {
@@ -2025,13 +2839,21 @@ export default function DiscoverScreen() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, position: "relative", backgroundColor: "#DFE8F0" },
-  topBar: { position: "absolute", top: 52, left: 16, right: 16, zIndex: 10, elevation: 10 },
-  searchRow: { flexDirection: "row", gap: 8, marginBottom: 8 },
-  searchInput: { flex: 1, backgroundColor: WH, borderRadius: 12, paddingHorizontal: 14, justifyContent: "center" },
-  searchTextInput: { fontSize: 13, color: T0, paddingVertical: 10 },
-  filterIconBtn: { width: 44, backgroundColor: WH, borderRadius: 12, alignItems: "center", justifyContent: "center" },
-  chip: { backgroundColor: WH, borderRadius: 20, paddingVertical: 5, paddingHorizontal: 12 },
+  topBar: { position: "absolute", top: 66, left: 16, right: 16, zIndex: 10, elevation: 10 },
+  searchRow: { flexDirection: "row", gap: 9, marginBottom: 10 },
+  searchInput: { minHeight: 48, flex: 1, backgroundColor: WH, borderRadius: 14, paddingHorizontal: 16, justifyContent: "center" },
+  searchTextInput: { fontSize: 14, color: T0, paddingVertical: 12 },
+  filterIconBtn: { width: 48, minHeight: 48, backgroundColor: WH, borderRadius: 14, alignItems: "center", justifyContent: "center" },
+  filterScrollContent: { gap: 7, paddingRight: 6 },
+  chip: { minHeight: 34, justifyContent: "center", backgroundColor: WH, borderRadius: 18, paddingVertical: 7, paddingHorizontal: 14 },
   chipActive: { backgroundColor: BL },
+  chipText: { fontSize: 12, color: T1, fontWeight: "500" },
+  chipTextActive: { color: WH, fontWeight: "700" },
+  mapRefreshButtonRow: { alignItems: "center", marginTop: 11 },
+  mapRefreshButton: { minHeight: 40, flexDirection: "row", alignItems: "center", justifyContent: "center", paddingHorizontal: 17, paddingVertical: 9, backgroundColor: "rgba(255,255,255,0.97)", borderWidth: 1, borderColor: "rgba(61,90,254,0.18)", borderRadius: 20, shadowColor: "#000", shadowOffset: { width: 0, height: 3 }, shadowOpacity: 0.14, shadowRadius: 8, elevation: 8 },
+  mapRefreshButtonPressed: { opacity: 0.78, transform: [{ scale: 0.98 }] },
+  mapRefreshButtonDisabled: { opacity: 0.75 },
+  mapRefreshButtonText: { marginLeft: 7, fontSize: 12, fontWeight: "800", color: BL },
   searchDropdown: { backgroundColor: WH, borderRadius: 12, paddingVertical: 4, maxHeight: 260, shadowColor: "#000", shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.1, shadowRadius: 10, elevation: 6 },
   searchResultRow: { flexDirection: "row", alignItems: "center", padding: 10, gap: 10 },
   searchResultThumb: { width: 40, height: 40, borderRadius: 8, backgroundColor: T3 },
@@ -2057,7 +2879,7 @@ const styles = StyleSheet.create({
 
   recordLocationPickerMap: { flex: 1, backgroundColor: BG },
   pickerTopBar: { position: "absolute", top: 60, left: 20, right: 20 },
-  pickerGuide: { backgroundColor: WH, borderRadius: 12, padding: 12, fontSize: 12, color: T0, textAlign: "center", fontWeight: "600" },
+  pickerGuide: { marginTop: 14, paddingHorizontal: 12, paddingVertical: 9, backgroundColor: "rgba(255,255,255,0.82)", borderRadius: 12, fontSize: 11, lineHeight: 16, color: T2, textAlign: "center", fontWeight: "500" },
   pickerBottomBar: { position: "absolute", bottom: 24, left: 16, right: 16, maxHeight: "58%", backgroundColor: WH, borderRadius: 18, padding: 16 },
   pickerDistanceText: { fontSize: 13, fontWeight: "700", color: T1, textAlign: "center", marginBottom: 10 },
   pickerCancelBtn: { flex: 1, backgroundColor: "#F3F4F6", borderRadius: 12, paddingVertical: 13, alignItems: "center" },
@@ -2178,4 +3000,49 @@ const styles = StyleSheet.create({
   submitButtonText: { fontSize: 15, fontWeight: "800", color: WH },
   buttonDisabled: { opacity: 0.55 },
   pressed: { opacity: 0.72 },
+  recordTitleInput: { height: 48, paddingHorizontal: 14, fontSize: 14, color: T0, backgroundColor: BG, borderWidth: 1, borderColor: T3, borderRadius: 12 },
+  recordTitleCount: { marginTop: 6, marginBottom: 18, textAlign: "right", fontSize: 10, color: T2 },
+  pickerSearchBox: { minHeight: 48, flexDirection: "row", alignItems: "center", gap: 9, paddingHorizontal: 14, backgroundColor: WH, borderRadius: 14, shadowColor: "#000", shadowOffset: { width: 0, height: 3 }, shadowOpacity: 0.14, shadowRadius: 10, elevation: 8 },
+  pickerSearchInput: { flex: 1, paddingVertical: 11, fontSize: 14, color: T0 },
+  pickerSearchDropdown: { marginTop: 7, overflow: "hidden", backgroundColor: WH, borderRadius: 14, shadowColor: "#000", shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.13, shadowRadius: 10, elevation: 9 },
+  pickerSearchResult: { minHeight: 58, flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: 12, paddingVertical: 9, borderBottomWidth: 1, borderBottomColor: "#F0F1F4" },
+  pickerSearchResultIcon: { width: 34, height: 34, alignItems: "center", justifyContent: "center", backgroundColor: BLL, borderRadius: 10 },
+  pickerSearchResultName: { fontSize: 13, fontWeight: "800", color: T0 },
+  pickerSearchResultAddress: { marginTop: 3, fontSize: 10, color: T2 },
+  pickerSearchResultDistance: { fontSize: 10, fontWeight: "700", color: BL },
+  pickerSearchEmpty: { padding: 14, textAlign: "center", fontSize: 12, color: T2 },
+  homeRecordTitle: { marginTop: 2, marginBottom: 8, fontSize: 16, lineHeight: 22, fontWeight: "800", color: T0 },
+  archiveLikeButton: { alignSelf: "flex-end", minWidth: 52, minHeight: 34, marginTop: 12, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 5, paddingHorizontal: 11, backgroundColor: PINK_LIGHT, borderRadius: 17 },
+  archiveLikeText: { fontSize: 11, fontWeight: "800", color: PINK },
+  myRecordsMapSummary: {
+    position: "absolute",
+    top: 154,
+    left: 16,
+    zIndex: 7,
+    minHeight: 34,
+    maxWidth: "88%",
+    paddingHorizontal: 12,
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "rgba(255,255,255,0.94)",
+    borderRadius: 17,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 8,
+    elevation: 3,
+  },
+  myRecordsMapSummaryText: {
+    marginLeft: 5,
+    fontSize: 11,
+    fontWeight: "700",
+    color: BL,
+  },
+  myRecordsMapSummaryMuted: {
+    fontSize: 10,
+    color: T2,
+  },
+  myRecordIcon: { width: 36, height: 36, alignItems: "center", justifyContent: "center", backgroundColor: BLL, borderRadius: 12 },
+  myRecordPlace: { marginBottom: 10, fontSize: 11, color: T1 },
+
 });
