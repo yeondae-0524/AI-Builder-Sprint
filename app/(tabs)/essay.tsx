@@ -1,6 +1,5 @@
 import Ionicons from "@expo/vector-icons/Ionicons";
 import { useFocusEffect } from "expo-router";
-import * as Sharing from "expo-sharing";
 import { useCallback, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
@@ -18,6 +17,7 @@ import {
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import * as Sharing from "expo-sharing";
 import ViewShot from "react-native-view-shot";
 
 import { supabase } from "../../lib/supabase";
@@ -28,15 +28,14 @@ import {
   EssayGenerationMeta,
   EssayKind,
   EssayRecord,
-  EssayStyle,
   EssaySummary,
   EssayVersionNo,
+  PostcardFormat,
   generateEssayVersion,
   getBookWidthByDuration,
   getEssayById,
   getEssayDashboardData,
   getStableBookHeight,
-  PostcardFormat,
   publishEssay,
   saveEssayDraft,
   selectEssayVersion,
@@ -77,28 +76,6 @@ const EMOTION_LABELS: Record<string, string> = {
   uncomfortable: "😣 불편해요",
   unsure: "🤔 잘 모르겠어요",
 };
-
-const ESSAY_STYLE_OPTIONS: Array<{
-  value: EssayStyle;
-  title: string;
-  description: string;
-}> = [
-  {
-    value: "plain",
-    title: "더 담백하게",
-    description: "과장 없이 기록과 사실을 중심으로 차분하게 정리해요.",
-  },
-  {
-    value: "balanced",
-    title: "기본 균형",
-    description: "기록의 흐름과 감정을 자연스럽고 균형 있게 담아요.",
-  },
-  {
-    value: "emotional",
-    title: "조금 더 감성적으로",
-    description: "기록 속 감정과 분위기를 조금 더 선명하게 표현해요.",
-  },
-];
 
 type DetailMode = "view" | "edit" | "versions";
 
@@ -619,8 +596,6 @@ export default function EssayScreen() {
     useState<EssayKind>("taste_report");
   const [selectedPostcardFormat, setSelectedPostcardFormat] =
     useState<PostcardFormat>("story");
-  const [selectedEssayStyle, setSelectedEssayStyle] =
-    useState<EssayStyle>("balanced");
   const postcardShotRef = useRef<ViewShot | null>(null);
 
   const loadDashboard = useCallback(async (showLoading = true) => {
@@ -792,7 +767,7 @@ export default function EssayScreen() {
   };
 
   const openRegenerateModal = () => {
-    if (!selectedEssay || versionGenerating) return;
+    if (!selectedEssay || selectedEssay.versions.length >= 3) return;
 
     const currentVersion = selectedEssay.versions.find(
       (version) => version.versionNo === activeVersionNo,
@@ -806,7 +781,6 @@ export default function EssayScreen() {
         selectedEssay.postcardFormat ??
         "story",
     );
-    setSelectedEssayStyle(currentVersion?.style ?? "balanced");
     setRegenerateModalVisible(true);
   };
 
@@ -823,7 +797,6 @@ export default function EssayScreen() {
             selectedEssayKind === "postcard"
               ? selectedPostcardFormat
               : null,
-          style: selectedEssayStyle,
         }),
       );
       await reloadSelectedEssay(generated.versionNo);
@@ -1031,7 +1004,7 @@ ${selectedEssay.content}`,
                   ? "AI 버전 비교"
                   : detailMode === "edit"
                     ? "에세이 편집"
-                    : selectedEssay.visibility !== "private"
+                    : selectedEssay.visibility === "public"
                       ? "공개 에세이"
                       : "비공개 초안"}
               </Text>
@@ -1063,12 +1036,7 @@ ${selectedEssay.content}`,
             <View style={styles.versionScreen}>
               {selectedEssay.versions.length > 0 ? (
                 <>
-                  <ScrollView
-                    horizontal
-                    showsHorizontalScrollIndicator={false}
-                    style={styles.versionTabsScroll}
-                    contentContainerStyle={styles.versionTabs}
-                  >
+                  <View style={styles.versionTabs}>
                     {selectedEssay.versions.map((version) => {
                       const selected = activeVersionNo === version.versionNo;
 
@@ -1090,22 +1058,22 @@ ${selectedEssay.content}`,
                             버전 {version.versionNo}
                           </Text>
                           <Text
-                            numberOfLines={1}
                             style={[
                               styles.versionTabStyle,
                               selected && styles.versionTabStyleSelected,
                             ]}
                           >
+                            {getEssayKindLabel(version.kind)}
                             {version.kind === "postcard"
-                              ? getPostcardFormatLabel(version.postcardFormat)
-                              : ESSAY_STYLE_OPTIONS.find(
-                                  (option) => option.value === version.style,
-                                )?.title ?? "기본 균형"}
+                              ? ` · ${getPostcardFormatLabel(
+                                  version.postcardFormat,
+                                )}`
+                              : ""}
                           </Text>
                         </Pressable>
                       );
                     })}
-                  </ScrollView>
+                  </View>
 
                   <ScrollView
                     showsVerticalScrollIndicator={false}
@@ -1168,18 +1136,24 @@ ${selectedEssay.content}`,
 
                     <Pressable
                       onPress={openRegenerateModal}
-                      disabled={versionGenerating}
+                      disabled={
+                        selectedEssay.versions.length >= 3 ||
+                        versionGenerating
+                      }
                       style={({ pressed }) => [
                         styles.secondaryButton,
                         pressed && styles.buttonPressed,
-                        versionGenerating && styles.disabledButton,
+                        (selectedEssay.versions.length >= 3 ||
+                          versionGenerating) && styles.disabledButton,
                       ]}
                     >
                       {versionGenerating ? (
                         <ActivityIndicator color={COLORS.primary} />
                       ) : (
                         <Text style={styles.secondaryButtonText}>
-                          AI로 새 버전 만들기
+                          {selectedEssay.versions.length >= 3
+                            ? "다시 만들기 2회 사용 완료"
+                            : `AI로 다시 만들기 (${Math.max(0, 3 - selectedEssay.versions.length)}회 남음)`}
                         </Text>
                       )}
                     </Pressable>
@@ -1312,20 +1286,20 @@ ${selectedEssay.content}`,
                     <View
                       style={[
                         styles.publicationBadge,
-                        selectedEssay.visibility !== "private"
+                        selectedEssay.visibility === "public"
                           ? styles.publicBadge
                           : styles.privateBadge,
                       ]}
                     >
                       <Ionicons
                         name={
-                          selectedEssay.visibility !== "private"
+                          selectedEssay.visibility === "public"
                             ? "globe-outline"
                             : "lock-closed-outline"
                         }
                         size={13}
                         color={
-                          selectedEssay.visibility !== "private"
+                          selectedEssay.visibility === "public"
                             ? COLORS.green
                             : COLORS.primary
                         }
@@ -1333,12 +1307,12 @@ ${selectedEssay.content}`,
                       <Text
                         style={[
                           styles.publicationBadgeText,
-                          selectedEssay.visibility !== "private"
+                          selectedEssay.visibility === "public"
                             ? styles.publicBadgeText
                             : styles.privateBadgeText,
                         ]}
                       >
-                        {selectedEssay.visibility !== "private"
+                        {selectedEssay.visibility === "public"
                           ? "공개"
                           : "비공개 초안"}
                       </Text>
@@ -1444,7 +1418,7 @@ ${selectedEssay.content}`,
                 </Pressable>
 
                 {selectedEssay.isOwner ? (
-                  selectedEssay.visibility !== "private" ? (
+                  selectedEssay.visibility === "public" ? (
                     <Pressable
                       onPress={enterEditMode}
                       style={({ pressed }) => [
@@ -1566,48 +1540,6 @@ ${selectedEssay.content}`,
                 </View>
               </Pressable>
 
-              {selectedEssayKind === "taste_report" ? (
-                <View style={styles.formatSection}>
-                  <Text style={styles.formatSectionTitle}>글의 문체</Text>
-                  {ESSAY_STYLE_OPTIONS.map((option) => {
-                    const selected = selectedEssayStyle === option.value;
-
-                    return (
-                      <Pressable
-                        key={option.value}
-                        onPress={() => setSelectedEssayStyle(option.value)}
-                        style={[
-                          styles.styleOption,
-                          selected && styles.styleOptionSelected,
-                        ]}
-                      >
-                        <View style={styles.styleOptionTextArea}>
-                          <Text
-                            style={[
-                              styles.styleOptionTitle,
-                              selected && styles.styleOptionTitleSelected,
-                            ]}
-                          >
-                            {option.title}
-                          </Text>
-                          <Text style={styles.styleOptionDescription}>
-                            {option.description}
-                          </Text>
-                        </View>
-                        <View
-                          style={[
-                            styles.radioCircle,
-                            selected && styles.radioCircleSelected,
-                          ]}
-                        >
-                          {selected ? <View style={styles.radioDot} /> : null}
-                        </View>
-                      </Pressable>
-                    );
-                  })}
-                </View>
-              ) : null}
-
               {selectedEssayKind === "postcard" ? (
                 <View style={styles.formatSection}>
                   <Text style={styles.formatSectionTitle}>엽서 비율</Text>
@@ -1661,7 +1593,7 @@ ${selectedEssay.content}`,
                   <ActivityIndicator color={COLORS.white} />
                 ) : (
                   <Text style={styles.primaryButtonText}>
-                    새 버전 만들기
+                    이 형식으로 새 버전 만들기
                   </Text>
                 )}
               </Pressable>
@@ -1801,7 +1733,7 @@ ${selectedEssay.content}`,
               >
                 <View style={styles.rotatedLabelWrapper}>
                   <Text style={styles.progressBookText}>
-                    {journey.canCreateEssay ? "완성 가능" : "진행 중"}
+                    {journey.canCreateEssay ? "작성 가능" : "진행 중"}
                   </Text>
                 </View>
               </View>
@@ -1870,14 +1802,16 @@ ${selectedEssay.content}`,
               <View style={styles.progressCardTop}>
                 <View style={styles.progressTag}>
                   <Text style={styles.progressTagText}>
-                    {journey.canCreateEssay ? "완료" : "진행 중"}
+                    {journey.canCreateEssay ? "에세이 준비" : "진행 중"}
                   </Text>
                 </View>
                 <Text style={styles.journeyText}>{journey.title}</Text>
               </View>
 
               <Text style={styles.progressEssayTitle}>
-                여정이 진행중이에요
+                {journey.canCreateEssay
+                  ? "에세이를 만들면 여정이 종료돼요"
+                  : "여정이 진행중이에요"}
               </Text>
               <Text style={styles.progressEssayPeriod}>
                 {getYear(journey.startDate)}. {formatPeriod(
@@ -2012,7 +1946,7 @@ ${selectedEssay.content}`,
                     <View
                       style={[
                         styles.listStatusBadge,
-                        essay.visibility !== "private"
+                        essay.visibility === "public"
                           ? styles.listStatusPublic
                           : styles.listStatusPrivate,
                       ]}
@@ -2020,7 +1954,7 @@ ${selectedEssay.content}`,
                       <Text
                         style={[
                           styles.listStatusText,
-                          essay.visibility !== "private"
+                          essay.visibility === "public"
                             ? styles.listStatusPublicText
                             : styles.listStatusPrivateText,
                         ]}
@@ -2029,7 +1963,7 @@ ${selectedEssay.content}`,
                           ? essay.generationState === "generating"
                             ? "생성 중"
                             : "버전 선택"
-                          : essay.visibility !== "private"
+                          : essay.visibility === "public"
                             ? "공개"
                             : "초안"}
                       </Text>
@@ -2753,22 +2687,19 @@ const styles = StyleSheet.create({
   versionScreen: {
     flex: 1,
   },
-  versionTabsScroll: {
-    flexGrow: 0,
-    backgroundColor: COLORS.background,
-  },
   versionTabs: {
+    flexDirection: "row",
     paddingHorizontal: 16,
     paddingTop: 14,
     paddingBottom: 10,
+    backgroundColor: COLORS.background,
   },
   versionTab: {
-    width: 126,
+    flex: 1,
     minHeight: 58,
     marginRight: 8,
     alignItems: "center",
     justifyContent: "center",
-    paddingHorizontal: 10,
     backgroundColor: COLORS.white,
     borderWidth: 1,
     borderColor: COLORS.border,

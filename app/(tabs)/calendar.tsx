@@ -334,8 +334,8 @@ export default function CalendarScreen() {
             )
             .eq("user_id", user.id)
             .eq("status", "active")
-            .lte("start_date", todayKey)
-            .gte("end_date", todayKey)
+            // 목표 기록 수를 채우거나 기간이 지나도 에세이를 만들기 전까지
+            // 여정은 active 상태로 유지됩니다.
             .order("start_date", { ascending: false })
             .limit(1)
             .maybeSingle(),
@@ -746,16 +746,25 @@ export default function CalendarScreen() {
         )}%`
       : "0%"
   ) as `${number}%`;
-  const dDay = journey
-    ? Math.max(
-        0,
-        Math.ceil(
-          (parseDateKey(journey.end_date).getTime() -
-            todayStart.getTime()) /
-            DAY_IN_MS,
-        ),
-      )
-    : null;
+  const isJourneyGoalReached =
+    journey !== null &&
+    journeyTarget > 0 &&
+    journeyCompletedDayCount >= journeyTarget;
+  const isJourneyPeriodEnded =
+    journey !== null &&
+    parseDateKey(journey.end_date).getTime() <
+      todayStart.getTime();
+  const dDay =
+    journey && !isJourneyPeriodEnded
+      ? Math.max(
+          0,
+          Math.ceil(
+            (parseDateKey(journey.end_date).getTime() -
+              todayStart.getTime()) /
+              DAY_IN_MS,
+          ),
+        )
+      : null;
 
   const handleStartJourney = (option: JourneyOption) => {
     setPendingJourneyOption(option);
@@ -965,6 +974,11 @@ export default function CalendarScreen() {
     router.push("/(tabs)");
   };
 
+  const handleGoToEssay = () => {
+    setSelectedDay(null);
+    router.push("/(tabs)/essay");
+  };
+
   return (
     <SafeAreaView style={styles.safeArea} edges={["top"]}>
       <View style={styles.screen}>
@@ -984,7 +998,9 @@ export default function CalendarScreen() {
                 <View style={styles.progressHeader}>
                   <View>
                     <Text style={styles.progressCaption}>
-                      진행 중인 여정
+                      {isJourneyGoalReached
+                        ? "에세이 작성 대기 중"
+                        : "진행 중인 여정"}
                     </Text>
 
                     <Text style={styles.journeyTitle}>
@@ -993,9 +1009,21 @@ export default function CalendarScreen() {
                   </View>
 
                   <View style={styles.dDayBox}>
-                    <Text style={styles.dDayCaption}>종료까지</Text>
+                    <Text style={styles.dDayCaption}>
+                      {isJourneyGoalReached
+                        ? "에세이"
+                        : isJourneyPeriodEnded
+                          ? "여정 기간"
+                          : "종료일까지"}
+                    </Text>
                     <Text style={styles.dDayText}>
-                      {dDay === null ? "--" : `D-${dDay}`}
+                      {isJourneyGoalReached
+                        ? "작성 가능"
+                        : isJourneyPeriodEnded
+                          ? "기간 지남"
+                          : dDay === null
+                            ? "--"
+                            : `D-${dDay}`}
                     </Text>
                   </View>
                 </View>
@@ -1020,15 +1048,49 @@ export default function CalendarScreen() {
                   />
                 </View>
 
-                <View style={styles.essayNotice}>
+                <View
+                  style={[
+                    styles.essayNotice,
+                    isJourneyGoalReached &&
+                      styles.essayReadyNotice,
+                  ]}
+                >
                   <Text style={styles.essayNoticeText}>
-                    에세이 완성까지{" "}
-                    <Text style={styles.essayNoticeStrong}>
-                      {remainingDays}일
-                    </Text>{" "}
-                    더 남았어요
+                    {isJourneyGoalReached ? (
+                      <>
+                        목표를 모두 채웠어요. 에세이를 만들면 이
+                        여정이 종료돼요.
+                      </>
+                    ) : (
+                      <>
+                        에세이 작성까지{" "}
+                        <Text style={styles.essayNoticeStrong}>
+                          {remainingDays}일
+                        </Text>{" "}
+                        더 기록하면 돼요.
+                      </>
+                    )}
                   </Text>
                 </View>
+
+                {isJourneyGoalReached && (
+                  <Pressable
+                    onPress={handleGoToEssay}
+                    style={({ pressed }) => [
+                      styles.goToEssayButton,
+                      pressed && styles.buttonPressed,
+                    ]}
+                  >
+                    <Ionicons
+                      name="sparkles"
+                      size={17}
+                      color={COLORS.white}
+                    />
+                    <Text style={styles.goToEssayButtonText}>
+                      에세이 만들러 가기
+                    </Text>
+                  </Pressable>
+                )}
 
                 <Pressable
                   disabled={isStoppingJourney}
@@ -1905,6 +1967,29 @@ const styles = StyleSheet.create({
   essayNoticeStrong: {
     fontWeight: "700",
     color: COLORS.primary,
+  },
+
+  essayReadyNotice: {
+    backgroundColor: COLORS.primaryLight,
+    borderWidth: 1,
+    borderColor: "#DCE3FF",
+  },
+
+  goToEssayButton: {
+    minHeight: 46,
+    marginTop: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 7,
+    backgroundColor: COLORS.primary,
+    borderRadius: 12,
+  },
+
+  goToEssayButtonText: {
+    fontSize: 13,
+    fontWeight: "800",
+    color: COLORS.white,
   },
 
   // ─────────────────────────────────────────
