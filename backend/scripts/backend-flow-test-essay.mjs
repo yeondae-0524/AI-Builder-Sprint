@@ -1,150 +1,121 @@
 import {
-    TEST_ESSAY_TITLE,
-    TEST_LABEL,
-    TEST_TARGET_RECORD_COUNT,
-    supabase,
-    throwIfError,
+  TEST_TARGET_RECORD_COUNT,
+  supabase,
+  throwIfError,
 } from "./backend-flow-test-config.mjs";
 
-async function verifyFinalResults(
+const TEST_ESSAY_TITLE =
+  "백엔드 통합 테스트 에세이";
+
+function toArray(value) {
+  if (!value) return [];
+
+  return Array.isArray(value)
+    ? value
+    : [value];
+}
+
+function sortEssayItems(items) {
+  return [...(items ?? [])].sort(
+    (a, b) =>
+      Number(a.sort_order ?? 0) -
+      Number(b.sort_order ?? 0),
+  );
+}
+
+async function getJourneyRecords(
   user,
   journeyId,
 ) {
   const {
-    data: journeyRecords,
-    error: journeyRecordsError,
+    data,
+    error,
   } = await supabase
     .from("records")
-    .select("id")
-    .eq("journey_id", journeyId);
+    .select(`
+      id,
+      user_id,
+      journey_id,
+      mission_attempt_id,
+      place_id,
+      emotion,
+      content,
+      visibility,
+      recorded_at,
+      created_at,
+      record_photos (
+        id,
+        storage_path,
+        sort_order,
+        is_cover
+      )
+    `)
+    .eq("user_id", user.id)
+    .eq("journey_id", journeyId)
+    .order("recorded_at", {
+      ascending: true,
+    })
+    .order("created_at", {
+      ascending: true,
+    });
 
   throwIfError(
-    "Journey 기록 ID 조회 실패",
-    journeyRecordsError,
+    "Journey 기록 조회 실패",
+    error,
   );
 
-  const recordIds = (
-    journeyRecords ?? []
-  ).map((record) => record.id);
+  return data ?? [];
+}
 
-  const [
-    journeyResult,
-    recordsResult,
-    attemptsResult,
-    badgesResult,
-    photosResult,
-  ] = await Promise.all([
-    supabase
-      .from("journeys")
-      .select(`
-        id,
-        title,
-        status,
-        duration_days,
-        target_record_count
-      `)
-      .eq("id", journeyId)
-      .single(),
-
-    supabase
-      .from("records")
-      .select(`
-        id,
-        user_id,
-        journey_id,
-        mission_attempt_id,
-        place_id,
-        emotion,
-        content,
-        visibility,
-        recorded_at
-      `)
-      .eq("journey_id", journeyId)
-      .order("recorded_at", {
-        ascending: true,
-      }),
-
-    supabase
-      .from("mission_attempts")
-      .select(`
-        id,
-        mission_id,
-        status,
-        selected_at,
-        started_at,
-        completed_at
-      `)
-      .eq("journey_id", journeyId)
-      .order("created_at", {
-        ascending: true,
-      }),
-
-    supabase
-      .from("user_badges")
-      .select(`
-        badge_id,
-        points,
-        tier
-      `)
-      .eq("user_id", user.id),
-
-    recordIds.length > 0
-      ? supabase
-          .from("record_photos")
-          .select(`
-            id,
-            record_id,
-            storage_path,
-            sort_order,
-            is_cover
-          `)
-          .in("record_id", recordIds)
-      : Promise.resolve({
-          data: [],
-          error: null,
-        }),
-  ]);
+export async function verifyFinalResults(
+  user,
+  journeyId,
+) {
+  const {
+    data: journey,
+    error: journeyError,
+  } = await supabase
+    .from("journeys")
+    .select(`
+      id,
+      user_id,
+      title,
+      status,
+      duration_days,
+      target_record_count,
+      start_date,
+      end_date
+    `)
+    .eq("id", journeyId)
+    .eq("user_id", user.id)
+    .single();
 
   throwIfError(
     "최종 Journey 검증 실패",
-    journeyResult.error,
-  );
-
-  throwIfError(
-    "최종 기록 검증 실패",
-    recordsResult.error,
-  );
-
-  throwIfError(
-    "최종 미션 상태 검증 실패",
-    attemptsResult.error,
-  );
-
-  throwIfError(
-    "최종 배지 검증 실패",
-    badgesResult.error,
-  );
-
-  throwIfError(
-    "최종 사진 검증 실패",
-    photosResult.error,
+    journeyError,
   );
 
   const records =
-    recordsResult.data ?? [];
-
-  const attempts =
-    attemptsResult.data ?? [];
-
-  const photos =
-    photosResult.data ?? [];
+    await getJourneyRecords(
+      user,
+      journeyId,
+    );
 
   if (
-    journeyResult.data.status !==
-    "completed"
+    journey.status !== "completed"
   ) {
     throw new Error(
-      `Journey 상태가 completed가 아닙니다: ${journeyResult.data.status}`,
+      `Journey 상태가 completed가 아닙니다: ${journey.status}`,
+    );
+  }
+
+  if (
+    Number(
+      journey.target_record_count,
+    ) !== TEST_TARGET_RECORD_COUNT
+  ) {
+    throw new Error(
+      `Journey 목표 기록 수가 잘못됐습니다. 예상: ${TEST_TARGET_RECORD_COUNT}, 실제: ${journey.target_record_count}`,
     );
   }
 
@@ -153,252 +124,537 @@ async function verifyFinalResults(
     TEST_TARGET_RECORD_COUNT
   ) {
     throw new Error(
-      `최종 기록 수가 ${TEST_TARGET_RECORD_COUNT}개가 아닙니다: ${records.length}개`,
+      `Journey 기록 수가 잘못됐습니다. 예상: ${TEST_TARGET_RECORD_COUNT}, 실제: ${records.length}`,
     );
   }
 
-  const recordAttemptIds = new Set(
-    records.map(
+  const invalidRecord =
+    records.find(
       (record) =>
-        record.mission_attempt_id,
-    ),
-  );
-
-  const relatedAttempts =
-    attempts.filter((attempt) =>
-      recordAttemptIds.has(attempt.id),
+        record.user_id !== user.id ||
+        record.journey_id !==
+          journeyId ||
+        !String(
+          record.content ?? "",
+        ).trim() ||
+        !String(
+          record.emotion ?? "",
+        ).trim() ||
+        !record.mission_attempt_id,
     );
 
-  if (
-    relatedAttempts.length !==
-    TEST_TARGET_RECORD_COUNT
-  ) {
+  if (invalidRecord) {
     throw new Error(
-      `기록과 연결된 미션 시도 수가 ${TEST_TARGET_RECORD_COUNT}개가 아닙니다: ${relatedAttempts.length}개`,
+      `유효하지 않은 기록이 있습니다: ${invalidRecord.id}`,
     );
   }
 
+  const attemptIds =
+    Array.from(
+      new Set(
+        records.map(
+          (record) =>
+            String(
+              record.mission_attempt_id,
+            ),
+        ),
+      ),
+    );
+
   if (
-    relatedAttempts.some(
+    attemptIds.length !==
+    records.length
+  ) {
+    throw new Error(
+      "기록의 mission_attempt_id가 비어 있거나 중복됐습니다.",
+    );
+  }
+
+  const {
+    data: attempts,
+    error: attemptsError,
+  } = await supabase
+    .from("mission_attempts")
+    .select(`
+      id,
+      user_id,
+      journey_id,
+      status,
+      completed_at
+    `)
+    .in("id", attemptIds);
+
+  throwIfError(
+    "최종 미션 시도 검증 실패",
+    attemptsError,
+  );
+
+  if (
+    (attempts?.length ?? 0) !==
+    records.length
+  ) {
+    throw new Error(
+      "기록과 연결된 미션 시도를 모두 조회하지 못했습니다.",
+    );
+  }
+
+  const invalidAttempt =
+    (attempts ?? []).find(
       (attempt) =>
-        attempt.status !== "completed",
-    )
-  ) {
+        attempt.user_id !== user.id ||
+        attempt.journey_id !==
+          journeyId ||
+        attempt.status !==
+          "completed" ||
+        !attempt.completed_at,
+    );
+
+  if (invalidAttempt) {
     throw new Error(
-      "completed가 아닌 미션 시도가 있습니다.",
+      `완료되지 않은 미션 시도가 있습니다: ${invalidAttempt.id}`,
     );
   }
 
-  if (
-    photos.length <
-    TEST_TARGET_RECORD_COUNT
-  ) {
-    throw new Error(
-      `사진 수가 기록 수보다 적습니다. 기록: ${records.length}, 사진: ${photos.length}`,
+  const photos =
+    records.flatMap(
+      (record) =>
+        toArray(
+          record.record_photos,
+        ),
     );
-  }
 
   console.log(
-    "\n==============================",
-  );
-
-  console.log(
-    `🎉 ${TEST_LABEL} 백엔드 통합 테스트 성공`,
+    `✅ Journey 완료 확인: ${journey.title}`,
   );
 
   console.log(
-    "==============================",
+    `✅ Journey 기록 확인: ${records.length}개`,
   );
 
-  console.log("사용자:", user.id);
   console.log(
-    "Journey:",
-    journeyResult.data,
+    `✅ 완료된 미션 시도 확인: ${attempts.length}개`,
   );
+
   console.log(
-    "기록 수:",
-    records.length,
-  );
-  console.log(
-    "미션 시도 수:",
-    relatedAttempts.length,
-  );
-  console.log(
-    "사진 수:",
-    photos.length,
-  );
-  console.log("기록:", records);
-  console.log(
-    "배지:",
-    badgesResult.data,
+    `✅ 기록 사진 확인: ${photos.length}개`,
   );
 
   return {
-    journey: journeyResult.data,
+    journey,
     records,
-    attempts: relatedAttempts,
+    attempts: attempts ?? [],
     photos,
   };
 }
 
-async function createEssayDraftAndVerify(
+async function removeOldTestEssays(
   user,
   journeyId,
 ) {
   const {
-    data: existingEssay,
-    error: existingEssayError,
+    data: oldEssays,
+    error: selectError,
   } = await supabase
     .from("essays")
+    .select("id")
+    .eq("user_id", user.id)
+    .eq("journey_id", journeyId);
+
+  throwIfError(
+    "기존 Journey 에세이 조회 실패",
+    selectError,
+  );
+
+  const essayIds =
+    (oldEssays ?? []).map(
+      (essay) =>
+        String(essay.id),
+    );
+
+  if (
+    essayIds.length === 0
+  ) {
+    return;
+  }
+
+  /*
+   * 외래키 설정에 ON DELETE CASCADE가 없어도
+   * 삭제될 수 있도록 자식 데이터부터 정리한다.
+   */
+
+  const {
+    error: versionDeleteError,
+  } = await supabase
+    .from("essay_versions")
+    .delete()
+    .in(
+      "essay_id",
+      essayIds,
+    );
+
+  throwIfError(
+    "기존 에세이 버전 삭제 실패",
+    versionDeleteError,
+  );
+
+  const {
+    error: itemDeleteError,
+  } = await supabase
+    .from("essay_items")
+    .delete()
+    .in(
+      "essay_id",
+      essayIds,
+    );
+
+  throwIfError(
+    "기존 에세이 기록 연결 삭제 실패",
+    itemDeleteError,
+  );
+
+  const {
+    error: essayDeleteError,
+  } = await supabase
+    .from("essays")
+    .delete()
+    .in(
+      "id",
+      essayIds,
+    )
+    .eq(
+      "user_id",
+      user.id,
+    );
+
+  throwIfError(
+    "기존 Journey 에세이 삭제 실패",
+    essayDeleteError,
+  );
+
+  console.log(
+    `🧹 기존 Journey 에세이 ${essayIds.length}개 정리 완료`,
+  );
+}
+
+function getCoverPhotoPath(
+  record,
+) {
+  const photos = [
+    ...toArray(
+      record?.record_photos,
+    ),
+  ].sort((a, b) => {
+    if (
+      Boolean(a.is_cover) !==
+      Boolean(b.is_cover)
+    ) {
+      return a.is_cover
+        ? -1
+        : 1;
+    }
+
+    return (
+      Number(
+        a.sort_order ?? 0,
+      ) -
+      Number(
+        b.sort_order ?? 0,
+      )
+    );
+  });
+
+  return (
+    photos[0]?.storage_path ??
+    null
+  );
+}
+
+export async function createEssayDraftAndVerify(
+  user,
+  journeyId,
+) {
+  const {
+    data: journey,
+    error: journeyError,
+  } = await supabase
+    .from("journeys")
+    .select(`
+      id,
+      user_id,
+      title,
+      status,
+      target_record_count
+    `)
+    .eq("id", journeyId)
+    .eq("user_id", user.id)
+    .single();
+
+  throwIfError(
+    "에세이 생성 대상 Journey 조회 실패",
+    journeyError,
+  );
+
+  if (
+    journey.status !== "completed"
+  ) {
+    throw new Error(
+      `완료된 Journey만 에세이를 만들 수 있습니다: ${journey.status}`,
+    );
+  }
+
+  const records =
+    await getJourneyRecords(
+      user,
+      journeyId,
+    );
+
+  if (
+    records.length !==
+    TEST_TARGET_RECORD_COUNT
+  ) {
+    throw new Error(
+      `에세이에 연결할 기록 수가 잘못됐습니다. 예상: ${TEST_TARGET_RECORD_COUNT}, 실제: ${records.length}`,
+    );
+  }
+
+  /*
+   * 테스트를 반복 실행해도
+   * 항상 version_no 1부터 검사할 수 있도록
+   * 같은 Journey의 이전 테스트용 에세이만 삭제한다.
+   */
+  await removeOldTestEssays(
+    user,
+    journeyId,
+  );
+
+  const {
+    data: essay,
+    error: essayError,
+  } = await supabase
+    .from("essays")
+    .insert({
+      user_id: user.id,
+      journey_id: journeyId,
+
+      title:
+        TEST_ESSAY_TITLE,
+
+      content: "",
+
+      essay_type:
+        "taste_report",
+
+      postcard_format: null,
+
+      selected_payload: {},
+
+      selected_version_no:
+        null,
+
+      generation_count: 0,
+
+      generation_state:
+        "idle",
+
+      generation_started_at:
+        null,
+
+      cover_photo_path:
+        getCoverPhotoPath(
+          records[0],
+        ),
+
+      visibility: "private",
+
+      status: "draft",
+
+      published_at: null,
+    })
     .select(`
       id,
       user_id,
       journey_id,
       title,
+      content,
+      essay_type,
+      postcard_format,
+      selected_version_no,
+      generation_count,
+      generation_state,
+      generation_started_at,
       cover_photo_path,
       visibility,
       status,
+      published_at,
       created_at,
       updated_at
     `)
-    .eq("user_id", user.id)
-    .eq("journey_id", journeyId)
-    .order("created_at", {
-      ascending: false,
-    })
-    .limit(1)
-    .maybeSingle();
+    .single();
 
   throwIfError(
-    "기존 에세이 조회 실패",
-    existingEssayError,
+    "에세이 초안 생성 실패",
+    essayError,
   );
 
-  let essay = existingEssay;
-
-  if (!essay) {
+  try {
     const {
-      data: essayId,
-      error: createEssayError,
-    } = await supabase.rpc(
-      "create_essay_draft",
-      {
-        p_journey_id: journeyId,
-        p_title: TEST_ESSAY_TITLE,
-      },
-    );
+      data: items,
+      error: itemError,
+    } = await supabase
+      .from("essay_items")
+      .insert(
+        records.map(
+          (
+            record,
+            index,
+          ) => ({
+            essay_id:
+              essay.id,
+
+            record_id:
+              record.id,
+
+            sort_order:
+              index,
+
+            /*
+             * 기존 컬럼이 NOT NULL일 수 있으므로
+             * 빈 문자열만 넣는다.
+             * 새 테스트에서는 이 값을
+             * AI 결과로 사용하지 않는다.
+             */
+            ai_bridge_text:
+              "",
+          }),
+        ),
+      )
+      .select(`
+        id,
+        essay_id,
+        record_id,
+        sort_order,
+        created_at
+      `);
 
     throwIfError(
-      "create_essay_draft RPC 실패",
-      createEssayError,
+      "에세이 기록 연결 생성 실패",
+      itemError,
     );
 
-    if (!essayId) {
+    const essayItems =
+      sortEssayItems(items);
+
+    if (
+      essay.status !== "draft"
+    ) {
       throw new Error(
-        "에세이 ID가 반환되지 않았습니다.",
+        `에세이 상태가 draft가 아닙니다: ${essay.status}`,
       );
     }
 
-    console.log(
-      `✅ 에세이 초안 생성 성공: ${essayId}`,
-    );
+    if (
+      essay.visibility !==
+      "private"
+    ) {
+      throw new Error(
+        `에세이 공개 범위가 private이 아닙니다: ${essay.visibility}`,
+      );
+    }
 
-    const {
-      data: createdEssay,
-      error: essayError,
-    } = await supabase
-      .from("essays")
-      .select(`
-        id,
-        user_id,
-        journey_id,
-        title,
-        cover_photo_path,
-        visibility,
-        status,
-        created_at,
-        updated_at
-      `)
-      .eq("id", essayId)
-      .eq("user_id", user.id)
-      .single();
+    if (
+      essay.selected_version_no !==
+      null
+    ) {
+      throw new Error(
+        `selected_version_no가 null이 아닙니다: ${essay.selected_version_no}`,
+      );
+    }
 
-    throwIfError(
-      "생성된 에세이 조회 실패",
-      essayError,
-    );
+    if (
+      Number(
+        essay.generation_count,
+      ) !== 0
+    ) {
+      throw new Error(
+        `generation_count가 0이 아닙니다: ${essay.generation_count}`,
+      );
+    }
 
-    essay = createdEssay;
-  } else {
-    console.log(
-      `✅ 기존 에세이 사용: ${essay.id}`,
-    );
-  }
+    if (
+      essay.generation_state !==
+      "idle"
+    ) {
+      throw new Error(
+        `generation_state가 idle이 아닙니다: ${essay.generation_state}`,
+      );
+    }
 
-  const {
-    data: essayItems,
-    error: essayItemsError,
-  } = await supabase
-    .from("essay_items")
-    .select(`
-      id,
-      essay_id,
-      record_id,
-      ai_bridge_text,
-      sort_order,
-      created_at
-    `)
-    .eq("essay_id", essay.id)
-    .order("sort_order", {
-      ascending: true,
-    });
-
-  throwIfError(
-    "에세이 기록 연결 조회 실패",
-    essayItemsError,
-  );
-
-  if (
-    !essayItems ||
-    essayItems.length !==
+    if (
+      essayItems.length !==
       TEST_TARGET_RECORD_COUNT
-  ) {
-    throw new Error(
-      `에세이에 연결된 기록 수가 ${TEST_TARGET_RECORD_COUNT}개가 아닙니다: ${essayItems?.length ?? 0}개`,
+    ) {
+      throw new Error(
+        `essay_items 수가 잘못됐습니다. 예상: ${TEST_TARGET_RECORD_COUNT}, 실제: ${essayItems.length}`,
+      );
+    }
+
+    essayItems.forEach(
+      (item, index) => {
+        if (
+          Number(
+            item.sort_order,
+          ) !== index
+        ) {
+          throw new Error(
+            `${index + 1}번째 essay_item의 sort_order가 잘못됐습니다: ${item.sort_order}`,
+          );
+        }
+
+        if (
+          String(
+            item.record_id,
+          ) !==
+          String(
+            records[index].id,
+          )
+        ) {
+          throw new Error(
+            `${index + 1}번째 essay_item의 record_id가 잘못됐습니다.`,
+          );
+        }
+      },
     );
-  }
 
-  if (essay.status !== "draft") {
-    throw new Error(
-      `에세이 상태가 draft가 아닙니다: ${essay.status}`,
+    console.log(
+      `✅ 에세이 초안 생성 성공: ${essay.id}`,
     );
-  }
 
-  if (!essay.cover_photo_path) {
-    throw new Error(
-      "에세이 대표 사진 경로가 없습니다.",
+    console.log(
+      `✅ 에세이 기록 연결 성공: ${essayItems.length}개`,
     );
+
+    console.log(
+      "✅ 초기 상태 확인: generation_count=0, generation_state=idle",
+    );
+
+    return {
+      essay,
+      essayItems,
+    };
+  } catch (error) {
+    /*
+     * essay_items 생성 또는 검증에 실패하면
+     * 불완전한 테스트 에세이를 정리한다.
+     */
+    await supabase
+      .from("essays")
+      .delete()
+      .eq("id", essay.id)
+      .eq(
+        "user_id",
+        user.id,
+      );
+
+    throw error;
   }
-
-  console.log(
-    "✅ 에세이 상세 조회 성공",
-  );
-
-  console.log(
-    `✅ 연결된 기록 수: ${essayItems.length}`,
-  );
-
-  console.log(
-    `✅ 대표 사진 경로: ${essay.cover_photo_path}`,
-  );
-
-  return {
-    essay,
-    essayItems,
-  };
 }
-
-export {
-    createEssayDraftAndVerify,
-    verifyFinalResults
-};
