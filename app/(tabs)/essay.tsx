@@ -70,6 +70,8 @@ const BOOK_COLORS = [
 ];
 
 
+const INITIAL_ESSAY_LIST_COUNT = 5;
+
 const EMOTION_LABELS: Record<string, string> = {
   comfortable: "😌 편안해요",
   joyful: "😊 즐거워요",
@@ -492,12 +494,196 @@ function PhotoCollage({
   );
 }
 
+type PostcardSlideContent = {
+  recordIndex: number;
+  text: string;
+};
+
+type PostcardCard = {
+  key: string;
+  title: string;
+  content: string;
+  photoUrls: string[];
+  eyebrow: string;
+  showHashtags: boolean;
+};
+
+function parsePostcardSlides(content: string): PostcardSlideContent[] {
+  const normalized = String(content ?? "").trim();
+  if (!normalized) return [];
+
+  try {
+    const parsed = JSON.parse(normalized) as unknown;
+    if (!Array.isArray(parsed)) return [];
+
+    return parsed
+      .map((item) => {
+        if (!item || typeof item !== "object") return null;
+
+        const raw = item as Record<string, unknown>;
+        const recordIndex = Number(raw.recordIndex);
+        const text = String(raw.text ?? "").trim();
+
+        if (!Number.isInteger(recordIndex) || recordIndex < 0 || !text) {
+          return null;
+        }
+
+        return { recordIndex, text };
+      })
+      .filter((item): item is PostcardSlideContent => item !== null)
+      .sort((a, b) => a.recordIndex - b.recordIndex);
+  } catch {
+    return [];
+  }
+}
+
+function buildPostcardCards({
+  title,
+  content,
+  records,
+  allPhotoUrls,
+}: {
+  title: string;
+  content: string;
+  records: EssayRecord[];
+  allPhotoUrls: string[];
+}): PostcardCard[] {
+  const slides = parsePostcardSlides(content);
+  const coverPhotos = allPhotoUrls.slice(0, 4);
+
+  const cards: PostcardCard[] = [
+    {
+      key: "postcard-cover",
+      title,
+      content:
+        records.length > 0
+          ? `${records.length}개의 장면으로 남긴 이번 여정`
+          : "이번 여정에서 남긴 장면들",
+      photoUrls: coverPhotos,
+      eyebrow: "JOURNEY COVER",
+      showHashtags: true,
+    },
+  ];
+
+  if (slides.length === 0) {
+    const fallbackContent = String(content ?? "").trim();
+
+    if (fallbackContent) {
+      cards.push({
+        key: "postcard-fallback",
+        title: "여정의 기록",
+        content: fallbackContent,
+        photoUrls: coverPhotos.slice(0, 1),
+        eyebrow: "01 / 01",
+        showHashtags: false,
+      });
+    }
+
+    return cards;
+  }
+
+  slides.forEach((slide, index) => {
+    const record = records[slide.recordIndex];
+    const recordPhotos = record?.photoUrls.length
+      ? record.photoUrls
+      : allPhotoUrls[slide.recordIndex]
+        ? [allPhotoUrls[slide.recordIndex]]
+        : coverPhotos.slice(0, 1);
+
+    cards.push({
+      key: `postcard-record-${slide.recordIndex}`,
+      title: record?.missionTitle ?? `기록 ${slide.recordIndex + 1}`,
+      content: slide.text,
+      photoUrls: recordPhotos,
+      eyebrow: `${String(index + 1).padStart(2, "0")} / ${String(
+        slides.length,
+      ).padStart(2, "0")}`,
+      showHashtags: false,
+    });
+  });
+
+  return cards;
+}
+
+function PostcardPageControls({
+  currentIndex,
+  totalCount,
+  onChange,
+}: {
+  currentIndex: number;
+  totalCount: number;
+  onChange: (nextIndex: number) => void;
+}) {
+  if (totalCount <= 1) return null;
+
+  return (
+    <View style={styles.postcardPageControls}>
+      <Pressable
+        onPress={() => onChange(Math.max(currentIndex - 1, 0))}
+        disabled={currentIndex <= 0}
+        style={({ pressed }) => [
+          styles.postcardPageButton,
+          currentIndex <= 0 && styles.postcardPageButtonDisabled,
+          pressed && currentIndex > 0 && styles.buttonPressed,
+        ]}
+      >
+        <Ionicons name="chevron-back" size={18} color={COLORS.primary} />
+      </Pressable>
+
+      <View style={styles.postcardPageIndicator}>
+        <Text style={styles.postcardPageText}>
+          {currentIndex + 1} / {totalCount}
+        </Text>
+        <View style={styles.postcardDots}>
+          {Array.from({ length: Math.min(totalCount, 8) }, (_, index) => {
+            const normalizedIndex =
+              totalCount <= 8
+                ? index
+                : Math.round((index / 7) * (totalCount - 1));
+            const selectedDotIndex =
+              totalCount <= 8
+                ? currentIndex
+                : Math.round((currentIndex / (totalCount - 1)) * 7);
+            const selected = index === selectedDotIndex;
+
+            return (
+              <View
+                key={`postcard-dot-${normalizedIndex}-${index}`}
+                style={[
+                  styles.postcardDot,
+                  selected && styles.postcardDotSelected,
+                ]}
+              />
+            );
+          })}
+        </View>
+      </View>
+
+      <Pressable
+        onPress={() =>
+          onChange(Math.min(currentIndex + 1, totalCount - 1))
+        }
+        disabled={currentIndex >= totalCount - 1}
+        style={({ pressed }) => [
+          styles.postcardPageButton,
+          currentIndex >= totalCount - 1 && styles.postcardPageButtonDisabled,
+          pressed && currentIndex < totalCount - 1 && styles.buttonPressed,
+        ]}
+      >
+        <Ionicons name="chevron-forward" size={18} color={COLORS.primary} />
+      </Pressable>
+    </View>
+  );
+}
+
 function PostcardCanvas({
   title,
   content,
   meta,
   photoUrls,
   journeyTitle,
+  eyebrow,
+  showHashtags,
   format,
 }: {
   title: string;
@@ -505,6 +691,8 @@ function PostcardCanvas({
   meta: EssayGenerationMeta;
   photoUrls: string[];
   journeyTitle: string;
+  eyebrow: string;
+  showHashtags: boolean;
   format: PostcardFormat | null;
 }) {
   const actualFormat = format ?? "story";
@@ -530,10 +718,12 @@ function PostcardCanvas({
             { backgroundColor: meta.accentColor },
           ]}
         />
-        <Text style={styles.postcardJourneyLabel}>{journeyTitle}</Text>
+        <Text style={styles.postcardJourneyLabel}>
+          {journeyTitle} · {eyebrow}
+        </Text>
         <Text style={styles.postcardTitle}>{title}</Text>
         <Text style={styles.postcardBody}>{content}</Text>
-        {meta.hashtags.length > 0 ? (
+        {showHashtags && meta.hashtags.length > 0 ? (
           <Text style={[styles.postcardHashtags, { color: meta.accentColor }]}>
             {meta.hashtags.join("  ")}
           </Text>
@@ -622,6 +812,9 @@ export default function EssayScreen() {
   const [selectedEssayStyle, setSelectedEssayStyle] =
     useState<EssayStyle>("balanced");
   const postcardShotRef = useRef<ViewShot | null>(null);
+  const [activePostcardPage, setActivePostcardPage] = useState(0);
+
+  const [showAllEssays, setShowAllEssays] = useState(false);
 
   const loadDashboard = useCallback(async (showLoading = true) => {
     try {
@@ -666,6 +859,7 @@ export default function EssayScreen() {
       const detail = prepareEssayDetailForDisplay(rawDetail);
       setSelectedEssay(detail);
       setActiveVersionNo(detail.versions[0]?.versionNo ?? 1);
+      setActivePostcardPage(0);
       setDetailMode(
         detail.selectedVersionNo === null ? "versions" : "view",
       );
@@ -693,6 +887,7 @@ export default function EssayScreen() {
     setActiveVersionNo(
       preferredVersionNo ?? detail.versions[0]?.versionNo ?? 1,
     );
+    setActivePostcardPage(0);
     setDetailMode(
       detail.selectedVersionNo === null ? "versions" : "view",
     );
@@ -716,6 +911,7 @@ export default function EssayScreen() {
               onPress: () => {
                 setSelectedEssay(null);
                 setDetailMode("view");
+                setActivePostcardPage(0);
               },
             },
           ],
@@ -727,6 +923,7 @@ export default function EssayScreen() {
     setSelectedEssay(null);
     setDetailMode("view");
     setRecordDetail(null);
+    setActivePostcardPage(0);
   };
 
   const handleCreateEssay = () => {
@@ -995,6 +1192,42 @@ ${selectedEssay.content}`,
     );
   }, [selectedEssay]);
 
+  const selectedVersionPostcardCards = useMemo(() => {
+    if (!selectedEssay || !selectedVersion || selectedVersion.kind !== "postcard") {
+      return [];
+    }
+
+    return buildPostcardCards({
+      title: selectedVersion.title,
+      content: selectedVersion.content,
+      records: selectedEssay.records,
+      allPhotoUrls: selectedEssayPhotoUrls,
+    });
+  }, [selectedEssay, selectedEssayPhotoUrls, selectedVersion]);
+
+  const selectedEssayPostcardCards = useMemo(() => {
+    if (!selectedEssay || selectedEssay.kind !== "postcard") {
+      return [];
+    }
+
+    return buildPostcardCards({
+      title: selectedEssay.title,
+      content: selectedEssay.content,
+      records: selectedEssay.records,
+      allPhotoUrls: selectedEssayPhotoUrls,
+    });
+  }, [selectedEssay, selectedEssayPhotoUrls]);
+
+  const activeVersionPostcardCard =
+    selectedVersionPostcardCards[
+      Math.min(activePostcardPage, selectedVersionPostcardCards.length - 1)
+    ] ?? null;
+
+  const activeEssayPostcardCard =
+    selectedEssayPostcardCards[
+      Math.min(activePostcardPage, selectedEssayPostcardCards.length - 1)
+    ] ?? null;
+
   if (screenLoading) {
     return (
       <SafeAreaView style={styles.screenLoading} edges={["top"]}>
@@ -1075,7 +1308,10 @@ ${selectedEssay.content}`,
                       return (
                         <Pressable
                           key={version.id}
-                          onPress={() => setActiveVersionNo(version.versionNo)}
+                          onPress={() => {
+                            setActiveVersionNo(version.versionNo);
+                            setActivePostcardPage(0);
+                          }}
                           style={[
                             styles.versionTab,
                             selected && styles.versionTabSelected,
@@ -1123,15 +1359,28 @@ ${selectedEssay.content}`,
                     </View>
 
                     {selectedVersion ? (
-                      selectedVersion.kind === "postcard" ? (
-                        <PostcardCanvas
-                          title={selectedVersion.title}
-                          content={selectedVersion.content}
-                          meta={selectedVersion.meta}
-                          photoUrls={selectedEssayPhotoUrls}
-                          journeyTitle={selectedEssay.journeyTitle}
-                          format={selectedVersion.postcardFormat}
-                        />
+                      selectedVersion.kind === "postcard" &&
+                      activeVersionPostcardCard ? (
+                        <>
+                          <PostcardCanvas
+                            title={activeVersionPostcardCard.title}
+                            content={activeVersionPostcardCard.content}
+                            meta={selectedVersion.meta}
+                            photoUrls={activeVersionPostcardCard.photoUrls}
+                            journeyTitle={selectedEssay.journeyTitle}
+                            eyebrow={activeVersionPostcardCard.eyebrow}
+                            showHashtags={activeVersionPostcardCard.showHashtags}
+                            format={selectedVersion.postcardFormat}
+                          />
+                          <PostcardPageControls
+                            currentIndex={Math.min(
+                              activePostcardPage,
+                              selectedVersionPostcardCards.length - 1,
+                            )}
+                            totalCount={selectedVersionPostcardCards.length}
+                            onChange={setActivePostcardPage}
+                          />
+                        </>
                       ) : (
                         <TasteReportPreview
                           title={selectedVersion.title}
@@ -1350,10 +1599,11 @@ ${selectedEssay.content}`,
                     </View>
                   </View>
 
-                  {selectedEssay.kind === "postcard" ? (
+                  {selectedEssay.kind === "postcard" &&
+                  activeEssayPostcardCard ? (
                     <>
                       <Text style={styles.postcardFormatGuide}>
-                        {getPostcardFormatLabel(selectedEssay.postcardFormat)} · 이미지로 바로 공유할 수 있어요
+                        {getPostcardFormatLabel(selectedEssay.postcardFormat)} · 현재 보고 있는 카드를 이미지로 공유해요
                       </Text>
                       <ViewShot
                         ref={postcardShotRef}
@@ -1365,14 +1615,24 @@ ${selectedEssay.content}`,
                         }}
                       >
                         <PostcardCanvas
-                          title={selectedEssay.title}
-                          content={selectedEssay.content}
+                          title={activeEssayPostcardCard.title}
+                          content={activeEssayPostcardCard.content}
                           meta={selectedEssay.selectedMeta}
-                          photoUrls={selectedEssayPhotoUrls}
+                          photoUrls={activeEssayPostcardCard.photoUrls}
                           journeyTitle={selectedEssay.journeyTitle}
+                          eyebrow={activeEssayPostcardCard.eyebrow}
+                          showHashtags={activeEssayPostcardCard.showHashtags}
                           format={selectedEssay.postcardFormat}
                         />
                       </ViewShot>
+                      <PostcardPageControls
+                        currentIndex={Math.min(
+                          activePostcardPage,
+                          selectedEssayPostcardCards.length - 1,
+                        )}
+                        totalCount={selectedEssayPostcardCards.length}
+                        onChange={setActivePostcardPage}
+                      />
                     </>
                   ) : (
                     <TasteReportPreview
@@ -1761,6 +2021,14 @@ ${selectedEssay.content}`,
   }
 
   const essays = dashboard?.essays ?? [];
+  const visibleEssays = showAllEssays
+    ? essays
+    : essays.slice(0, INITIAL_ESSAY_LIST_COUNT);
+
+  const hiddenEssayCount = Math.max(
+    essays.length - INITIAL_ESSAY_LIST_COUNT,
+    0,
+  );
   const journey = dashboard?.journey ?? null;
   const targetCount = journey?.targetDayCount ?? 0;
   const completedDayCount = journey?.completedDayCount ?? 0;
@@ -1974,7 +2242,7 @@ ${selectedEssay.content}`,
           </Text>
 
           {essays.length > 0 ? (
-            essays.map((essay, index) => (
+            visibleEssays.map((essay, index) => (
               <Pressable
                 key={essay.id}
                 onPress={() => void openEssay(essay)}
@@ -2064,6 +2332,34 @@ ${selectedEssay.content}`,
               </Text>
             </View>
           )}
+          {essays.length > INITIAL_ESSAY_LIST_COUNT ? (
+            <Pressable
+              onPress={() =>
+                setShowAllEssays((current) => !current)
+              }
+              style={({ pressed }) => [
+                styles.essayListToggleButton,
+                pressed && styles.buttonPressed,
+              ]}
+            >
+              <Text style={styles.essayListToggleText}>
+                {showAllEssays
+                  ? "접기"
+                  : `더보기 (${hiddenEssayCount})`}
+              </Text>
+
+              <Ionicons
+                name={
+                  showAllEssays
+                    ? "chevron-up"
+                    : "chevron-down"
+                }
+                size={17}
+                color={COLORS.primary}
+              />
+            </Pressable>
+          ) : null}
+
         </View>
 
         <View style={styles.bottomSpace} />
@@ -2536,6 +2832,24 @@ const styles = StyleSheet.create({
     marginTop: 3,
     fontSize: 10,
     color: COLORS.textSub,
+  },
+  essayListToggleButton: {
+    minHeight: 46,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    marginTop: 2,
+    paddingHorizontal: 14,
+    backgroundColor: COLORS.primaryLight,
+    borderWidth: 1,
+    borderColor: "rgba(61,90,254,0.18)",
+    borderRadius: 12,
+  },
+  essayListToggleText: {
+    marginRight: 5,
+    fontSize: 12,
+    fontWeight: "800",
+    color: COLORS.primary,
   },
   emptyCard: {
     padding: 18,
@@ -3246,6 +3560,52 @@ const styles = StyleSheet.create({
   postcardShot: {
     width: "100%",
   },
+  postcardPageControls: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginTop: 12,
+    marginBottom: 10,
+  },
+  postcardPageButton: {
+    width: 40,
+    height: 40,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: COLORS.primaryLight,
+    borderWidth: 1,
+    borderColor: "rgba(61,90,254,0.18)",
+    borderRadius: 12,
+  },
+  postcardPageButtonDisabled: {
+    opacity: 0.35,
+  },
+  postcardPageIndicator: {
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  postcardPageText: {
+    marginBottom: 6,
+    fontSize: 11,
+    fontWeight: "800",
+    color: COLORS.textSub,
+  },
+  postcardDots: {
+    flexDirection: "row",
+    alignItems: "center",
+  },
+  postcardDot: {
+    width: 5,
+    height: 5,
+    marginHorizontal: 2,
+    backgroundColor: COLORS.border,
+    borderRadius: 3,
+  },
+  postcardDotSelected: {
+    width: 14,
+    backgroundColor: COLORS.primary,
+    borderRadius: 3,
+  },
   postcardCanvas: {
     width: "100%",
     overflow: "hidden",
@@ -3487,4 +3847,4 @@ const styles = StyleSheet.create({
   cardPressed: {
     opacity: 0.78,
   },
-});
+}); 
