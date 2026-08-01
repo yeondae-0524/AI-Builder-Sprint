@@ -20,158 +20,71 @@ import {
   verifyFinalResults,
 } from "./backend-flow-test-essay.mjs";
 
-function parseEssayAiResult(rawAnswer) {
-  const cleaned = rawAnswer
+const TEST_STYLES = [
+  "balanced",
+  "plain",
+  "emotional",
+  "balanced",
+];
+
+function parseAiJson(raw) {
+  const cleaned = String(raw ?? "")
     .trim()
     .replace(/^```(?:json)?\s*/i, "")
     .replace(/\s*```$/i, "");
 
-  const firstBrace = cleaned.indexOf("{");
-  const lastBrace = cleaned.lastIndexOf("}");
+  const start = cleaned.indexOf("{");
+  const end = cleaned.lastIndexOf("}");
 
   if (
-    firstBrace === -1 ||
-    lastBrace === -1 ||
-    lastBrace < firstBrace
+    start < 0 ||
+    end < start
   ) {
     throw new Error(
       "AI 응답에서 JSON을 찾을 수 없습니다.",
     );
   }
 
-  const originalJsonText = cleaned.slice(
-    firstBrace,
-    lastBrace + 1,
-  );
+  let parsed;
 
-  /*
-   * AI가 아래처럼 불필요한 bridge 래퍼를 넣는 경우 복구한다.
-   *
-   * {
-   *   "bridge": {
-   *     "recordIndex": 1,
-   *     "bridgeText": "..."
-   *   }
-   * }
-   */
-  const repairedJsonText =
-    originalJsonText.replace(
-      /{\s*"bridge"\s*:\s*{/g,
-      "{",
+  try {
+    parsed = JSON.parse(
+      cleaned.slice(
+        start,
+        end + 1,
+      ),
     );
-
-  const parseCandidates = [
-    originalJsonText,
-    repairedJsonText,
-  ];
-
-  let parsed = null;
-  let lastParseError = null;
-
-  for (const candidate of parseCandidates) {
-    try {
-      parsed = JSON.parse(candidate);
-      break;
-    } catch (error) {
-      lastParseError = error;
-    }
-  }
-
-  if (!parsed) {
+  } catch (error) {
     throw new Error(
-      [
-        "AI 응답 JSON 변환 실패:",
-        rawAnswer,
-        "",
-        `파싱 오류: ${
-          lastParseError?.message ??
-          "알 수 없는 오류"
-        }`,
-      ].join("\n"),
+      `AI 응답 JSON 변환 실패: ${error.message}`,
     );
   }
 
-  if (
-    typeof parsed.title !== "string" ||
-    !parsed.title.trim()
-  ) {
+  const title =
+    typeof parsed?.title === "string"
+      ? parsed.title.trim()
+      : "";
+
+  const content =
+    typeof parsed?.content === "string"
+      ? parsed.content.trim()
+      : "";
+
+  if (!title) {
     throw new Error(
-      "AI 응답에 제목이 없습니다.",
+      "AI 응답에 title이 없습니다.",
     );
   }
 
-  if (!Array.isArray(parsed.bridges)) {
+  if (!content) {
     throw new Error(
-      "AI 응답에 bridges 배열이 없습니다.",
+      "AI 응답에 content가 없습니다.",
     );
   }
-
-  if (
-    parsed.bridges.length !==
-    TEST_TARGET_RECORD_COUNT
-  ) {
-    throw new Error(
-      [
-        "AI 응답의 bridges 개수가 잘못됐습니다.",
-        `예상: ${TEST_TARGET_RECORD_COUNT}`,
-        `실제: ${parsed.bridges.length}`,
-      ].join("\n"),
-    );
-  }
-
-  const bridges = parsed.bridges.map(
-    (item, index) => {
-      /*
-       * 새 형식:
-       * "연결 문장"
-       *
-       * 기존 형식:
-       * {
-       *   "recordIndex": 0,
-       *   "bridgeText": "연결 문장"
-       * }
-       *
-       * 중첩 형식도 호환:
-       * {
-       *   "bridge": {
-       *     "bridgeText": "연결 문장"
-       *   }
-       * }
-       */
-      const candidate =
-        item?.bridge ?? item;
-
-      const bridgeText =
-        typeof candidate === "string"
-          ? candidate.trim()
-          : typeof candidate?.bridgeText ===
-              "string"
-            ? candidate.bridgeText.trim()
-            : "";
-
-      if (!bridgeText) {
-        throw new Error(
-          [
-            `${index + 1}번째 연결 문장이 비어 있거나 형식이 잘못됐습니다.`,
-            `실제 값: ${JSON.stringify(item)}`,
-          ].join("\n"),
-        );
-      }
-
-      /*
-       * recordIndex는 AI 응답을 믿지 않고
-       * 배열 순서에 따라 코드에서 자동 지정한다.
-       */
-      return {
-        recordIndex: index,
-        bridgeText,
-      };
-    },
-  );
 
   return {
-    title: parsed.title.trim(),
-    bridges,
+    title,
+    content,
   };
 }
 
@@ -205,22 +118,32 @@ async function invokeUpstage(message) {
   return data.answer.trim();
 }
 
-async function generateEssayWithUpstageAndVerify(
+function styleInstruction(style) {
+  if (style === "plain") {
+    return "과장 없이 경험과 사실 중심으로 담백하고 차분하게 작성하세요.";
+  }
+
+  if (style === "emotional") {
+    return "기록의 감정과 분위기를 더 선명하게 살리되 과장하지 마세요.";
+  }
+
+  return "사실과 감정을 균형 있게 담아 자연스러운 블로그 에세이처럼 작성하세요.";
+}
+
+async function loadEssayInput(
   essayId,
 ) {
   const {
     data: essay,
-    error: essayError,
+    error,
   } = await supabase
     .from("essays")
     .select(`
       id,
-      journey_id,
+      selected_version_no,
       essay_items (
-        id,
         sort_order,
         records (
-          id,
           recorded_at,
           emotion,
           content,
@@ -240,14 +163,24 @@ async function generateEssayWithUpstageAndVerify(
 
   throwIfError(
     "AI 입력용 에세이 조회 실패",
-    essayError,
+    error,
   );
+
+  if (
+    essay.selected_version_no !==
+    null
+  ) {
+    throw new Error(
+      "최종 버전이 이미 선택된 에세이입니다.",
+    );
+  }
 
   const items = [
     ...(essay.essay_items ?? []),
   ].sort(
     (a, b) =>
-      a.sort_order - b.sort_order,
+      Number(a.sort_order) -
+      Number(b.sort_order),
   );
 
   if (
@@ -255,289 +188,514 @@ async function generateEssayWithUpstageAndVerify(
     TEST_TARGET_RECORD_COUNT
   ) {
     throw new Error(
-      `AI에 전달할 기록이 ${TEST_TARGET_RECORD_COUNT}개가 아닙니다: ${items.length}개`,
+      `AI 입력 기록 수가 잘못됐습니다. 예상: ${TEST_TARGET_RECORD_COUNT}, 실제: ${items.length}`,
     );
   }
 
   const recordsText = items
-    .map((item, index) => {
-      const record =
-        getSingleRelation(
-          item.records,
-        );
+    .map(
+      (
+        item,
+        index,
+      ) => {
+        const record =
+          getSingleRelation(
+            item.records,
+          );
 
-      if (!record) {
-        throw new Error(
-          `${index + 1}번째 essay_item에 연결된 기록이 없습니다.`,
-        );
-      }
+        if (!record) {
+          throw new Error(
+            `${index + 1}번째 기록을 찾을 수 없습니다.`,
+          );
+        }
 
-      const missionAttempt =
-        getSingleRelation(
-          record.mission_attempts,
-        );
+        const attempt =
+          getSingleRelation(
+            record.mission_attempts,
+          );
 
-      const mission =
-        getSingleRelation(
-          missionAttempt?.missions,
-        );
+        const mission =
+          getSingleRelation(
+            attempt?.missions,
+          );
 
-      const place =
-        getSingleRelation(
-          record.places,
-        );
+        const place =
+          getSingleRelation(
+            record.places,
+          );
 
-      return [
-        `[기록 ${index + 1}]`,
-        `날짜: ${record.recorded_at}`,
-        `미션: ${
-          mission?.title ??
-          "미션 정보 없음"
-        }`,
-        `장소: ${
-          place?.name ??
-          "장소 정보 없음"
-        }`,
-        `감정: ${record.emotion}`,
-        `내용: ${record.content}`,
-      ].join("\n");
-    })
+        return [
+          `[기록 ${index + 1}]`,
+          `날짜: ${record.recorded_at}`,
+          `미션: ${mission?.title ?? "정보 없음"}`,
+          `장소: ${place?.name ?? "정보 없음"}`,
+          `감정: ${record.emotion ?? "정보 없음"}`,
+          `내용: ${record.content ?? ""}`,
+        ].join("\n");
+      },
+    )
     .join("\n\n");
 
-  const expectedIndexes = Array.from(
-    { length: items.length },
-    (_, index) => index,
-  );
+  return {
+    items,
+    recordsText,
+  };
+}
 
-  const bridgeExample = expectedIndexes
-  .map(
-    (recordIndex) =>
-      `    "${recordIndex + 1}번째 기록을 자연스럽게 이어주는 문장"`,
-  )
-  .join(",\n");
-
+async function generateAiEssay(
+  recordsText,
+  recordCount,
+  style,
+) {
   const prompt = `
-다음은 한 사용자가 ${TEST_DURATION_DAYS}일 Journey 동안 작성한 실제 경험 기록 ${items.length}개입니다.
+다음은 한 사용자가 ${TEST_DURATION_DAYS}일 Journey 동안 작성한 실제 경험 기록 ${recordCount}개입니다.
 
 ${recordsText}
 
-위 기록만을 바탕으로 자연스러운 한국어 에세이를 구성하세요.
+위 기록만을 바탕으로 하나의 완성된 한국어 에세이를 작성하세요.
 
 규칙:
 - 기록에 없는 사실을 만들지 마세요.
-- 사용자의 감정과 경험을 중심으로 작성하세요.
-- ${items.length}개의 기록을 시간 순서대로 자연스럽게 이어주세요.
-- 각 기록을 소개하거나 이어주는 연결 문장을 하나씩 작성하세요.
+- 1인칭 시점으로 작성하세요.
+- 기록을 단순 나열하지 말고 자연스럽게 연결하세요.
+- ${styleInstruction(style)}
 - 반드시 JSON만 반환하세요.
-- bridges 개수는 반드시 ${items.length}개여야 합니다.
-- bridgeText는 빈 문자열이면 안 됩니다.
-- 모든 객체의 구조를 동일하게 작성하세요.
-- JSON 마지막 항목에도 bridgeText를 반드시 포함하세요.
-- bridges는 객체 배열이 아니라 문자열 배열로 작성하세요.
-- bridges에는 기록 순서대로 연결 문장만 넣으세요.
-- bridges 개수는 반드시 ${items.length}개여야 합니다.
-- 각 연결 문장은 빈 문자열이면 안 됩니다.
-- bridges 안에 recordIndex, bridgeText, bridge 같은 속성을 만들지 마세요.
+- bridges, bridgeText, recordIndex를 만들지 마세요.
 
 {
   "title": "에세이 제목",
-  "bridges": [
-${bridgeExample}
-  ]
+  "content": "완성된 에세이 본문"
 }
 `.trim();
 
-  const MAX_AI_ATTEMPTS = 3;
+  let raw =
+    await invokeUpstage(
+      prompt,
+    );
 
-let rawAnswer =
-  await invokeUpstage(prompt);
+  let lastError;
 
-let aiResult = null;
-let lastParseError = null;
-
-for (
-  let attemptNumber = 1;
-  attemptNumber <= MAX_AI_ATTEMPTS;
-  attemptNumber += 1
-) {
-  console.log(
-    `✅ Upstage AI 응답 수신: ${attemptNumber}/${MAX_AI_ATTEMPTS}`,
-  );
-
-  console.log(
-    `AI 응답 ${attemptNumber}:`,
-    rawAnswer,
-  );
-
-  try {
-    aiResult =
-      parseEssayAiResult(rawAnswer);
-
+  for (
+    let attempt = 1;
+    attempt <= 3;
+    attempt += 1
+  ) {
     console.log(
-      `✅ AI 응답 검증 성공: 연결 문장 ${aiResult.bridges.length}개`,
+      `✅ Upstage 응답 수신 ${attempt}/3 · ${style}`,
     );
 
-    break;
-  } catch (error) {
-    lastParseError = error;
+    try {
+      return parseAiJson(
+        raw,
+      );
+    } catch (error) {
+      lastError = error;
 
-    console.warn(
-      `⚠️ AI 응답 검증 실패: ${error.message}`,
-    );
+      console.warn(
+        `⚠️ AI 응답 검증 실패: ${error.message}`,
+      );
 
-    if (
-      attemptNumber ===
-      MAX_AI_ATTEMPTS
-    ) {
-      break;
-    }
-
-    const repairPrompt = `
-이전 응답의 JSON 형식 또는 배열 개수가 잘못되었습니다.
-
-반드시 전체 응답을 처음부터 다시 작성하세요.
-
-필수 조건:
-- JSON 이외의 설명을 작성하지 마세요.
-- title은 빈 문자열이면 안 됩니다.
-- bridges는 반드시 문자열 배열이어야 합니다.
-- bridges 배열의 항목은 반드시 ${items.length}개여야 합니다.
-- 기록 1번부터 ${items.length}번까지 순서대로 정확히 하나씩 작성하세요.
-- 항목을 합치거나 생략하지 마세요.
-- bridge, recordIndex, bridgeText 등의 객체를 만들지 마세요.
-- 각 배열 항목은 연결 문장 문자열 하나여야 합니다.
-- 마지막 ${items.length}번째 문장까지 반드시 작성하세요.
+      if (attempt < 3) {
+        raw =
+          await invokeUpstage(`
+이전 응답이 올바른 JSON 형식이 아닙니다.
 
 기록:
 ${recordsText}
 
-잘못된 이전 응답:
-${rawAnswer}
-
-반드시 다음 구조로만 반환하세요.
+반드시 아래 구조의 JSON만 반환하세요.
 
 {
   "title": "에세이 제목",
-  "bridges": [
-${bridgeExample}
-  ]
+  "content": "완성된 에세이 본문"
 }
-`.trim();
 
-    console.log(
-      `🔄 AI 응답 재생성 요청: ${attemptNumber + 1}/${MAX_AI_ATTEMPTS}`,
-    );
-
-    rawAnswer =
-      await invokeUpstage(
-        repairPrompt,
-      );
+잘못된 이전 응답:
+${raw}
+`.trim());
+      }
+    }
   }
-}
 
-if (!aiResult) {
   throw new Error(
-    [
-      `AI 응답을 ${MAX_AI_ATTEMPTS}번 생성했지만 올바른 결과를 받지 못했습니다.`,
-      lastParseError?.message ??
-        "알 수 없는 파싱 오류",
-    ].join("\n"),
+    `AI 응답 검증 최종 실패: ${lastError?.message}`,
   );
 }
 
-  if (
-    aiResult.bridges.length !==
-    items.length
-  ) {
-    throw new Error(
-      `AI 연결 문장 개수가 기록 개수와 다릅니다. 기록: ${items.length}, 연결 문장: ${aiResult.bridges.length}`,
-    );
-  }
-
+async function saveVersion(
+  essayId,
+  style,
+  aiResult,
+) {
   const {
-    data: savedEssayId,
-    error: saveError,
-  } = await supabase.rpc(
-    "save_essay_ai_result",
-    {
-      p_essay_id: essayId,
-      p_title: aiResult.title,
-      p_bridges: aiResult.bridges,
-    },
-  );
+    data: before,
+    error: beforeError,
+  } = await supabase
+    .from("essay_versions")
+    .select(
+      "id, version_no",
+    )
+    .eq(
+      "essay_id",
+      essayId,
+    )
+    .order(
+      "version_no",
+    );
 
   throwIfError(
-    "AI 에세이 결과 저장 실패",
-    saveError,
+    "기존 버전 조회 실패",
+    beforeError,
   );
 
-  if (!savedEssayId) {
-    throw new Error(
-      "save_essay_ai_result RPC가 에세이 ID를 반환하지 않았습니다.",
+  const previousIds =
+    new Set(
+      (before ?? []).map(
+        (row) =>
+          row.id,
+      ),
     );
-  }
+
+  const nextVersionNo =
+    (before ?? []).reduce(
+      (
+        max,
+        row,
+      ) =>
+        Math.max(
+          max,
+          Number(
+            row.version_no,
+          ) || 0,
+        ),
+      0,
+    ) + 1;
 
   const {
-    data: savedEssay,
-    error: verifyError,
+    data: essayBefore,
+    error: countError,
   } = await supabase
     .from("essays")
-    .select(`
-      id,
-      title,
-      status,
-      essay_items (
-        id,
-        sort_order,
-        ai_bridge_text
-      )
-    `)
-    .eq("id", savedEssayId)
+    .select(
+      "generation_count",
+    )
+    .eq(
+      "id",
+      essayId,
+    )
     .single();
 
   throwIfError(
-    "저장된 AI 에세이 확인 실패",
-    verifyError,
+    "generation_count 조회 실패",
+    countError,
   );
 
-  const savedItems = [
-    ...(savedEssay.essay_items ?? []),
-  ].sort(
-    (a, b) =>
-      a.sort_order - b.sort_order,
+  const oldCount =
+    Number(
+      essayBefore
+        .generation_count ?? 0,
+    );
+
+  const {
+    error: startError,
+  } = await supabase
+    .from("essays")
+    .update({
+      generation_state:
+        "generating",
+
+      generation_started_at:
+        new Date()
+          .toISOString(),
+    })
+    .eq(
+      "id",
+      essayId,
+    );
+
+  throwIfError(
+    "생성 상태 시작 처리 실패",
+    startError,
   );
 
-  if (
-    savedItems.length !==
-    TEST_TARGET_RECORD_COUNT
+  try {
+    const {
+      data: inserted,
+      error: insertError,
+    } = await supabase
+      .from("essay_versions")
+      .insert({
+        essay_id: essayId,
+
+        version_no:
+          nextVersionNo,
+
+        style,
+
+        essay_type:
+          "taste_report",
+
+        postcard_format:
+          null,
+
+        title:
+          aiResult.title,
+
+        content:
+          aiResult.content,
+
+        payload: {},
+      })
+      .select(`
+        id,
+        essay_id,
+        version_no,
+        style,
+        title,
+        content
+      `)
+      .single();
+
+    throwIfError(
+      "에세이 버전 저장 실패",
+      insertError,
+    );
+
+    const {
+      error: finishError,
+    } = await supabase
+      .from("essays")
+      .update({
+        generation_count:
+          oldCount + 1,
+
+        generation_state:
+          "idle",
+
+        generation_started_at:
+          null,
+      })
+      .eq(
+        "id",
+        essayId,
+      );
+
+    throwIfError(
+      "생성 완료 상태 저장 실패",
+      finishError,
+    );
+
+    const {
+      data: after,
+      error: afterError,
+    } = await supabase
+      .from("essay_versions")
+      .select(
+        "id, version_no, style",
+      )
+      .eq(
+        "essay_id",
+        essayId,
+      )
+      .order(
+        "version_no",
+      );
+
+    throwIfError(
+      "저장 후 버전 검증 실패",
+      afterError,
+    );
+
+    const afterIds =
+      new Set(
+        (after ?? []).map(
+          (row) =>
+            row.id,
+        ),
+      );
+
+    for (
+      const id
+      of previousIds
+    ) {
+      if (
+        !afterIds.has(id)
+      ) {
+        throw new Error(
+          `기존 버전 ${id}이 삭제됐습니다.`,
+        );
+      }
+    }
+
+    const saved =
+      (after ?? []).find(
+        (row) =>
+          Number(
+            row.version_no,
+          ) ===
+          nextVersionNo,
+      );
+
+    if (!saved) {
+      throw new Error(
+        `버전 ${nextVersionNo}을 찾을 수 없습니다.`,
+      );
+    }
+
+    if (
+      saved.style !==
+      style
+    ) {
+      throw new Error(
+        `style 불일치. 예상: ${style}, 실제: ${saved.style}`,
+      );
+    }
+
+    const {
+      data: essayAfter,
+      error: stateError,
+    } = await supabase
+      .from("essays")
+      .select(
+        "generation_count, generation_state",
+      )
+      .eq(
+        "id",
+        essayId,
+      )
+      .single();
+
+    throwIfError(
+      "생성 후 상태 검증 실패",
+      stateError,
+    );
+
+    if (
+      Number(
+        essayAfter
+          .generation_count,
+      ) !==
+      oldCount + 1
+    ) {
+      throw new Error(
+        "generation_count가 1 증가하지 않았습니다.",
+      );
+    }
+
+    if (
+      essayAfter
+        .generation_state !==
+      "idle"
+    ) {
+      throw new Error(
+        `generation_state가 idle이 아닙니다: ${essayAfter.generation_state}`,
+      );
+    }
+
+    console.log(
+      `✅ 버전 ${nextVersionNo} 저장 · style=${style} · 기존 버전 보존`,
+    );
+
+    return inserted;
+  } catch (error) {
+    await supabase
+      .from("essays")
+      .update({
+        generation_state:
+          "error",
+
+        generation_started_at:
+          null,
+      })
+      .eq(
+        "id",
+        essayId,
+      );
+
+    throw error;
+  }
+}
+
+async function generateFourVersions(
+  essayId,
+) {
+  const {
+    items,
+    recordsText,
+  } =
+    await loadEssayInput(
+      essayId,
+    );
+
+  const generated = [];
+
+  for (
+    const style
+    of TEST_STYLES
   ) {
-    throw new Error(
-      `저장된 essay_items 수가 ${TEST_TARGET_RECORD_COUNT}개가 아닙니다: ${savedItems.length}개`,
+    const aiResult =
+      await generateAiEssay(
+        recordsText,
+        items.length,
+        style,
+      );
+
+    generated.push(
+      await saveVersion(
+        essayId,
+        style,
+        aiResult,
+      ),
     );
   }
 
-  if (
-    savedItems.some(
-      (item) =>
-        !item.ai_bridge_text,
+  const {
+    data: allVersions,
+    error,
+  } = await supabase
+    .from("essay_versions")
+    .select(
+      "id, version_no, style, title",
     )
+    .eq(
+      "essay_id",
+      essayId,
+    )
+    .order(
+      "version_no",
+    );
+
+  throwIfError(
+    "최종 버전 목록 조회 실패",
+    error,
+  );
+
+  const versionNumbers =
+    (allVersions ?? []).map(
+      (row) =>
+        Number(
+          row.version_no,
+        ),
+    );
+
+  if (
+    versionNumbers.length < 4 ||
+    Math.max(
+      ...versionNumbers,
+    ) < 4
   ) {
     throw new Error(
-      "저장되지 않은 AI 연결 문장이 있습니다.",
+      `버전 4까지 생성되지 않았습니다: ${versionNumbers.join(", ")}`,
     );
   }
 
   console.log(
-    `✅ AI 에세이 제목 저장 성공: ${savedEssay.title}`,
-  );
-
-  console.log(
-    `✅ AI 연결 문장 저장 성공: ${savedItems.length}개`,
+    `✅ 무제한 버전 검증 성공: ${versionNumbers.join(", ")}`,
   );
 
   return {
-    ...savedEssay,
-    essay_items: savedItems,
+    generated,
+    allVersions,
   };
 }
 
@@ -549,21 +707,27 @@ async function main() {
   const {
     data: loginData,
     error: loginError,
-  } = await supabase.auth.signInWithPassword({
-    email: testEmail,
-    password: testPassword,
-  });
+  } =
+    await supabase.auth
+      .signInWithPassword({
+        email:
+          testEmail,
+
+        password:
+          testPassword,
+      });
 
   throwIfError(
     "테스트 계정 로그인 실패",
     loginError,
   );
 
-  const user = loginData.user;
+  const user =
+    loginData.user;
 
   if (!user) {
     throw new Error(
-      "로그인했지만 사용자 정보가 없습니다.",
+      "로그인 사용자 정보가 없습니다.",
     );
   }
 
@@ -571,10 +735,14 @@ async function main() {
     `✅ 로그인 성공: ${user.email}`,
   );
 
-  await ensureProfile(user);
+  await ensureProfile(
+    user,
+  );
 
   const journey =
-    await getOrCreateTestJourney(user);
+    await getOrCreateTestJourney(
+      user,
+    );
 
   await buildRecordJourney(
     user,
@@ -593,25 +761,10 @@ async function main() {
       journey.id,
     );
 
-  console.log(
-    "에세이:",
-    essayResult.essay,
-  );
-
-  console.log(
-    "에세이 기록:",
-    essayResult.essayItems,
-  );
-
-  const aiEssay =
-    await generateEssayWithUpstageAndVerify(
+  const aiResult =
+    await generateFourVersions(
       essayResult.essay.id,
     );
-
-  console.log(
-    "AI 에세이 결과:",
-    aiEssay,
-  );
 
   console.log(
     "\n==============================",
@@ -634,7 +787,11 @@ async function main() {
   );
 
   console.log(
-    `AI 연결 문장 수: ${aiEssay.essay_items.length}`,
+    `이번 테스트 생성 버전 수: ${aiResult.generated.length}`,
+  );
+
+  console.log(
+    `전체 보존 버전 수: ${aiResult.allVersions.length}`,
   );
 
   await supabase.auth.signOut({
@@ -642,28 +799,32 @@ async function main() {
   });
 }
 
-main().catch(async (error) => {
-  console.error(
-    "\n==============================",
-  );
+main().catch(
+  async (error) => {
+    console.error(
+      "\n==============================",
+    );
 
-  console.error(
-    `❌ ${TEST_LABEL} 백엔드 통합 테스트 실패`,
-  );
+    console.error(
+      `❌ ${TEST_LABEL} 백엔드 통합 테스트 실패`,
+    );
 
-  console.error(
-    "==============================",
-  );
+    console.error(
+      "==============================",
+    );
 
-  console.error(error);
+    console.error(
+      error,
+    );
 
-  try {
-    await supabase.auth.signOut({
-      scope: "local",
-    });
-  } catch {
-    // 로그아웃 오류는 무시
-  }
+    try {
+      await supabase.auth.signOut({
+        scope: "local",
+      });
+    } catch {
+      // 로그아웃 오류는 무시한다.
+    }
 
-  process.exitCode = 1;
-});
+    process.exitCode = 1;
+  },
+);

@@ -5,6 +5,8 @@ const ESSAY_FUNCTION_NAME =
     process.env.EXPO_PUBLIC_ESSAY_FUNCTION_NAME ?? "generate-essay",
   ).trim() || "generate-essay";
 
+const AI_GENERATION_TIMEOUT_MS = 45_000;
+
 export type EssayStyle = "plain" | "balanced" | "emotional";
 export type EssayVisibility = "private" | "anonymous" | "nickname";
 export type EssayGenerationState = "idle" | "generating" | "error";
@@ -187,6 +189,29 @@ function getErrorMessage(error: unknown, fallback: string) {
   return fallback;
 }
 
+function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  message: string,
+): Promise<T> {
+  let timeoutId: ReturnType<typeof setTimeout> | null = null;
+
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(() => {
+      reject(new Error(message));
+    }, timeoutMs);
+  });
+
+  return Promise.race([
+    promise,
+    timeoutPromise,
+  ]).finally(() => {
+    if (timeoutId !== null) {
+      clearTimeout(timeoutId);
+    }
+  });
+}
+
 function normalizeDateKey(value: string | null | undefined) {
   return value ? value.slice(0, 10) : "";
 }
@@ -309,6 +334,7 @@ async function getRequiredUser() {
   return session.user;
 }
 
+
 async function getFreshAccessToken() {
   const { data, error } = await supabase.auth.getSession();
 
@@ -412,7 +438,7 @@ async function createSignedUrlMap(paths: string[]) {
 }
 
 async function resetStaleGenerationRows(userId: string) {
-  const cutoff = new Date(Date.now() - 15 * 60 * 1000).toISOString();
+  const cutoff = new Date(Date.now() - 2 * 60 * 1000).toISOString();
 
   const { error } = await supabase
     .from("essays")
@@ -1267,176 +1293,356 @@ export async function generateEssayVersion(
   options: GenerateEssayVersionOptions,
 ) {
   const user = await getRequiredUser();
-  const requestedKind = normalizeEssayKind(options.kind);
-  const requestedPostcardFormat = requestedKind === "postcard"
-    ? normalizePostcardFormat(options.postcardFormat) ?? "story"
-    : null;
 
-  const { data: essay, error: essayError } = await supabase
+  const requestedKind =
+    normalizeEssayKind(options.kind);
+
+  const requestedPostcardFormat =
+    requestedKind === "postcard"
+      ? normalizePostcardFormat(
+          options.postcardFormat,
+        ) ?? "story"
+      : null;
+
+  const {
+    data: essay,
+    error: essayError,
+  } = await supabase
     .from("essays")
     .select(
-      "id, user_id, selected_version_no, essay_type, postcard_format, generation_count, generation_state",
+      [
+        "id",
+        "user_id",
+        "selected_version_no",
+        "essay_type",
+        "postcard_format",
+        "generation_count",
+        "generation_state",
+      ].join(", "),
     )
     .eq("id", essayId)
     .eq("user_id", user.id)
     .maybeSingle();
 
-  if (essayError) throw essayError;
-  if (!essay) throw new Error("에세이를 찾지 못했습니다.");
-  if (essay.selected_version_no) {
-    throw new Error("최종 버전을 선택한 뒤에는 AI로 다시 만들 수 없습니다.");
+  if (essayError) {
+    throw essayError;
   }
 
-  const { data: existingVersions, error: versionError } = await supabase
+  if (!essay) {
+    throw new Error(
+      "에세이를 찾지 못했습니다.",
+    );
+  }
+
+  if (
+    essay.selected_version_no !== null
+  ) {
+    throw new Error(
+      "최종 버전을 선택한 뒤에는 AI로 다시 만들 수 없습니다.",
+    );
+  }
+
+  const {
+    data: existingVersions,
+    error: versionError,
+  } = await supabase
     .from("essay_versions")
     .select("version_no")
     .eq("essay_id", essayId)
-    .order("version_no", { ascending: true });
+    .order("version_no", {
+      ascending: true,
+    });
 
-  if (versionError) throw versionError;
-
-  const versionNo = ((existingVersions?.length ?? 0) + 1) as EssayVersionNo;
-  if (versionNo > 3) {
-    throw new Error("다시 만들기는 최대 두 번까지 사용할 수 있습니다.");
+  if (versionError) {
+    throw versionError;
   }
 
-  // 기존 DB의 style 필드는 호환성을 위해 유지하지만,
-  // 다시 만들기에서는 말투가 아니라 결과 형식을 선택합니다.
-  const style: EssayStyle = "balanced";
+  const maxVersionNo = (
+    existingVersions ?? []
+  ).reduce(
+    (max, row) =>
+      Math.max(
+        max,
+        Number(row.version_no) || 0,
+      ),
+    0,
+  );
 
-  const { data: startedEssay, error: startError } = await supabase
+  const versionNo: EssayVersionNo =
+    maxVersionNo + 1;
+
+  /*
+   * 최초 생성은 항상 기본 균형 문체를 사용하고,
+   * 다시 만들기부터 사용자가 선택한 문체를 적용한다.
+   */
+  const style: EssayStyle =
+    versionNo === 1
+      ? "balanced"
+      : options.style ?? "balanced";
+
+  const {
+    data: startedEssay,
+    error: startError,
+  } = await supabase
     .from("essays")
     .update({
       generation_state: "generating",
-      generation_started_at: new Date().toISOString(),
+      generation_started_at:
+        new Date().toISOString(),
     })
     .eq("id", essayId)
     .eq("user_id", user.id)
-    .neq("generation_state", "generating")
+    .neq(
+      "generation_state",
+      "generating",
+    )
     .select("id")
     .maybeSingle();
 
-  if (startError) throw startError;
+  if (startError) {
+    throw startError;
+  }
+
   if (!startedEssay) {
-    throw new Error("이미 AI 에세이를 생성하고 있습니다.");
+    throw new Error(
+      "이미 AI 에세이를 생성하고 있습니다.",
+    );
   }
 
   try {
-    const detail = await getEssayById(essayId);
+    const detail =
+      await getEssayById(essayId);
 
-    if (detail.records.length === 0) {
-      throw new Error("에세이에 연결된 기록이 없습니다.");
+    if (
+      detail.records.length === 0
+    ) {
+      throw new Error(
+        "에세이에 연결된 기록이 없습니다.",
+      );
     }
 
-    const recordPayload = buildRecordPayload(detail.records);
-    const accessToken = await getFreshAccessToken();
+    const recordPayload =
+      buildRecordPayload(
+        detail.records,
+      );
+
+    const accessToken =
+      await getFreshAccessToken();
 
     const functionBody = {
-      type: requestedKind === "postcard" ? "sns-feed" : "taste-report",
-      nickname: detail.nickname,
-      journeyTitle: detail.journeyTitle,
-      durationDays: detail.durationDays,
+      type:
+        requestedKind === "postcard"
+          ? "sns-feed"
+          : "taste-report",
+
+      nickname:
+        detail.nickname,
+
+      journeyTitle:
+        detail.journeyTitle,
+
+      durationDays:
+        detail.durationDays,
+
       style,
-      postcardFormat: requestedPostcardFormat ?? "story",
-      records: recordPayload,
+
+      postcardFormat:
+        requestedPostcardFormat ??
+        "story",
+
+      records:
+        recordPayload,
     };
 
-    let generated: ReturnType<typeof normalizePostcardResult> | ReturnType<typeof normalizeTasteReportResult> | null = null;
-    let lastError: unknown;
+    console.log(
+      `[essay] AI 생성 요청 시작: ${ESSAY_FUNCTION_NAME}, version=${versionNo}, style=${style}`,
+    );
 
-    for (let attempt = 1; attempt <= 2; attempt++) {
-      try {
-        const { data, error } = await supabase.functions.invoke<Record<string, unknown>>(
-          ESSAY_FUNCTION_NAME,
-          {
-            headers: {
-              Authorization: `Bearer ${accessToken}`,
-            },
-            body: functionBody,
+    const {
+      data,
+      error,
+    } = await withTimeout(
+      supabase.functions.invoke<
+        Record<string, unknown>
+      >(
+        ESSAY_FUNCTION_NAME,
+        {
+          headers: {
+            Authorization:
+              `Bearer ${accessToken}`,
           },
-        );
 
-        if (error) {
-          throw new Error(await getFunctionInvokeErrorMessage(error));
-        }
-        if (!data) throw new Error("AI 생성 결과가 없습니다.");
-        if (typeof data.error === "string" && data.error.trim()) {
-          throw new Error(data.error);
-        }
+          body:
+            functionBody,
+        },
+      ),
+      AI_GENERATION_TIMEOUT_MS,
+      "AI 응답이 45초 안에 오지 않았습니다. 잠시 후 다시 시도해주세요.",
+    );
 
-        // 응답 데이터 포맷이 맞는지 검증 시도
-        generated = requestedKind === "postcard"
-          ? normalizePostcardResult(data as PostcardAiResult)
-          : normalizeTasteReportResult(data as TasteReportAiResult, detail);
+    console.log(
+      `[essay] AI 생성 응답 수신: version=${versionNo}`,
+    );
 
-        break; // 성공 시 반복문 탈출!
-      } catch (err) {
-        lastError = err;
-        console.warn(`[AI 에세이 생성 실패] 재시도 중... (${attempt}/2)`, err);
-        if (attempt === 2) {
-          throw err; // 두 번째도 실패하면 에러를 바깥으로 던짐
-        }
-      }
+    if (error) {
+      throw new Error(
+        await getFunctionInvokeErrorMessage(
+          error,
+        ),
+      );
     }
 
-    if (!generated) {
-      throw lastError || new Error("AI 응답을 처리하지 못했습니다.");
+    if (!data) {
+      throw new Error(
+        "AI 생성 결과가 없습니다.",
+      );
     }
 
-    const { data: inserted, error: insertError } = await supabase
+    if (
+      typeof data.error === "string" &&
+      data.error.trim()
+    ) {
+      throw new Error(
+        data.error,
+      );
+    }
+
+    const generated =
+      requestedKind === "postcard"
+        ? normalizePostcardResult(
+            data as PostcardAiResult,
+          )
+        : normalizeTasteReportResult(
+            data as TasteReportAiResult,
+            detail,
+          );
+
+    const {
+      data: inserted,
+      error: insertError,
+    } = await supabase
       .from("essay_versions")
       .insert({
-        essay_id: essayId,
-        version_no: versionNo,
+        essay_id:
+          essayId,
+
+        version_no:
+          versionNo,
+
         style,
-        essay_type: requestedKind,
-        postcard_format: requestedPostcardFormat,
-        title: generated.title,
-        content: generated.content,
-        payload: generated.meta,
+
+        essay_type:
+          requestedKind,
+
+        postcard_format:
+          requestedPostcardFormat,
+
+        title:
+          generated.title,
+
+        content:
+          generated.content,
+
+        payload:
+          generated.meta,
       })
       .select(
-        "id, version_no, style, essay_type, postcard_format, title, content, payload, created_at",
+        [
+          "id",
+          "version_no",
+          "style",
+          "essay_type",
+          "postcard_format",
+          "title",
+          "content",
+          "payload",
+          "created_at",
+        ].join(", "),
       )
       .single();
 
-    if (insertError) throw insertError;
+    if (insertError) {
+      throw insertError;
+    }
 
-    const { error: finishError } = await supabase
+    const {
+      error: finishError,
+    } = await supabase
       .from("essays")
       .update({
-        generation_count: Number(essay.generation_count ?? 0) + 1,
-        generation_state: "idle",
-        generation_started_at: null,
+        generation_count:
+          Number(
+            essay.generation_count ??
+              0,
+          ) + 1,
+
+        generation_state:
+          "idle",
+
+        generation_started_at:
+          null,
       })
       .eq("id", essayId)
       .eq("user_id", user.id);
 
-    if (finishError) throw finishError;
+    if (finishError) {
+      throw finishError;
+    }
 
     return {
-      id: String(inserted.id),
-      versionNo: Number(inserted.version_no) as EssayVersionNo,
-      style: inserted.style as EssayStyle,
-      kind: normalizeEssayKind(inserted.essay_type),
-      postcardFormat: normalizePostcardFormat(inserted.postcard_format),
-      title: String(inserted.title),
-      content: String(inserted.content),
-      meta: normalizeGenerationMeta(inserted.payload),
-      createdAt: String(inserted.created_at),
+      id:
+        String(inserted.id),
+
+      versionNo:
+        Number(
+          inserted.version_no,
+        ) as EssayVersionNo,
+
+      style:
+        inserted.style as EssayStyle,
+
+      kind:
+        normalizeEssayKind(
+          inserted.essay_type,
+        ),
+
+      postcardFormat:
+        normalizePostcardFormat(
+          inserted.postcard_format,
+        ),
+
+      title:
+        String(inserted.title),
+
+      content:
+        String(inserted.content),
+
+      meta:
+        normalizeGenerationMeta(
+          inserted.payload,
+        ),
+
+      createdAt:
+        String(inserted.created_at),
     } satisfies EssayVersion;
   } catch (error) {
     await supabase
       .from("essays")
       .update({
-        generation_state: "error",
-        generation_started_at: null,
+        generation_state:
+          "error",
+
+        generation_started_at:
+          null,
       })
       .eq("id", essayId)
       .eq("user_id", user.id);
 
     throw new Error(
-      getErrorMessage(error, "AI 에세이를 생성하지 못했습니다."),
+      getErrorMessage(
+        error,
+        "AI 에세이를 생성하지 못했습니다.",
+      ),
     );
   }
 }
