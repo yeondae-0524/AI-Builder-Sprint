@@ -435,7 +435,7 @@ export async function getMissionAttemptHistory(journeyId: string) {
  * 1. 조건에 맞는 승인(approved) 미션을 최대 10개 조회한다.
  *    부족할 경우(K = 10 - N개), 백그라운드에서 AI 미션 생성을 요청한다.
  */
-export async function getRecommendedMissions(
+export async function getApprovedRecommendedMissions(
   filters: RecommendationFilterInput,
 ): Promise<RecommendedMission[]> {
   const { category, region, estimatedTime, cost, excludeMissionIds = [] } = filters;
