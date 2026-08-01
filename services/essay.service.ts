@@ -309,6 +309,7 @@ async function getRequiredUser() {
   return session.user;
 }
 
+
 async function getFreshAccessToken() {
   const { data, error } = await supabase.auth.getSession();
 
@@ -1291,14 +1292,18 @@ export async function generateEssayVersion(
 
   if (versionError) throw versionError;
 
-  const versionNo = ((existingVersions?.length ?? 0) + 1) as EssayVersionNo;
-  if (versionNo > 3) {
-    throw new Error("다시 만들기는 최대 두 번까지 사용할 수 있습니다.");
-  }
+  const maxVersionNo = (existingVersions ?? []).reduce(
+    (max, row) => Math.max(max, Number(row.version_no) || 0),
+    0,
+  );
+  const versionNo: EssayVersionNo = maxVersionNo + 1;
 
-  // 기존 DB의 style 필드는 호환성을 위해 유지하지만,
-  // 다시 만들기에서는 말투가 아니라 결과 형식을 선택합니다.
-  const style: EssayStyle = "balanced";
+  // 최초 생성은 항상 기본 균형 문체를 사용하고,
+  // 다시 만들기부터 사용자가 선택한 문체를 적용합니다.
+  const style: EssayStyle =
+    versionNo === 1
+      ? "balanced"
+      : options.style ?? "balanced";
 
   const { data: startedEssay, error: startError } = await supabase
     .from("essays")
@@ -1327,6 +1332,8 @@ export async function generateEssayVersion(
     const recordPayload = buildRecordPayload(detail.records);
     const accessToken = await getFreshAccessToken();
 
+    // generate-essay 함수는 취향 리포트와 SNS 엽서 모두
+    // records 배열을 사용해 기록을 분석합니다.
     const functionBody = {
       type: requestedKind === "postcard" ? "sns-feed" : "taste-report",
       nickname: detail.nickname,
@@ -1337,48 +1344,27 @@ export async function generateEssayVersion(
       records: recordPayload,
     };
 
-    // 🚀 [핵심 수정 부분] AI 호출 실패 시 최대 2번 자동 재시도하는 로직 추가
-    let generated: ReturnType<typeof normalizePostcardResult> | ReturnType<typeof normalizeTasteReportResult> | null = null;
-    let lastError: unknown;
+    const { data, error } = await supabase.functions.invoke<Record<string, unknown>>(
+      ESSAY_FUNCTION_NAME,
+      {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+        },
+        body: functionBody,
+      },
+    );
 
-    for (let attempt = 1; attempt <= 2; attempt++) {
-      try {
-        const { data, error } = await supabase.functions.invoke<Record<string, unknown>>(
-          ESSAY_FUNCTION_NAME,
-          {
-            headers: {
-              Authorization: `Bearer ${accessToken}`,
-            },
-            body: functionBody,
-          },
-        );
-
-        if (error) {
-          throw new Error(await getFunctionInvokeErrorMessage(error));
-        }
-        if (!data) throw new Error("AI 생성 결과가 없습니다.");
-        if (typeof data.error === "string" && data.error.trim()) {
-          throw new Error(data.error);
-        }
-
-        // 응답 데이터 포맷이 맞는지 검증 시도
-        generated = requestedKind === "postcard"
-          ? normalizePostcardResult(data as PostcardAiResult)
-          : normalizeTasteReportResult(data as TasteReportAiResult, detail);
-
-        break; // 성공 시 반복문 탈출!
-      } catch (err) {
-        lastError = err;
-        console.warn(`[AI 에세이 생성 실패] 재시도 중... (${attempt}/2)`, err);
-        if (attempt === 2) {
-          throw err; // 두 번째도 실패하면 에러를 바깥으로 던짐
-        }
-      }
+    if (error) {
+      throw new Error(await getFunctionInvokeErrorMessage(error));
+    }
+    if (!data) throw new Error("AI 생성 결과가 없습니다.");
+    if (typeof data.error === "string" && data.error.trim()) {
+      throw new Error(data.error);
     }
 
-    if (!generated) {
-      throw lastError || new Error("AI 응답을 처리하지 못했습니다.");
-    }
+    const generated = requestedKind === "postcard"
+      ? normalizePostcardResult(data as PostcardAiResult)
+      : normalizeTasteReportResult(data as TasteReportAiResult, detail);
 
     const { data: inserted, error: insertError } = await supabase
       .from("essay_versions")
