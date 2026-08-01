@@ -1215,9 +1215,10 @@ type TasteReportAiResult = {
   aiRecommendation?: unknown;
 };
 
+// 🚀 [수정됨] 카드뉴스(슬라이드) 구조를 받을 수 있게 타입 변경
 type PostcardAiResult = {
   titleCardText?: unknown;
-  bodyCardText?: unknown;
+  slides?: unknown; 
   hashtags?: unknown;
   themeColor?: unknown;
   accentColor?: unknown;
@@ -1242,17 +1243,20 @@ function normalizeTasteReportResult(
   return { title, content, meta };
 }
 
+// 🚀 [수정됨] AI가 준 배열(slides)을 프론트엔드가 쓸 수 있게 JSON 문자열로 저장
 function normalizePostcardResult(result: PostcardAiResult) {
   const title = String(result.titleCardText ?? "").trim();
-  const content = String(result.bodyCardText ?? "").trim();
+  const slides = Array.isArray(result.slides) ? result.slides : [];
+  const content = JSON.stringify(slides); // DB 저장을 위해 직렬화
+
   const meta = normalizeGenerationMeta({
     hashtags: result.hashtags,
     themeColor: result.themeColor,
     accentColor: result.accentColor,
   });
 
-  if (!title || !content) {
-    throw new Error("AI가 엽서 제목과 본문을 반환하지 않았습니다.");
+  if (!title) {
+    throw new Error("AI가 엽서 제목을 반환하지 않았습니다.");
   }
 
   return { title, content, meta };
@@ -1337,7 +1341,6 @@ export async function generateEssayVersion(
       records: recordPayload,
     };
 
-    // 🚀 [핵심 수정 부분] AI 호출 실패 시 최대 2번 자동 재시도하는 로직 추가
     let generated: ReturnType<typeof normalizePostcardResult> | ReturnType<typeof normalizeTasteReportResult> | null = null;
     let lastError: unknown;
 
@@ -1475,9 +1478,15 @@ export async function selectEssayVersion(
   if (essayError) throw essayError;
 }
 
+// 🚀 [수정됨] 프론트엔드에서 수정한 해시태그와 사진 배열을 받아 저장할 수 있도록 파라미터와 로직 확장
 export async function saveEssayDraft(
   essayId: string,
-  values: { title: string; content: string },
+  values: { 
+    title: string; 
+    content: string;
+    hashtags?: string[]; 
+    selectedPhotoPaths?: string[]; 
+  },
 ) {
   const user = await getRequiredUser();
   const title = values.title.trim();
@@ -1486,11 +1495,38 @@ export async function saveEssayDraft(
   if (!title) throw new Error("제목을 입력해주세요.");
   if (!content) throw new Error("본문을 입력해주세요.");
 
+  // 기존 payload를 가져와서 덮어씌움
+  const { data: essay, error: fetchError } = await supabase
+    .from("essays")
+    .select("selected_payload")
+    .eq("id", essayId)
+    .eq("user_id", user.id)
+    .maybeSingle();
+
+  if (fetchError) throw fetchError;
+
+  const currentPayload = essay?.selected_payload && typeof essay.selected_payload === 'object' 
+    ? essay.selected_payload 
+    : {};
+
+  const newPayload = { 
+    ...(currentPayload as Record<string, unknown>), 
+  };
+
+  // 프론트에서 해시태그나 사진 수정본을 보냈다면 반영
+  if (values.hashtags) {
+    newPayload.hashtags = values.hashtags;
+  }
+  if (values.selectedPhotoPaths) {
+    newPayload.selectedPhotoPaths = values.selectedPhotoPaths;
+  }
+
   const { error } = await supabase
     .from("essays")
     .update({
       title,
       content,
+      selected_payload: newPayload,
       status: "draft",
       visibility: "private",
       published_at: null,
@@ -1537,4 +1573,4 @@ export async function publishEssay(
     .eq("user_id", user.id);
 
   if (error) throw error;
-}
+} 
