@@ -6,11 +6,11 @@ const ESSAY_FUNCTION_NAME =
   ).trim() || "generate-essay";
 
 export type EssayStyle = "plain" | "balanced" | "emotional";
-export type EssayVisibility = "private" | "public";
+export type EssayVisibility = "private" | "anonymous" | "nickname";
 export type EssayGenerationState = "idle" | "generating" | "error";
 export type EssayKind = "taste_report" | "postcard";
 export type PostcardFormat = "story" | "square";
-export type EssayVersionNo = 1 | 2 | 3;
+export type EssayVersionNo = number;
 
 export type EssayInsight = {
   keyword: string;
@@ -108,6 +108,7 @@ export type CreateEssayDraftOptions = {
 export type GenerateEssayVersionOptions = {
   kind: EssayKind;
   postcardFormat?: PostcardFormat | null;
+  style?: EssayStyle;
 };
 
 type RawEssay = {
@@ -199,7 +200,11 @@ function getCompletedDayCount(records: RawRecord[]) {
 }
 
 function normalizeVisibility(value: string | null): EssayVisibility {
-  return value === "public" ? "public" : "private";
+  if (value === "anonymous" || value === "nickname") {
+    return value;
+  }
+
+  return "private";
 }
 
 function normalizeGenerationState(
@@ -209,7 +214,9 @@ function normalizeGenerationState(
 }
 
 function normalizeVersionNo(value: number | null): EssayVersionNo | null {
-  return value === 1 || value === 2 || value === 3 ? value : null;
+  return Number.isInteger(value) && Number(value) >= 1
+    ? Number(value)
+    : null;
 }
 
 function normalizeEssayKind(value: string | null | undefined): EssayKind {
@@ -285,14 +292,21 @@ export function getBookWidthByDuration(durationDays: number) {
 
 async function getRequiredUser() {
   const {
-    data: { user },
+    data: { session },
     error,
-  } = await supabase.auth.getUser();
+  } = await supabase.auth.getSession();
 
-  if (error) throw error;
-  if (!user) throw new Error("로그인이 필요합니다.");
+  if (error) {
+    throw error;
+  }
 
-  return user;
+  if (!session?.user) {
+    throw new Error(
+      "로그인 세션이 없습니다. 다시 로그인해주세요.",
+    );
+  }
+
+  return session.user;
 }
 
 async function getFreshAccessToken() {
@@ -1256,7 +1270,9 @@ export async function generateEssayVersion(
 
   const { data: essay, error: essayError } = await supabase
     .from("essays")
-    .select("id, user_id, selected_version_no, essay_type, postcard_format")
+    .select(
+      "id, user_id, selected_version_no, essay_type, postcard_format, generation_count, generation_state",
+    )
     .eq("id", essayId)
     .eq("user_id", user.id)
     .maybeSingle();
@@ -1280,18 +1296,26 @@ export async function generateEssayVersion(
     throw new Error("다시 만들기는 최대 두 번까지 사용할 수 있습니다.");
   }
 
+  // 기존 DB의 style 필드는 호환성을 위해 유지하지만,
+  // 다시 만들기에서는 말투가 아니라 결과 형식을 선택합니다.
   const style: EssayStyle = "balanced";
 
-  const { error: startError } = await supabase
+  const { data: startedEssay, error: startError } = await supabase
     .from("essays")
     .update({
       generation_state: "generating",
       generation_started_at: new Date().toISOString(),
     })
     .eq("id", essayId)
-    .eq("user_id", user.id);
+    .eq("user_id", user.id)
+    .neq("generation_state", "generating")
+    .select("id")
+    .maybeSingle();
 
   if (startError) throw startError;
+  if (!startedEssay) {
+    throw new Error("이미 AI 에세이를 생성하고 있습니다.");
+  }
 
   try {
     const detail = await getEssayById(essayId);
@@ -1378,7 +1402,7 @@ export async function generateEssayVersion(
     const { error: finishError } = await supabase
       .from("essays")
       .update({
-        generation_count: versionNo,
+        generation_count: Number(essay.generation_count ?? 0) + 1,
         generation_state: "idle",
         generation_started_at: null,
       })
@@ -1477,7 +1501,10 @@ export async function saveEssayDraft(
   if (error) throw error;
 }
 
-export async function publishEssay(essayId: string) {
+export async function publishEssay(
+  essayId: string,
+  visibility: Exclude<EssayVisibility, "private"> = "nickname",
+) {
   const user = await getRequiredUser();
 
   const { data: essay, error: readError } = await supabase
@@ -1502,7 +1529,7 @@ export async function publishEssay(essayId: string) {
   const { error } = await supabase
     .from("essays")
     .update({
-      visibility: "public",
+      visibility,
       status: "completed",
       published_at: new Date().toISOString(),
     })
