@@ -2,7 +2,7 @@ import { Ionicons } from "@expo/vector-icons";
 import * as ImagePicker from "expo-image-picker";
 import * as Location from "expo-location";
 import { useRouter } from "expo-router";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
   Animated,
@@ -63,8 +63,8 @@ type KakaoPlace = {
   id: string;
   place_name: string;
   address_name: string;
-  x: string; // lng
-  y: string; // lat
+  x: string;
+  y: string;
 };
 
 const EMOTIONS: Array<{ label: string; value: EmotionValue; emoji: string }> = [
@@ -75,7 +75,14 @@ const EMOTIONS: Array<{ label: string; value: EmotionValue; emoji: string }> = [
   { label: "잘 모르겠어요", value: "unsure", emoji: "🤔" },
 ];
 
-// 백엔드 연결 실패 시 대체용 (기존 목업)
+const EMOTION_LABEL: Record<string, string> = {
+  comfortable: "편안해요",
+  joyful: "즐거워요",
+  new: "새로워요",
+  uncomfortable: "불편해요",
+  unsure: "잘 모르겠어요",
+};
+
 const MOCK_BUBBLES = [
   { id: "mock-1", user_id: null, place: "연남동 카페 봄날", lat: 35.1795543, lng: 129.0806416, mission: "조용한 카페에서 30분 독서", time: "2일 전", nick: "소리의 탐험가", emotion: "차분함", note: "창가 자리에서 책 읽으니 딴 세상 같았어요.", likes: 12, category: "휴식", photo: "https://images.unsplash.com/photo-1493857671505-72967e2e2760?w=200&h=200&fit=crop" },
   { id: "mock-2", user_id: null, place: "경의선 숲길", lat: 35.1825543, lng: 129.0756416, mission: "공원 산책하며 계절 사진 찍기", time: "1일 전", nick: "산책러", emotion: "상쾌함", note: "노을 질 때가 진짜 예뻐요.", likes: 8, category: "산책", photo: "https://images.unsplash.com/photo-1441974231531-c6227db76b6e?w=200&h=200&fit=crop" },
@@ -111,7 +118,7 @@ async function buildBubbleList(posts: any[]) {
         mission: p.content.slice(0, 20),
         time: new Date(p.created_at).toLocaleDateString("ko-KR"),
         nick: p.visibility === "anonymous" ? "익명" : "작성자",
-        emotion: p.emotion,
+        emotion: EMOTION_LABEL[p.emotion] ?? p.emotion,
         note: p.content,
         likes: p.likes_count,
         category: p.category ?? "기타",
@@ -120,6 +127,13 @@ async function buildBubbleList(posts: any[]) {
       };
     })
   );
+}
+
+function normalizeInterests(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value.filter((item): item is string => typeof item === "string");
+  }
+  return [];
 }
 
 export default function DiscoverScreen() {
@@ -139,6 +153,7 @@ export default function DiscoverScreen() {
   const [tryingMission, setTryingMission] = useState(false);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [myInterests, setMyInterests] = useState<string[]>([]);
 
   const [pickerVisible, setPickerVisible] = useState(false);
   const [pickedLocation, setPickedLocation] = useState<{ lat: number; lng: number } | null>(null);
@@ -178,6 +193,15 @@ export default function DiscoverScreen() {
       } = await supabase.auth.getUser();
       setCurrentUserId(user?.id ?? null);
 
+      if (user) {
+        const { data: profileData } = await supabase
+          .from("profiles")
+          .select("interests")
+          .eq("id", user.id)
+          .maybeSingle();
+        setMyInterests(normalizeInterests(profileData?.interests));
+      }
+
       let lat = DEFAULT_CENTER.lat;
       let lng = DEFAULT_CENTER.lng;
 
@@ -202,7 +226,6 @@ export default function DiscoverScreen() {
     init();
   }, []);
 
-  // 검색어 입력 → 카카오 장소 검색 (디바운스)
   useEffect(() => {
     if (searchDebounce.current) clearTimeout(searchDebounce.current);
 
@@ -271,6 +294,22 @@ export default function DiscoverScreen() {
 
   const webDragStyle = Platform.OS === "web" ? { touchAction: "none", cursor: "grab" } : undefined;
 
+  const filteredBubbles = useMemo(() => {
+    if (activeFilter === "내 취향") {
+      if (myInterests.length === 0) return bubbles;
+      return bubbles.filter((b) => myInterests.includes(b.category));
+    }
+    if (activeFilter === "새로운 분야") {
+      if (myInterests.length === 0) return bubbles;
+      return bubbles.filter((b) => !myInterests.includes(b.category));
+    }
+    if (activeFilter === "산책") {
+      return bubbles.filter((b) => b.category === "산책");
+    }
+    // 가까운 기록 / 최근 기록은 조회 시점에 이미 그렇게 정렬/제한되어 있어요
+    return bubbles;
+  }, [activeFilter, bubbles, myInterests]);
+
   const handleTryMission = async () => {
     if (!sheetBubble) return;
 
@@ -304,7 +343,6 @@ export default function DiscoverScreen() {
         placeLat: sheetBubble.lat,
         placeLng: sheetBubble.lng,
         placeName: sheetBubble.place,
-        photoUrl: sheetBubble.photo,
       });
 
       shareMissionToHome({
@@ -361,7 +399,6 @@ export default function DiscoverScreen() {
     ]);
   };
 
-  // 검색 결과 선택 → 지도 이동 + 그 주변 기록 다시 불러오기
   const handleSelectSearchResult = async (place: KakaoPlace) => {
     const lat = parseFloat(place.y);
     const lng = parseFloat(place.x);
@@ -514,7 +551,7 @@ export default function DiscoverScreen() {
         latitude={mapCenter.lat}
         longitude={mapCenter.lng}
         userLocation={userLocation}
-        markers={bubbles.map((b) => ({
+        markers={filteredBubbles.map((b) => ({
           id: b.id,
           lat: b.lat,
           lng: b.lng,
@@ -651,7 +688,7 @@ export default function DiscoverScreen() {
         <Animated.View style={[styles.fabGlow, { transform: [{ scale: glowScale }], opacity: glowOpacity }]} />
         <Animated.View style={{ transform: [{ scale: btnScale }] }}>
           <Pressable style={styles.fabBtn} onPress={openPicker}>
-            <Ionicons name="create-outline" size={26} color={WH} />
+            <Ionicons name="add" size={30} color={WH} />
           </Pressable>
         </Animated.View>
       </View>
