@@ -39,6 +39,7 @@ import {
   getMissionById,
   getRecommendedMissions,
 } from "../../services/challenge.service";
+import { createDiscoverPost } from "../../services/service_missons";
 
 const BL = "#3D5AFE";
 const BLL = "#EEF1FF";
@@ -69,6 +70,29 @@ const SECTION_INDICATOR_WIDTH =
   (SCREEN_WIDTH - SECTION_HORIZONTAL_MARGIN * 2) / 3;
 
 const KAKAO_JS_KEY = "f937d15a94db64ab114b3495f8b6ad3c";
+const KAKAO_REST_API_KEY = "c10a1b62f7bbf1d90e0ff60bb94bdadd";
+const KAKAO_PLACE_CATEGORY_CODES = [
+  "MT1",
+  "CS2",
+  "PS3",
+  "SC4",
+  "AC5",
+  "PK6",
+  "OL7",
+  "SW8",
+  "BK9",
+  "CT1",
+  "AG2",
+  "PO3",
+  "AT4",
+  "AD5",
+  "FD6",
+  "CE7",
+  "HP8",
+  "PM9",
+] as const;
+const KAKAO_PLACE_SEARCH_RADII_M = [500, 2000] as const;
+const KAKAO_PLACE_CANDIDATE_LIMIT = 5;
 const DEFAULT_ANY_RADIUS_KM = 3;
 const DISTRICT_TOPOJSON_URL =
   "https://raw.githubusercontent.com/southkorea/southkorea-maps/master/kostat/2018/json/skorea-municipalities-2018-topo-simple.json";
@@ -132,6 +156,8 @@ type Coordinate = {
   lng: number;
 };
 
+type RecordLocationKind = "place" | "map" | "home";
+
 type LngLat = [number, number];
 type DistrictPolygon = LngLat[][];
 
@@ -143,6 +169,8 @@ type PlaceCandidate = {
   address?: string;
   districtName?: string;
   category?: CategoryName;
+  categoryDetail?: string;
+  distanceM?: number;
 };
 
 type HomeMission = {
@@ -235,6 +263,8 @@ type CompletedRecord = {
   photoUrls: string[];
   locationLat: number | null;
   locationLng: number | null;
+  locationType: RecordLocationKind | null;
+  locationName: string;
 };
 
 type MissionListItem = {
@@ -946,6 +976,299 @@ function haversineDistanceKm(
   return earthRadiusKm * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
+
+type KakaoPlaceDocument = {
+  id?: string;
+  place_name?: string;
+  category_name?: string;
+  category_group_name?: string;
+  address_name?: string;
+  road_address_name?: string;
+  x?: string;
+  y?: string;
+  distance?: string;
+};
+
+type KakaoAddressDocument = {
+  address?: {
+    address_name?: string;
+    region_1depth_name?: string;
+    region_2depth_name?: string;
+    region_3depth_name?: string;
+    main_address_no?: string;
+    sub_address_no?: string;
+  } | null;
+  road_address?: {
+    address_name?: string;
+    region_1depth_name?: string;
+    region_2depth_name?: string;
+    region_3depth_name?: string;
+    road_name?: string;
+    building_name?: string;
+  } | null;
+};
+
+async function fetchKakaoCategoryPlaces(
+  coordinate: Coordinate,
+  categoryCode: string,
+  radiusM: number,
+): Promise<KakaoPlaceDocument[]> {
+  const url =
+    "https://dapi.kakao.com/v2/local/search/category.json" +
+    `?category_group_code=${encodeURIComponent(categoryCode)}` +
+    `&x=${encodeURIComponent(String(coordinate.lng))}` +
+    `&y=${encodeURIComponent(String(coordinate.lat))}` +
+    `&radius=${radiusM}` +
+    "&sort=distance&size=15";
+
+  const response = await fetch(url, {
+    headers: {
+      Authorization: `KakaoAK ${KAKAO_REST_API_KEY}`,
+    },
+  });
+
+  if (!response.ok) {
+    const body = await response.text().catch(() => "");
+    throw new Error(
+      `카카오 장소 검색 실패 (${response.status})${body ? `: ${body}` : ""}`,
+    );
+  }
+
+  const data = (await response.json()) as {
+    documents?: KakaoPlaceDocument[];
+  };
+
+  return Array.isArray(data.documents) ? data.documents : [];
+}
+
+async function fetchKakaoKeywordPlaces(
+  coordinate: Coordinate,
+  query: string,
+  radiusM: number,
+): Promise<KakaoPlaceDocument[]> {
+  const url =
+    "https://dapi.kakao.com/v2/local/search/keyword.json" +
+    `?query=${encodeURIComponent(query)}` +
+    `&x=${encodeURIComponent(String(coordinate.lng))}` +
+    `&y=${encodeURIComponent(String(coordinate.lat))}` +
+    `&radius=${radiusM}` +
+    "&sort=distance&size=15";
+
+  const response = await fetch(url, {
+    headers: {
+      Authorization: `KakaoAK ${KAKAO_REST_API_KEY}`,
+    },
+  });
+
+  if (!response.ok) {
+    const body = await response.text().catch(() => "");
+    throw new Error(
+      `카카오 장소 검색 실패 (${response.status})${body ? `: ${body}` : ""}`,
+    );
+  }
+
+  const data = (await response.json()) as {
+    documents?: KakaoPlaceDocument[];
+  };
+
+  return Array.isArray(data.documents) ? data.documents : [];
+}
+
+async function fetchKakaoAddressKeywords(
+  coordinate: Coordinate,
+): Promise<string[]> {
+  const url =
+    "https://dapi.kakao.com/v2/local/geo/coord2address.json" +
+    `?x=${encodeURIComponent(String(coordinate.lng))}` +
+    `&y=${encodeURIComponent(String(coordinate.lat))}`;
+
+  const response = await fetch(url, {
+    headers: {
+      Authorization: `KakaoAK ${KAKAO_REST_API_KEY}`,
+    },
+  });
+
+  if (!response.ok) {
+    const body = await response.text().catch(() => "");
+    throw new Error(
+      `카카오 주소 조회 실패 (${response.status})${body ? `: ${body}` : ""}`,
+    );
+  }
+
+  const data = (await response.json()) as {
+    documents?: KakaoAddressDocument[];
+  };
+  const document = Array.isArray(data.documents)
+    ? data.documents[0]
+    : undefined;
+
+  if (!document) {
+    return [];
+  }
+
+  const address = document.address;
+  const roadAddress = document.road_address;
+  const roadAreaKeyword = [
+    roadAddress?.region_3depth_name,
+    roadAddress?.road_name,
+  ]
+    .filter((value): value is string => Boolean(value?.trim()))
+    .join(" ");
+
+  const keywordCandidates = [
+    roadAddress?.building_name,
+    roadAddress?.address_name,
+    address?.address_name,
+    roadAreaKeyword,
+    roadAddress?.region_3depth_name,
+    address?.region_3depth_name,
+  ];
+
+  return [...new Set(
+    keywordCandidates
+      .map((value) => String(value ?? "").trim())
+      .filter((value) => value.length >= 2),
+  )].slice(0, 5);
+}
+
+function toPlaceCandidate(
+  document: KakaoPlaceDocument,
+  coordinate: Coordinate,
+): PlaceCandidate | null {
+  const id = String(document.id ?? "").trim();
+  const name = String(document.place_name ?? "").trim();
+  const latitude = Number(document.y);
+  const longitude = Number(document.x);
+
+  if (
+    !id ||
+    !name ||
+    !Number.isFinite(latitude) ||
+    !Number.isFinite(longitude)
+  ) {
+    return null;
+  }
+
+  const calculatedDistanceM = Math.round(
+    haversineDistanceKm(coordinate, {
+      lat: latitude,
+      lng: longitude,
+    }) * 1000,
+  );
+  const apiDistanceM = Number(document.distance);
+  const distanceM = Number.isFinite(apiDistanceM)
+    ? Math.max(0, Math.round(apiDistanceM))
+    : Math.max(0, calculatedDistanceM);
+  const categoryText =
+    document.category_group_name ||
+    document.category_name ||
+    "";
+
+  return {
+    id,
+    name,
+    latitude,
+    longitude,
+    address:
+      document.road_address_name ||
+      document.address_name ||
+      undefined,
+    category: normalizeCategory(
+      categoryText,
+      `${name} ${document.category_name ?? ""}`,
+    ),
+    categoryDetail: document.category_name || undefined,
+    distanceM,
+  };
+}
+
+async function searchNearbyKakaoPlaces(
+  coordinate: Coordinate,
+): Promise<PlaceCandidate[]> {
+  let addressKeywords: string[] = [];
+  let successfulRequestCount = 0;
+  let lastError: unknown = null;
+  const uniquePlaces = new Map<string, PlaceCandidate>();
+
+  try {
+    addressKeywords = await fetchKakaoAddressKeywords(coordinate);
+  } catch (error) {
+    // 주소 문맥 검색이 실패해도 전체 카테고리 검색은 계속 진행합니다.
+    lastError = error;
+  }
+
+  for (const radiusM of KAKAO_PLACE_SEARCH_RADII_M) {
+    const requests = [
+      ...KAKAO_PLACE_CATEGORY_CODES.map((categoryCode) =>
+        fetchKakaoCategoryPlaces(
+          coordinate,
+          categoryCode,
+          radiusM,
+        ),
+      ),
+      ...addressKeywords.map((keyword) =>
+        fetchKakaoKeywordPlaces(coordinate, keyword, radiusM),
+      ),
+    ];
+
+    const results = await Promise.allSettled(requests);
+
+    for (const result of results) {
+      if (result.status === "rejected") {
+        lastError = result.reason;
+        continue;
+      }
+
+      successfulRequestCount += 1;
+
+      for (const document of result.value) {
+        const candidate = toPlaceCandidate(document, coordinate);
+        if (!candidate) {
+          continue;
+        }
+
+        const previous = uniquePlaces.get(candidate.id);
+        if (
+          !previous ||
+          (candidate.distanceM ?? Number.POSITIVE_INFINITY) <
+            (previous.distanceM ?? Number.POSITIVE_INFINITY)
+        ) {
+          uniquePlaces.set(candidate.id, candidate);
+        }
+      }
+    }
+
+    if (uniquePlaces.size >= KAKAO_PLACE_CANDIDATE_LIMIT) {
+      break;
+    }
+  }
+
+  if (successfulRequestCount === 0 && lastError) {
+    throw lastError;
+  }
+
+  return [...uniquePlaces.values()]
+    .sort(
+      (left, right) =>
+        (left.distanceM ?? Number.POSITIVE_INFINITY) -
+        (right.distanceM ?? Number.POSITIVE_INFINITY),
+    )
+    .slice(0, KAKAO_PLACE_CANDIDATE_LIMIT);
+}
+
+function formatPlaceDistance(distanceM: number | undefined) {
+  if (typeof distanceM !== "number" || !Number.isFinite(distanceM)) {
+    return "거리 정보 없음";
+  }
+
+  const safeDistance = Math.max(0, Math.round(distanceM ?? 0));
+
+  if (safeDistance < 1000) {
+    return `약 ${safeDistance}m`;
+  }
+
+  return `약 ${(safeDistance / 1000).toFixed(1)}km`;
+}
 
 function containsHangul(value: string | null | undefined) {
   return /[가-힣]/.test(value ?? "");
@@ -2831,15 +3154,21 @@ function LocationPickerMap({
 }
 
 
+
 function RecordLocationPickerMap({
   center,
   pickedLocation,
+  guideText = "지도를 눌러 길 위·야외 위치를 표시하세요",
   onSelect,
 }: {
   center: Coordinate;
   pickedLocation: Coordinate | null;
+  guideText?: string;
   onSelect: (coordinate: Coordinate) => void;
 }) {
+  const webViewRef = useRef<any>(null);
+  const mapReadyRef = useRef(false);
+
   const html = useMemo(
     () => `
 <!doctype html>
@@ -2849,14 +3178,23 @@ function RecordLocationPickerMap({
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
   <style>
     html, body, #map { width: 100%; height: 100%; margin: 0; padding: 0; }
+    body { overflow: hidden; }
     #loading {
       position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
       background: #f7f8fa; color: #5c5f6a; font-family: sans-serif; font-size: 13px; z-index: 10;
+    }
+    #guide {
+      position: fixed; top: 10px; left: 50%; transform: translateX(-50%);
+      max-width: calc(100vw - 28px); padding: 8px 12px; border-radius: 999px;
+      background: rgba(255,255,255,0.96); color: #3d5afe; font-size: 11px;
+      line-height: 15px; font-weight: 800; white-space: nowrap;
+      box-shadow: 0 3px 12px rgba(0,0,0,0.14); z-index: 20;
     }
   </style>
 </head>
 <body>
   <div id="loading">지도를 불러오는 중이에요</div>
+  <div id="guide">${guideText.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}</div>
   <div id="map"></div>
   <script src="https://dapi.kakao.com/v2/maps/sdk.js?appkey=${KAKAO_JS_KEY}&autoload=false"></script>
   <script>
@@ -2870,58 +3208,98 @@ function RecordLocationPickerMap({
       });
 
       let marker = null;
-      const initialPicked = ${JSON.stringify(pickedLocation)};
 
-      const makeMarker = (latLng) => {
+      const postLocation = function (position) {
+        window.ReactNativeWebView.postMessage(JSON.stringify({
+          type: 'recordLocation',
+          lat: position.getLat(),
+          lng: position.getLng(),
+        }));
+      };
+
+      window.setPickedLocation = function (lat, lng, shouldPan) {
+        lat = Number(lat);
+        lng = Number(lng);
+        if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+
+        const latLng = new kakao.maps.LatLng(lat, lng);
+
         if (!marker) {
           marker = new kakao.maps.Marker({
-            map,
+            map: map,
             position: latLng,
             draggable: true,
           });
 
           kakao.maps.event.addListener(marker, 'dragend', function () {
-            const position = marker.getPosition();
-            window.ReactNativeWebView.postMessage(JSON.stringify({
-              type: 'recordLocation',
-              lat: position.getLat(),
-              lng: position.getLng(),
-            }));
+            postLocation(marker.getPosition());
           });
         } else {
           marker.setPosition(latLng);
+          marker.setMap(map);
         }
 
-        map.panTo(latLng);
+        if (shouldPan) {
+          map.panTo(latLng);
+        }
       };
 
-      if (initialPicked && Number.isFinite(initialPicked.lat) && Number.isFinite(initialPicked.lng)) {
-        makeMarker(new kakao.maps.LatLng(initialPicked.lat, initialPicked.lng));
-      }
+      window.focusRecordLocationMap = function (lat, lng) {
+        lat = Number(lat);
+        lng = Number(lng);
+        if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+        map.panTo(new kakao.maps.LatLng(lat, lng));
+      };
 
       kakao.maps.event.addListener(map, 'click', function (mouseEvent) {
-        makeMarker(mouseEvent.latLng);
-        window.ReactNativeWebView.postMessage(JSON.stringify({
-          type: 'recordLocation',
-          lat: mouseEvent.latLng.getLat(),
-          lng: mouseEvent.latLng.getLng(),
-        }));
+        const position = mouseEvent.latLng;
+        window.setPickedLocation(position.getLat(), position.getLng(), false);
+        postLocation(position);
       });
+
+      window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'recordLocationMapReady' }));
     });
   </script>
 </body>
 </html>`,
-    [center.lat, center.lng, pickedLocation?.lat, pickedLocation?.lng],
+    [center.lat, center.lng, guideText],
   );
+
+  const source = useMemo(() => ({ html }), [html]);
+
+  const syncPickedLocation = useCallback(
+    (shouldPan: boolean) => {
+      if (!mapReadyRef.current || !pickedLocation) return;
+
+      webViewRef.current?.injectJavaScript(`
+        if (window.setPickedLocation) {
+          window.setPickedLocation(
+            ${pickedLocation.lat},
+            ${pickedLocation.lng},
+            ${shouldPan ? "true" : "false"}
+          );
+        }
+        true;
+      `);
+    },
+    [pickedLocation?.lat, pickedLocation?.lng],
+  );
+
+  useEffect(() => {
+    syncPickedLocation(true);
+  }, [syncPickedLocation]);
 
   return (
     <WebView
-      key={`${center.lat.toFixed(5)}-${center.lng.toFixed(5)}-${pickedLocation?.lat?.toFixed(5) ?? "none"}-${pickedLocation?.lng?.toFixed(5) ?? "none"}`}
+      ref={webViewRef}
       originWhitelist={["*"]}
-      source={{ html }}
+      source={source}
       javaScriptEnabled
       domStorageEnabled
       mixedContentMode="always"
+      onLoadStart={() => {
+        mapReadyRef.current = false;
+      }}
       onMessage={(event) => {
         try {
           const message = JSON.parse(event.nativeEvent.data) as {
@@ -2929,6 +3307,12 @@ function RecordLocationPickerMap({
             lat?: number;
             lng?: number;
           };
+
+          if (message.type === "recordLocationMapReady") {
+            mapReadyRef.current = true;
+            syncPickedLocation(false);
+            return;
+          }
 
           if (
             message.type === "recordLocation" &&
@@ -2945,6 +3329,553 @@ function RecordLocationPickerMap({
     />
   );
 }
+
+
+type ActualPlaceSearchRequest = {
+  coordinate: Coordinate;
+  nonce: number;
+};
+
+function ActualPlacePickerMap({
+  center,
+  selectedPlace,
+  searchRequest,
+  onLoadingChange,
+  onPlaceSelected,
+}: {
+  center: Coordinate;
+  selectedPlace: PlaceCandidate | null;
+  searchRequest: ActualPlaceSearchRequest | null;
+  onLoadingChange: (loading: boolean) => void;
+  onPlaceSelected: (
+    place: PlaceCandidate,
+    tappedCoordinate: Coordinate,
+    distanceM: number,
+  ) => void;
+}) {
+  const webViewRef = useRef<any>(null);
+  const mapReadyRef = useRef(false);
+
+  const html = useMemo(
+    () => `
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <style>
+    * { box-sizing: border-box; }
+    html, body, #map { width: 100%; height: 100%; margin: 0; padding: 0; }
+    body {
+      overflow: hidden;
+      font-family: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", sans-serif;
+    }
+    #loading {
+      position: fixed;
+      inset: 0;
+      z-index: 30;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #f7f8fa;
+      color: #5c5f6a;
+      font-size: 13px;
+    }
+    #status {
+      position: fixed;
+      top: 10px;
+      left: 50%;
+      z-index: 20;
+      max-width: calc(100vw - 28px);
+      padding: 8px 12px;
+      transform: translateX(-50%);
+      border-radius: 999px;
+      background: rgba(255,255,255,0.96);
+      box-shadow: 0 3px 12px rgba(0,0,0,0.14);
+      color: #3d5afe;
+      font-size: 11px;
+      font-weight: 800;
+      line-height: 15px;
+      text-align: center;
+      white-space: nowrap;
+    }
+    .tap-pin {
+      position: relative;
+      width: 18px;
+      height: 18px;
+      border: 3px solid #ffffff;
+      border-radius: 50%;
+      background: #ec4899;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.28);
+    }
+    .tap-pin::after {
+      content: "";
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      width: 34px;
+      height: 34px;
+      transform: translate(-50%, -50%);
+      border: 2px solid rgba(236,72,153,0.42);
+      border-radius: 50%;
+    }
+    .selected-card {
+      min-width: 210px;
+      max-width: 270px;
+      padding: 10px 12px;
+      border: 2px solid #3d5afe;
+      border-radius: 12px;
+      background: #ffffff;
+      box-shadow: 0 5px 16px rgba(0,0,0,0.20);
+    }
+    .selected-caption {
+      margin-bottom: 3px;
+      color: #3d5afe;
+      font-size: 10px;
+      font-weight: 850;
+    }
+    .selected-name {
+      overflow: hidden;
+      color: #111111;
+      font-size: 13px;
+      font-weight: 850;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .selected-address {
+      overflow: hidden;
+      margin-top: 3px;
+      color: #777777;
+      font-size: 10px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+  </style>
+</head>
+<body>
+  <div id="loading">지도를 불러오는 중이에요</div>
+  <div id="status">지도를 눌러 미션을 한 위치를 선택하세요</div>
+  <div id="map"></div>
+  <script src="https://dapi.kakao.com/v2/maps/sdk.js?appkey=${KAKAO_JS_KEY}&autoload=false&libraries=services"></script>
+  <script>
+    kakao.maps.load(function () {
+      document.getElementById('loading').style.display = 'none';
+
+      const initial = new kakao.maps.LatLng(${center.lat}, ${center.lng});
+      const map = new kakao.maps.Map(document.getElementById('map'), {
+        center: initial,
+        level: 4,
+      });
+
+      const placesService = new kakao.maps.services.Places();
+      const categoryCodes = [
+        'MT1', 'CS2', 'PS3', 'SC4', 'AC5', 'PK6', 'OL7', 'SW8', 'BK9',
+        'CT1', 'AG2', 'PO3', 'AT4', 'AD5', 'FD6', 'CE7', 'HP8', 'PM9'
+      ];
+      const searchRadii = [80, 200, 500, 1000, 2000];
+
+      const statusElement = document.getElementById('status');
+      let tapOverlay = null;
+      let selectedMarker = null;
+      let selectedInfoOverlay = null;
+      let searchSequence = 0;
+
+      const post = function (payload) {
+        window.ReactNativeWebView.postMessage(JSON.stringify(payload));
+      };
+
+      const escapeHtml = function (value) {
+        return String(value || '')
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;')
+          .replace(/'/g, '&#039;');
+      };
+
+      const distanceBetween = function (lat1, lng1, lat2, lng2) {
+        const R = 6371000;
+        const toRad = function (degree) { return degree * Math.PI / 180; };
+        const dLat = toRad(lat2 - lat1);
+        const dLng = toRad(lng2 - lng1);
+        const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+          Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
+          Math.sin(dLng / 2) * Math.sin(dLng / 2);
+        return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+      };
+
+      const normalizePlace = function (raw) {
+        return {
+          id: String(raw.id || ''),
+          name: String(raw.place_name || raw.name || ''),
+          latitude: Number(raw.y ?? raw.latitude),
+          longitude: Number(raw.x ?? raw.longitude),
+          address: String(raw.road_address_name || raw.address_name || raw.address || ''),
+          category: String(raw.category_group_name || raw.category_name || raw.category || ''),
+        };
+      };
+
+      const clearSelectedPlace = function () {
+        if (selectedMarker) {
+          selectedMarker.setMap(null);
+          selectedMarker = null;
+        }
+        if (selectedInfoOverlay) {
+          selectedInfoOverlay.setMap(null);
+          selectedInfoOverlay = null;
+        }
+      };
+
+      const showTapPosition = function (position) {
+        if (tapOverlay) {
+          tapOverlay.setMap(null);
+        }
+
+        const pin = document.createElement('div');
+        pin.className = 'tap-pin';
+
+        tapOverlay = new kakao.maps.CustomOverlay({
+          map: map,
+          position: position,
+          content: pin,
+          xAnchor: 0.5,
+          yAnchor: 0.5,
+          zIndex: 45,
+        });
+      };
+
+      const showSelectedPlace = function (rawPlace, shouldPan) {
+        const place = normalizePlace(rawPlace);
+        if (
+          !place.id ||
+          !place.name ||
+          !Number.isFinite(place.latitude) ||
+          !Number.isFinite(place.longitude)
+        ) {
+          return;
+        }
+
+        clearSelectedPlace();
+
+        const position = new kakao.maps.LatLng(
+          place.latitude,
+          place.longitude
+        );
+
+        selectedMarker = new kakao.maps.Marker({
+          map: map,
+          position: position,
+          title: place.name,
+          zIndex: 50,
+        });
+
+        const content = document.createElement('div');
+        content.className = 'selected-card';
+        content.innerHTML =
+          '<div class="selected-caption">자동으로 찾은 실제 장소</div>' +
+          '<div class="selected-name">' + escapeHtml(place.name) + '</div>' +
+          '<div class="selected-address">' +
+            escapeHtml(place.address || '주소 정보 없음') +
+          '</div>';
+
+        selectedInfoOverlay = new kakao.maps.CustomOverlay({
+          map: map,
+          position: position,
+          content: content,
+          xAnchor: 0.5,
+          yAnchor: 1.55,
+          zIndex: 60,
+        });
+
+        if (shouldPan) {
+          map.panTo(position);
+        }
+
+        statusElement.textContent = '선택됨 · ' + place.name;
+      };
+
+      const searchCategoryAt = function (categoryCode, location, radius) {
+        return new Promise(function (resolve) {
+          placesService.categorySearch(
+            categoryCode,
+            function (data, status) {
+              if (status === kakao.maps.services.Status.OK) {
+                resolve(data || []);
+                return;
+              }
+              resolve([]);
+            },
+            {
+              location: location,
+              radius: radius,
+              size: 15,
+              sort: kakao.maps.services.SortBy.DISTANCE,
+            }
+          );
+        });
+      };
+
+      const findNearestPlace = async function (tappedPosition) {
+        const currentSequence = ++searchSequence;
+        const tappedLat = tappedPosition.getLat();
+        const tappedLng = tappedPosition.getLng();
+
+        clearSelectedPlace();
+        showTapPosition(tappedPosition);
+        statusElement.textContent = '누른 위치에서 가장 가까운 실제 장소를 찾는 중이에요';
+        post({ type: 'recordPlaceListLoading' });
+
+        try {
+          for (const radius of searchRadii) {
+            const groups = await Promise.all(
+              categoryCodes.map(function (code) {
+                return searchCategoryAt(code, tappedPosition, radius);
+              })
+            );
+
+            if (currentSequence !== searchSequence) {
+              return;
+            }
+
+            const unique = {};
+            groups.flat().forEach(function (rawPlace) {
+              if (rawPlace && rawPlace.id) {
+                unique[String(rawPlace.id)] = rawPlace;
+              }
+            });
+
+            const results = Object.values(unique)
+              .map(function (rawPlace) {
+                const place = normalizePlace(rawPlace);
+                const apiDistance = Number(rawPlace.distance);
+                const distanceM = Number.isFinite(apiDistance)
+                  ? apiDistance
+                  : distanceBetween(
+                      tappedLat,
+                      tappedLng,
+                      place.latitude,
+                      place.longitude
+                    );
+
+                return {
+                  rawPlace: rawPlace,
+                  place: place,
+                  distanceM: distanceM,
+                };
+              })
+              .filter(function (entry) {
+                return (
+                  entry.place.id &&
+                  entry.place.name &&
+                  Number.isFinite(entry.place.latitude) &&
+                  Number.isFinite(entry.place.longitude) &&
+                  Number.isFinite(entry.distanceM)
+                );
+              })
+              .sort(function (left, right) {
+                return left.distanceM - right.distanceM;
+              });
+
+            if (results.length > 0) {
+              const nearest = results[0];
+              showSelectedPlace(nearest.rawPlace, false);
+              post({
+                type: 'recordPlaceSelected',
+                tappedLat: tappedLat,
+                tappedLng: tappedLng,
+                distanceM: Math.round(nearest.distanceM),
+                place: nearest.place,
+              });
+              return;
+            }
+          }
+
+          if (currentSequence !== searchSequence) {
+            return;
+          }
+
+          statusElement.textContent = '주변에서 실제 장소를 찾지 못했어요. 다른 위치를 눌러주세요';
+          post({
+            type: 'recordPlaceNotFound',
+            tappedLat: tappedLat,
+            tappedLng: tappedLng,
+          });
+        } catch (_) {
+          if (currentSequence !== searchSequence) {
+            return;
+          }
+
+          statusElement.textContent = '장소 검색에 실패했어요. 다시 눌러주세요';
+          post({ type: 'recordPlaceSearchError' });
+        }
+      };
+
+      window.focusActualPlaceMap = function (lat, lng) {
+        lat = Number(lat);
+        lng = Number(lng);
+        if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+        map.panTo(new kakao.maps.LatLng(lat, lng));
+      };
+
+      window.showSelectedActualPlace = function (placeJson) {
+        try {
+          const raw = typeof placeJson === 'string'
+            ? JSON.parse(placeJson)
+            : placeJson;
+          showSelectedPlace(raw, false);
+        } catch (_) {}
+      };
+
+      kakao.maps.event.addListener(map, 'click', function (mouseEvent) {
+        findNearestPlace(mouseEvent.latLng);
+      });
+
+      post({ type: 'actualPlaceMapReady' });
+    });
+  </script>
+</body>
+</html>`,
+    [center.lat, center.lng],
+  );
+
+  const source = useMemo(() => ({ html }), [html]);
+
+  const syncSelectedPlace = useCallback(() => {
+    if (!mapReadyRef.current || !selectedPlace) return;
+
+    const serialized = JSON.stringify(selectedPlace).replace(/</g, "\\u003c");
+    webViewRef.current?.injectJavaScript(`
+      if (window.showSelectedActualPlace) {
+        window.showSelectedActualPlace(${JSON.stringify(serialized)});
+      }
+      true;
+    `);
+  }, [
+    selectedPlace?.id,
+    selectedPlace?.latitude,
+    selectedPlace?.longitude,
+    selectedPlace?.name,
+  ]);
+
+  useEffect(() => {
+    syncSelectedPlace();
+  }, [syncSelectedPlace]);
+
+  useEffect(() => {
+    if (!mapReadyRef.current || !searchRequest) return;
+
+    webViewRef.current?.injectJavaScript(`
+      if (window.focusActualPlaceMap) {
+        window.focusActualPlaceMap(
+          ${searchRequest.coordinate.lat},
+          ${searchRequest.coordinate.lng}
+        );
+      }
+      true;
+    `);
+  }, [searchRequest?.nonce]);
+
+  return (
+    <WebView
+      ref={webViewRef}
+      originWhitelist={["*"]}
+      source={source}
+      javaScriptEnabled
+      domStorageEnabled
+      mixedContentMode="always"
+      onLoadStart={() => {
+        mapReadyRef.current = false;
+      }}
+      onMessage={(event) => {
+        try {
+          const message = JSON.parse(event.nativeEvent.data) as {
+            type?: string;
+            tappedLat?: number;
+            tappedLng?: number;
+            distanceM?: number;
+            place?: {
+              id?: string;
+              name?: string;
+              latitude?: number;
+              longitude?: number;
+              address?: string;
+              category?: string;
+            };
+          };
+
+          if (message.type === "actualPlaceMapReady") {
+            mapReadyRef.current = true;
+            syncSelectedPlace();
+
+            if (searchRequest) {
+              webViewRef.current?.injectJavaScript(`
+                if (window.focusActualPlaceMap) {
+                  window.focusActualPlaceMap(
+                    ${searchRequest.coordinate.lat},
+                    ${searchRequest.coordinate.lng}
+                  );
+                }
+                true;
+              `);
+            }
+            return;
+          }
+
+          if (message.type === "recordPlaceListLoading") {
+            onLoadingChange(true);
+            return;
+          }
+
+          if (
+            message.type === "recordPlaceNotFound" ||
+            message.type === "recordPlaceSearchError"
+          ) {
+            onLoadingChange(false);
+            Alert.alert(
+              message.type === "recordPlaceNotFound"
+                ? "주변 장소를 찾지 못했어요"
+                : "장소 검색에 실패했어요",
+              message.type === "recordPlaceNotFound"
+                ? "조금 더 정확한 위치를 누르거나 다른 지점을 선택해주세요."
+                : "네트워크 상태를 확인한 뒤 다시 눌러주세요.",
+            );
+            return;
+          }
+
+          if (
+            message.type === "recordPlaceSelected" &&
+            message.place &&
+            typeof message.place.id === "string" &&
+            typeof message.place.name === "string" &&
+            isFiniteNumber(message.place.latitude) &&
+            isFiniteNumber(message.place.longitude) &&
+            isFiniteNumber(message.tappedLat) &&
+            isFiniteNumber(message.tappedLng) &&
+            isFiniteNumber(message.distanceM)
+          ) {
+            onLoadingChange(false);
+            onPlaceSelected(
+              {
+                id: message.place.id,
+                name: message.place.name,
+                latitude: message.place.latitude,
+                longitude: message.place.longitude,
+                address: message.place.address || undefined,
+                category: normalizeCategory(message.place.category, message.place.name),
+              },
+              { lat: message.tappedLat, lng: message.tappedLng },
+              Math.max(0, Math.round(message.distanceM)),
+            );
+          }
+        } catch {
+          // 지도 내부의 다른 메시지는 무시합니다.
+        }
+      }}
+      style={styles.recordLocationPickerMap}
+    />
+  );
+}
+
 
 export default function HomeScreen() {
   const [missions, setMissions] =
@@ -3021,6 +3952,21 @@ export default function HomeScreen() {
   >([]);
   const [recordLocation, setRecordLocation] =
     useState<Coordinate | null>(null);
+  const [recordLocationKind, setRecordLocationKind] =
+    useState<RecordLocationKind | null>(null);
+  const [recordPlaceCandidates, setRecordPlaceCandidates] =
+    useState<PlaceCandidate[]>([]);
+  const [recordSelectedPlace, setRecordSelectedPlace] =
+    useState<PlaceCandidate | null>(null);
+  const [recordPlaceTapLocation, setRecordPlaceTapLocation] =
+    useState<Coordinate | null>(null);
+  const [recordNearestPlaceDistanceM, setRecordNearestPlaceDistanceM] =
+    useState<number | null>(null);
+  const [recordPlacesLoading, setRecordPlacesLoading] =
+    useState(false);
+  const [recordExternalPlaceSearch, setRecordExternalPlaceSearch] =
+    useState<ActualPlaceSearchRequest | null>(null);
+  const recordPlaceSearchSequenceRef = useRef(0);
   const [recordSaving, setRecordSaving] =
     useState(false);
   const [recordDetail, setRecordDetail] =
@@ -3030,6 +3976,8 @@ export default function HomeScreen() {
     pendingSharedMission,
     clearPendingSharedMission,
   } = useMission();
+
+
 
   const locationRequested = useRef(false);
   const recommendationsInitialized = useRef(false);
@@ -3494,7 +4442,8 @@ export default function HomeScreen() {
         .eq("user_id", user.id)
         .eq("status", "active")
         .lte("start_date", todayKey)
-        .gte("end_date", todayKey)
+        // 목표 횟수를 채우거나 기록 기간이 지나도, 에세이 생성 전까지는
+        // 여정을 active 상태로 유지하고 홈에서 계속 불러온다.
         .order("created_at", { ascending: false })
         .limit(1)
         .maybeSingle());
@@ -3641,6 +4590,10 @@ export default function HomeScreen() {
         string,
         string
       > = {};
+      const completedAttemptPlaceMap: Record<
+        string,
+        string | null
+      > = {};
 
       for (const row of attempts) {
         const missionId = String(row.mission_id);
@@ -3650,6 +4603,9 @@ export default function HomeScreen() {
           nextCompletedMissionIds.add(missionId);
           completedAttemptIds.push(attemptId);
           completedAttemptMissionMap[attemptId] = missionId;
+          completedAttemptPlaceMap[attemptId] = row.place_id
+            ? String(row.place_id)
+            : null;
           continue;
         }
 
@@ -3681,6 +4637,8 @@ export default function HomeScreen() {
               recorded_at,
               location_latitude,
               location_longitude,
+              location_type,
+              location_name,
               record_photos (
                 storage_path,
                 sort_order,
@@ -3743,6 +4701,58 @@ export default function HomeScreen() {
             )
           ).filter((url): url is string => Boolean(url));
 
+          const locationLat = toFiniteNumber(
+            record.location_latitude,
+          );
+          const locationLng = toFiniteNumber(
+            record.location_longitude,
+          );
+          const storedLocationType =
+            record.location_type === "place" ||
+            record.location_type === "map" ||
+            record.location_type === "home"
+              ? (record.location_type as RecordLocationKind)
+              : null;
+          const storedLocationName = String(
+            record.location_name ?? "",
+          ).trim();
+          const completedPlaceId =
+            completedAttemptPlaceMap[attemptId] ?? null;
+          const completedPlaceName = completedPlaceId
+            ? String(
+                placeMap[completedPlaceId]?.name ?? "",
+              ).trim()
+            : "";
+          const missionForRecord = nextMissionMap[missionId];
+
+          let locationName = storedLocationName;
+
+          if (!locationName && completedPlaceName) {
+            locationName = completedPlaceName;
+          }
+
+          if (
+            !locationName &&
+            missionForRecord &&
+            !missionForRecord.isLocationFlexible &&
+            !missionForRecord.isAtHome &&
+            missionForRecord.placeName &&
+            missionForRecord.placeName !== "어디서나 가능"
+          ) {
+            locationName = missionForRecord.placeName;
+          }
+
+          if (!locationName && missionForRecord?.isAtHome) {
+            locationName = "내 방";
+          }
+
+          if (!locationName) {
+            locationName =
+              locationLat !== null && locationLng !== null
+                ? "거리"
+                : "내 방";
+          }
+
           nextCompletedRecords.push({
             id: String(record.id),
             attemptId,
@@ -3754,8 +4764,10 @@ export default function HomeScreen() {
               | "nickname",
             recordedAt: String(record.recorded_at),
             photoUrls,
-            locationLat: toFiniteNumber(record.location_latitude),
-            locationLng: toFiniteNumber(record.location_longitude),
+            locationLat,
+            locationLng,
+            locationType: storedLocationType,
+            locationName,
           });
         }
       }
@@ -3949,26 +4961,26 @@ export default function HomeScreen() {
         .sort((a, b) =>
           b.createdAt.localeCompare(a.createdAt),
         )
-        .map((attempt) => {
+        .flatMap((attempt): MissionListItem[] => {
           const mission =
             attemptMissions[attempt.missionId] ??
             missions.find(
               (item) => item.id === attempt.missionId,
             );
 
-          return mission
-            ? {
-                key: `active:${attempt.id}`,
-                kind: "active" as const,
-                mission,
-                attempt,
-              }
-            : null;
-        })
-        .filter(
-          (item): item is MissionListItem =>
-            item !== null,
-        ),
+          if (!mission) {
+            return [];
+          }
+
+          return [
+            {
+              key: `active:${attempt.id}`,
+              kind: "active",
+              mission,
+              attempt,
+            },
+          ];
+        }),
     [attemptMissions, missions, startedAttempts],
   );
 
@@ -3990,27 +5002,28 @@ export default function HomeScreen() {
 
   const recordItems = useMemo<MissionListItem[]>(
     () =>
-      completedRecords
-        .map((record) => {
+      completedRecords.flatMap(
+        (record): MissionListItem[] => {
           const mission =
             attemptMissions[record.missionId] ??
             missions.find(
               (item) => item.id === record.missionId,
             );
 
-          return mission
-            ? {
-                key: `record:${record.attemptId}`,
-                kind: "record" as const,
-                mission,
-                record,
-              }
-            : null;
-        })
-        .filter(
-          (item): item is MissionListItem =>
-            item !== null,
-        ),
+          if (!mission) {
+            return [];
+          }
+
+          return [
+            {
+              key: `record:${record.attemptId}`,
+              kind: "record",
+              mission,
+              record,
+            },
+          ];
+        },
+      ),
     [attemptMissions, completedRecords, missions],
   );
 
@@ -4551,6 +5564,14 @@ export default function HomeScreen() {
     setRecordDate(latestDate);
     setRecordPhotos([]);
     setRecordLocation(null);
+    setRecordLocationKind(null);
+    setRecordPlaceCandidates([]);
+    setRecordSelectedPlace(null);
+    setRecordPlaceTapLocation(null);
+    setRecordNearestPlaceDistanceM(null);
+    setRecordPlacesLoading(false);
+    setRecordExternalPlaceSearch(null);
+    recordPlaceSearchSequenceRef.current += 1;
   };
 
   const closeRecordModal = (force = false) => {
@@ -4565,7 +5586,113 @@ export default function HomeScreen() {
     setRecordDate(toDateKey(new Date()));
     setRecordPhotos([]);
     setRecordLocation(null);
+    setRecordLocationKind(null);
+    setRecordPlaceCandidates([]);
+    setRecordSelectedPlace(null);
+    setRecordPlaceTapLocation(null);
+    setRecordNearestPlaceDistanceM(null);
+    setRecordPlacesLoading(false);
+    setRecordExternalPlaceSearch(null);
+    recordPlaceSearchSequenceRef.current += 1;
   };
+
+  const handleRecordActualPlaceMapSelect = async (
+    coordinate: Coordinate,
+  ) => {
+    const searchSequence = ++recordPlaceSearchSequenceRef.current;
+
+    setRecordPlaceTapLocation(coordinate);
+    setRecordSelectedPlace(null);
+    setRecordNearestPlaceDistanceM(null);
+    setRecordPlaceCandidates([]);
+    setRecordPlacesLoading(true);
+
+    try {
+      const candidates = await searchNearbyKakaoPlaces(coordinate);
+
+      if (searchSequence !== recordPlaceSearchSequenceRef.current) {
+        return;
+      }
+
+      setRecordPlaceCandidates(candidates);
+
+      if (candidates.length === 0) {
+        Alert.alert(
+          "주변 장소를 찾지 못했어요",
+          "조금 더 정확한 위치를 누르거나, 장소가 없는 곳이라면 ‘길 위·야외’로 기록해주세요.",
+        );
+      }
+    } catch (error) {
+      if (searchSequence !== recordPlaceSearchSequenceRef.current) {
+        return;
+      }
+
+      console.error("카카오 주변 장소 검색 실패:", error);
+      Alert.alert(
+        "장소 검색에 실패했어요",
+        getErrorMessage(
+          error,
+          "카카오 REST API 키와 네트워크 상태를 확인해주세요.",
+        ),
+      );
+    } finally {
+      if (searchSequence === recordPlaceSearchSequenceRef.current) {
+        setRecordPlacesLoading(false);
+      }
+    }
+  };
+
+  const selectRecordPlaceCandidate = (place: PlaceCandidate) => {
+    setRecordSelectedPlace(place);
+    setRecordPlaceTapLocation({
+      lat: place.latitude,
+      lng: place.longitude,
+    });
+    setRecordNearestPlaceDistanceM(
+      typeof place.distanceM === "number" &&
+      Number.isFinite(place.distanceM)
+        ? Math.max(0, Math.round(place.distanceM))
+        : recordPlaceTapLocation
+          ? Math.max(
+              0,
+              Math.round(
+                haversineDistanceKm(recordPlaceTapLocation, {
+                  lat: place.latitude,
+                  lng: place.longitude,
+                }) * 1000,
+              ),
+            )
+          : null,
+    );
+  };
+
+  const chooseRecordLocationKind = (
+    kind: RecordLocationKind,
+  ) => {
+    recordPlaceSearchSequenceRef.current += 1;
+    setRecordLocationKind(kind);
+    setRecordPlaceCandidates([]);
+    setRecordPlacesLoading(false);
+
+    if (kind === "place") {
+      setRecordLocation(null);
+      setRecordSelectedPlace(null);
+      setRecordPlaceTapLocation(null);
+      setRecordNearestPlaceDistanceM(null);
+      setRecordExternalPlaceSearch(null);
+      return;
+    }
+
+    setRecordSelectedPlace(null);
+    setRecordPlaceTapLocation(null);
+    setRecordNearestPlaceDistanceM(null);
+    setRecordExternalPlaceSearch(null);
+
+    if (kind === "home") {
+      setRecordLocation(null);
+    }
+  };
+
 
   const addRecordPhotos = (
     photos: ImagePicker.ImagePickerAsset[],
@@ -4795,13 +5922,74 @@ export default function HomeScreen() {
       return;
     }
 
-    if (recordMission.isLocationFlexible && !recordLocation) {
+    if (
+      recordMission.isLocationFlexible &&
+      !recordLocationKind
+    ) {
       Alert.alert(
         "수행 위치를 선택해주세요",
+        "실제 장소, 길 위·야외, 내 방 중 하나를 골라주세요.",
+      );
+      return;
+    }
+
+    if (
+      recordMission.isLocationFlexible &&
+      recordLocationKind === "place" &&
+      !recordSelectedPlace
+    ) {
+      Alert.alert(
+        "장소를 선택해주세요",
+        "목록에서 실제로 미션을 수행한 장소를 골라주세요.",
+      );
+      return;
+    }
+
+    if (
+      recordMission.isLocationFlexible &&
+      recordLocationKind === "map" &&
+      !recordLocation
+    ) {
+      Alert.alert(
+        "위치를 선택해주세요",
         "지도에서 미션을 수행한 위치를 한 번 눌러주세요.",
       );
       return;
     }
+
+    const selectedPlaceId = recordMission.isLocationFlexible
+      ? recordLocationKind === "place"
+        ? recordSelectedPlace && isUuid(recordSelectedPlace.id)
+          ? recordSelectedPlace.id
+          : null
+        : null
+      : attempt.placeId;
+
+    const selectedCoordinate: Coordinate | null =
+      recordMission.isLocationFlexible
+        ? recordLocationKind === "place" && recordSelectedPlace
+          ? {
+              lat: recordSelectedPlace.latitude,
+              lng: recordSelectedPlace.longitude,
+            }
+          : recordLocationKind === "map"
+            ? recordLocation
+            : null
+        : isFiniteNumber(recordMission.placeLat) &&
+            isFiniteNumber(recordMission.placeLng)
+          ? {
+              lat: recordMission.placeLat,
+              lng: recordMission.placeLng,
+            }
+          : null;
+
+    const selectedPlaceName = recordMission.isLocationFlexible
+      ? recordLocationKind === "place"
+        ? recordSelectedPlace?.name ?? "선택한 장소"
+        : recordLocationKind === "map"
+          ? "길 위의 기록"
+          : "내 방"
+      : recordMission.placeName ?? "미션 수행 장소";
 
     try {
       setRecordSaving(true);
@@ -4827,16 +6015,12 @@ export default function HomeScreen() {
           p_emotion: recordEmotion,
           p_content: recordContent.trim(),
           p_visibility: recordVisibility,
-          p_place_id: attempt.placeId,
+          p_place_id: selectedPlaceId,
           p_recorded_at: recordDate,
           p_location_latitude:
-            recordMission.isLocationFlexible
-              ? recordLocation?.lat ?? null
-              : null,
+            selectedCoordinate?.lat ?? null,
           p_location_longitude:
-            recordMission.isLocationFlexible
-              ? recordLocation?.lng ?? null
-              : null,
+            selectedCoordinate?.lng ?? null,
         },
       ));
 
@@ -4846,6 +6030,35 @@ export default function HomeScreen() {
       if (!createdRecordId) {
         throw new Error(
           "생성된 기록 ID를 확인하지 못했습니다.",
+        );
+      }
+
+      const savedLocationType: RecordLocationKind =
+        recordMission.isLocationFlexible
+          ? (recordLocationKind as RecordLocationKind)
+          : recordMission.isAtHome
+            ? "home"
+            : "place";
+      const savedLocationName =
+        savedLocationType === "map"
+          ? "거리"
+          : savedLocationType === "home"
+            ? "내 방"
+            : selectedPlaceName;
+
+      const { error: locationMetadataError } =
+        await retrySupabaseResultOnJwt(() => supabase.rpc(
+          "set_record_location_metadata",
+          {
+            p_record_id: String(createdRecordId),
+            p_location_type: savedLocationType,
+            p_location_name: savedLocationName,
+          },
+        ));
+
+      if (locationMetadataError) {
+        throw new Error(
+          `수행 위치 이름을 저장하지 못했습니다: ${locationMetadataError.message}`,
         );
       }
 
@@ -4865,13 +6078,40 @@ export default function HomeScreen() {
         }
       }
 
+      let discoverWarning = "";
+
+      if (recordVisibility === "anonymous") {
+        try {
+          await createDiscoverPost({
+            placeName: savedLocationName,
+            lat: selectedCoordinate?.lat ?? 0,
+            lng: selectedCoordinate?.lng ?? 0,
+            category: recordMission.cat,
+            content: recordContent.trim(),
+            emotion: recordEmotion as EmotionValue,
+            visibility: "anonymous",
+            photos: recordPhotos.map((photo) => ({
+              uri: photo.uri,
+              mimeType: photo.mimeType,
+            })),
+          });
+        } catch (discoverError) {
+          console.error(
+            "발견 탭 익명 공유 실패:",
+            discoverError,
+          );
+          discoverWarning =
+            "\n\n기록은 저장됐지만 발견 탭 익명 공유에는 실패했어요.";
+        }
+      }
+
       closeRecordModal(true);
       await loadJourneyAndAttempts();
       changeSection("records");
 
       Alert.alert(
         "기록 완료",
-        `${formatDateKeyKorean(recordDate)}의 경험이 여정에 저장됐어요.${photoWarning}`,
+        `${formatDateKeyKorean(recordDate)}의 경험이 여정에 저장됐어요.${photoWarning}${discoverWarning}`,
       );
     } catch (error) {
       console.error("기록 저장 실패:", error);
@@ -5994,58 +7234,325 @@ export default function HomeScreen() {
 
               {recordMission?.isLocationFlexible ? (
                 <View style={styles.recordLocationSection}>
-                  <View style={styles.recordLocationHeader}>
-                    <View style={styles.recordLocationHeaderText}>
-                      <Text style={styles.recordFieldLabel}>
-                        미션 수행 위치
+                  <Text style={styles.recordFieldLabel}>
+                    미션 수행 위치
+                  </Text>
+                  <Text style={styles.recordLocationHelp}>
+                    실제 장소, 길 위·야외, 내 방 중 어디에서 했는지 선택해주세요.
+                  </Text>
+
+                  <View style={styles.recordLocationKindRow}>
+                    {(
+                      [
+                        {
+                          value: "place",
+                          emoji: "📍",
+                          label: "실제 장소",
+                        },
+                        {
+                          value: "map",
+                          emoji: "🗺️",
+                          label: "길 위·야외",
+                        },
+                        {
+                          value: "home",
+                          emoji: "🏠",
+                          label: "내 방",
+                        },
+                      ] as const
+                    ).map((option, index) => {
+                      const selected =
+                        recordLocationKind === option.value;
+
+                      return (
+                        <Pressable
+                          key={option.value}
+                          onPress={() =>
+                            chooseRecordLocationKind(
+                              option.value,
+                            )
+                          }
+                          style={[
+                            styles.recordLocationKindButton,
+                            index > 0 &&
+                              styles.recordLocationKindButtonSpaced,
+                            selected &&
+                              styles.recordLocationKindButtonSelected,
+                          ]}
+                        >
+                          <Text
+                            style={
+                              styles.recordLocationKindEmoji
+                            }
+                          >
+                            {option.emoji}
+                          </Text>
+                          <Text
+                            style={[
+                              styles.recordLocationKindLabel,
+                              selected &&
+                                styles.recordLocationKindLabelSelected,
+                            ]}
+                          >
+                            {option.label}
+                          </Text>
+                        </Pressable>
+                      );
+                    })}
+                  </View>
+
+                  {recordLocationKind === "place" ? (
+                    <View style={styles.recordActualPlaceBox}>
+                      <View style={styles.recordLocationHeader}>
+                        <View style={styles.recordLocationHeaderText}>
+                          <Text style={styles.recordLocationHelp}>
+                            지도에서 미션을 한 위치를 눌러주세요. 누른 위치 주변의 실제 장소를 거리순으로 보여드려요.
+                          </Text>
+                        </View>
+                        <Pressable
+                          onPress={() => {
+                            if (userLocation) {
+                              void handleRecordActualPlaceMapSelect(
+                                userLocation,
+                              );
+                            } else {
+                              Alert.alert(
+                                "현재 위치를 확인할 수 없어요",
+                                "위치 권한을 허용한 뒤 다시 시도해주세요.",
+                              );
+                            }
+                          }}
+                          style={styles.recordCurrentLocationButton}
+                        >
+                          <Text
+                            style={styles.recordCurrentLocationButtonText}
+                          >
+                            현재 위치 선택
+                          </Text>
+                        </Pressable>
+                      </View>
+
+                      <View style={styles.recordActualPlaceMapWrapper}>
+                        <RecordLocationPickerMap
+                          center={
+                            userLocation ??
+                            recommendationCenter ??
+                            DEFAULT_CENTER
+                          }
+                          pickedLocation={recordPlaceTapLocation}
+                          guideText="지도를 눌러 실제 장소를 찾을 위치를 표시하세요"
+                          onSelect={(coordinate) => {
+                            void handleRecordActualPlaceMapSelect(
+                              coordinate,
+                            );
+                          }}
+                        />
+
+                        {recordSelectedPlace ? (
+                          <View
+                            pointerEvents="none"
+                            style={styles.recordSelectedPlaceMapBadge}
+                          >
+                            <View style={styles.recordSelectedPlaceMapBadgeIcon}>
+                              <Text style={styles.recordSelectedPlaceMapBadgeIconText}>
+                                📍
+                              </Text>
+                            </View>
+                            <View style={styles.recordSelectedPlaceMapBadgeTextWrap}>
+                              <Text style={styles.recordSelectedPlaceMapBadgeCaption}>
+                                현재 선택된 실제 장소
+                              </Text>
+                              <Text
+                                numberOfLines={1}
+                                style={styles.recordSelectedPlaceMapBadgeName}
+                              >
+                                {recordSelectedPlace.name}
+                              </Text>
+                              <Text
+                                numberOfLines={1}
+                                style={styles.recordSelectedPlaceMapBadgeAddress}
+                              >
+                                {recordSelectedPlace.address ??
+                                  "주소 정보 없음"}
+                              </Text>
+                            </View>
+                          </View>
+                        ) : null}
+                      </View>
+
+                      {recordPlacesLoading ? (
+                        <View style={styles.recordNearestPlaceLoading}>
+                          <ActivityIndicator color={BL} size="small" />
+                          <Text style={styles.recordPlaceLoadingText}>
+                            선택한 위치 주변의 실제 장소를 찾고 있어요
+                          </Text>
+                        </View>
+                      ) : recordPlaceTapLocation &&
+                        recordPlaceCandidates.length > 0 ? (
+                        <View style={styles.recordPlaceCandidateSection}>
+                          <View style={styles.recordPlaceCandidateHeader}>
+                            <Text style={styles.recordPlaceCandidateTitle}>
+                              주변 실제 장소
+                            </Text>
+                            <Text style={styles.recordPlaceCandidateCount}>
+                              가까운 순 {recordPlaceCandidates.length}곳
+                            </Text>
+                          </View>
+
+                          {recordPlaceCandidates.map((place) => {
+                            const selected =
+                              recordSelectedPlace?.id === place.id;
+
+                            return (
+                              <Pressable
+                                key={place.id}
+                                onPress={() =>
+                                  selectRecordPlaceCandidate(place)
+                                }
+                                style={[
+                                  styles.recordPlaceCandidateButton,
+                                  selected &&
+                                    styles.recordPlaceCandidateButtonSelected,
+                                ]}
+                              >
+                                <View
+                                  style={[
+                                    styles.recordPlaceCandidateRadio,
+                                    selected &&
+                                      styles.recordPlaceCandidateRadioSelected,
+                                  ]}
+                                >
+                                  {selected ? (
+                                    <View
+                                      style={styles.recordPlaceCandidateRadioDot}
+                                    />
+                                  ) : null}
+                                </View>
+                                <View style={styles.recordPlaceCandidateText}>
+                                  <View style={styles.recordPlaceCandidateNameRow}>
+                                    <Text
+                                      numberOfLines={1}
+                                      style={styles.recordPlaceCandidateName}
+                                    >
+                                      {place.name}
+                                    </Text>
+                                    <Text style={styles.recordPlaceCandidateDistance}>
+                                      {formatPlaceDistance(
+                                        place.distanceM,
+                                      )}
+                                    </Text>
+                                  </View>
+                                  <Text
+                                    numberOfLines={1}
+                                    style={styles.recordPlaceCandidateCategory}
+                                  >
+                                    {place.categoryDetail ??
+                                      place.category ??
+                                      "장소"}
+                                  </Text>
+                                  <Text
+                                    numberOfLines={2}
+                                    style={styles.recordPlaceCandidateAddress}
+                                  >
+                                    {place.address ?? "주소 정보 없음"}
+                                  </Text>
+                                </View>
+                              </Pressable>
+                            );
+                          })}
+                        </View>
+                      ) : recordPlaceTapLocation ? (
+                        <View style={styles.recordPlaceEmptyBox}>
+                          <Text style={styles.recordPlaceEmptyTitle}>
+                            주변에서 실제 장소를 찾지 못했어요
+                          </Text>
+                          <Text style={styles.recordPlaceNearbyEmptyText}>
+                            다른 위치를 누르거나 장소가 없는 곳이라면 길 위·야외로 기록해주세요.
+                          </Text>
+                        </View>
+                      ) : (
+                        <Text style={styles.recordActualPlaceHint}>
+                          지도에서 미션을 한 위치를 먼저 눌러주세요.
+                        </Text>
+                      )}
+
+                    </View>
+                  ) : null}
+
+
+                  {recordLocationKind === "map" ? (
+                    <>
+                      <View style={styles.recordLocationHeader}>
+                        <View
+                          style={styles.recordLocationHeaderText}
+                        >
+                          <Text style={styles.recordLocationHelp}>
+                            장소명이 없는 길이나 공원, 야외라면 지도에서 정확한 위치를 찍어주세요.
+                          </Text>
+                        </View>
+                        <Pressable
+                          onPress={() => {
+                            if (userLocation) {
+                              setRecordLocation(userLocation);
+                            } else {
+                              Alert.alert(
+                                "현재 위치를 확인할 수 없어요",
+                                "위치 권한을 허용한 뒤 다시 시도해주세요.",
+                              );
+                            }
+                          }}
+                          style={
+                            styles.recordCurrentLocationButton
+                          }
+                        >
+                          <Text
+                            style={
+                              styles.recordCurrentLocationButtonText
+                            }
+                          >
+                            현재 위치로 이동
+                          </Text>
+                        </Pressable>
+                      </View>
+
+                      <View
+                        style={styles.recordLocationMapWrapper}
+                      >
+                        <RecordLocationPickerMap
+                          center={
+                            userLocation ??
+                            recommendationCenter ??
+                            DEFAULT_CENTER
+                          }
+                          pickedLocation={recordLocation}
+                          onSelect={setRecordLocation}
+                        />
+                      </View>
+
+                      <Text
+                        style={[
+                          styles.recordLocationStatus,
+                          recordLocation &&
+                            styles.recordLocationStatusSelected,
+                        ]}
+                      >
+                        {recordLocation
+                          ? `선택 완료 · ${recordLocation.lat.toFixed(5)}, ${recordLocation.lng.toFixed(5)}`
+                          : "아직 위치를 선택하지 않았어요."}
                       </Text>
-                      <Text style={styles.recordLocationHelp}>
-                        지도의 원하는 곳을 누르면 그 위치가 기록에 저장돼요.
+                    </>
+                  ) : null}
+
+                  {recordLocationKind === "home" ? (
+                    <View style={styles.recordHomeLocationBox}>
+                      <Text style={styles.recordHomeLocationTitle}>
+                        🏠 내 방에서 한 미션
+                      </Text>
+                      <Text style={styles.recordHomeLocationDesc}>
+                        집 주소나 좌표는 저장하지 않아요. 익명 공유를 선택해도 위치가 없기 때문에 발견 지도에는 표시되지 않아요.
                       </Text>
                     </View>
-                    <Pressable
-                      onPress={() => {
-                        if (userLocation) {
-                          setRecordLocation(userLocation);
-                        } else {
-                          Alert.alert(
-                            "현재 위치를 확인할 수 없어요",
-                            "위치 권한을 허용한 뒤 다시 시도해주세요.",
-                          );
-                        }
-                      }}
-                      style={styles.recordCurrentLocationButton}
-                    >
-                      <Text style={styles.recordCurrentLocationButtonText}>
-                        현재 위치 찍기
-                      </Text>
-                    </Pressable>
-                  </View>
-
-                  <View style={styles.recordLocationMapWrapper}>
-                    <RecordLocationPickerMap
-                      center={
-                        recordLocation ??
-                        userLocation ??
-                        recommendationCenter ??
-                        DEFAULT_CENTER
-                      }
-                      pickedLocation={recordLocation}
-                      onSelect={setRecordLocation}
-                    />
-                  </View>
-
-                  <Text
-                    style={[
-                      styles.recordLocationStatus,
-                      recordLocation &&
-                        styles.recordLocationStatusSelected,
-                    ]}
-                  >
-                    {recordLocation
-                      ? `선택 완료 · ${recordLocation.lat.toFixed(5)}, ${recordLocation.lng.toFixed(5)}`
-                      : "아직 위치를 선택하지 않았어요."}
-                  </Text>
+                  ) : null}
                 </View>
               ) : recordMission?.placeName ? (
                 <View style={styles.recordPlaceBox}>
@@ -6324,7 +7831,11 @@ export default function HomeScreen() {
                     익명 공유
                   </Text>
                   <Text style={styles.visibilityOptionDesc}>
-                    이름 없이 발견 탭에 공유해요
+                    {recordMission?.isAtHome ||
+                    (recordMission?.isLocationFlexible &&
+                      recordLocationKind === "home")
+                      ? "지도 대신 발견 탭의 방 안 기록 공간에 익명으로 공유해요"
+                      : "이름 없이 발견 탭에 공유해요"}
                   </Text>
                 </Pressable>
               </View>
@@ -6413,18 +7924,14 @@ export default function HomeScreen() {
                     </View>
                   </View>
 
-                  {recordDetail.locationLat !== null &&
-                  recordDetail.locationLng !== null ? (
-                    <View style={styles.recordDetailLocationBox}>
-                      <Text style={styles.recordDetailLocationTitle}>
-                        📍 지도에서 선택한 수행 위치
-                      </Text>
-                      <Text style={styles.recordDetailLocationCoordinate}>
-                        {recordDetail.locationLat.toFixed(5)}, {" "}
-                        {recordDetail.locationLng.toFixed(5)}
-                      </Text>
-                    </View>
-                  ) : null}
+                  <View style={styles.recordDetailLocationBox}>
+                    <Text style={styles.recordDetailLocationTitle}>
+                      📍 수행 위치
+                    </Text>
+                    <Text style={styles.recordDetailLocationCoordinate}>
+                      {recordDetail.locationName}
+                    </Text>
+                  </View>
 
                   {recordDetail.photoUrls.length > 0 ? (
                     <ScrollView
@@ -7705,6 +9212,364 @@ const styles = StyleSheet.create({
   recordLocationStatusSelected: {
     fontWeight: "700",
     color: BL,
+  },
+  recordLocationKindRow: {
+    flexDirection: "row",
+    marginTop: 12,
+    marginBottom: 12,
+  },
+  recordLocationKindButton: {
+    flex: 1,
+    minHeight: 72,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 6,
+    paddingVertical: 10,
+    backgroundColor: BG,
+    borderWidth: 1,
+    borderColor: T3,
+    borderRadius: 12,
+  },
+  recordLocationKindButtonSpaced: {
+    marginLeft: 7,
+  },
+  recordLocationKindButtonSelected: {
+    backgroundColor: BLL,
+    borderColor: BL,
+  },
+  recordLocationKindEmoji: {
+    marginBottom: 5,
+    fontSize: 20,
+  },
+  recordLocationKindLabel: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: T1,
+  },
+  recordLocationKindLabelSelected: {
+    color: BL,
+  },
+  recordActualPlaceBox: {
+    padding: 12,
+    overflow: "hidden",
+    backgroundColor: WH,
+    borderWidth: 1,
+    borderColor: T3,
+    borderRadius: 14,
+  },
+  recordActualPlaceMapWrapper: {
+    height: 250,
+    position: "relative",
+    overflow: "hidden",
+    backgroundColor: BG,
+    borderWidth: 1,
+    borderColor: T3,
+    borderRadius: 12,
+  },
+  recordSelectedPlaceMapBadge: {
+    position: "absolute",
+    left: 10,
+    right: 10,
+    bottom: 10,
+    minHeight: 68,
+    flexDirection: "row",
+    alignItems: "center",
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    backgroundColor: "rgba(255,255,255,0.96)",
+    borderWidth: 1.5,
+    borderColor: BL,
+    borderRadius: 14,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.14,
+    shadowRadius: 8,
+    elevation: 8,
+  },
+  recordSelectedPlaceMapBadgeIcon: {
+    width: 40,
+    height: 40,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: BLL,
+    borderRadius: 20,
+  },
+  recordSelectedPlaceMapBadgeIconText: {
+    fontSize: 20,
+  },
+  recordSelectedPlaceMapBadgeTextWrap: {
+    flex: 1,
+    marginLeft: 10,
+  },
+  recordSelectedPlaceMapBadgeCaption: {
+    marginBottom: 2,
+    fontSize: 9,
+    fontWeight: "800",
+    color: BL,
+  },
+  recordSelectedPlaceMapBadgeName: {
+    fontSize: 13,
+    fontWeight: "900",
+    color: T0,
+  },
+  recordSelectedPlaceMapBadgeAddress: {
+    marginTop: 2,
+    fontSize: 9,
+    color: T1,
+  },
+  recordNearestPlaceLoading: {
+    minHeight: 72,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  recordNearestPlaceCard: {
+    marginTop: 10,
+    minHeight: 70,
+    flexDirection: "row",
+    alignItems: "center",
+    padding: 11,
+    backgroundColor: BLL,
+    borderWidth: 1,
+    borderColor: BL,
+    borderRadius: 12,
+  },
+  recordNearestPlaceIcon: {
+    width: 36,
+    height: 36,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: WH,
+    borderRadius: 18,
+  },
+  recordNearestPlaceIconText: {
+    fontSize: 18,
+  },
+  recordNearestPlaceText: {
+    flex: 1,
+    marginHorizontal: 10,
+  },
+  recordNearestPlaceConfirmLabel: {
+    marginBottom: 2,
+    fontSize: 9,
+    fontWeight: "800",
+    color: BL,
+  },
+  recordNearestPlaceName: {
+    fontSize: 12,
+    fontWeight: "800",
+    color: T0,
+  },
+  recordNearestPlaceAddress: {
+    marginTop: 4,
+    fontSize: 10,
+    lineHeight: 15,
+    color: T1,
+  },
+  recordNearestPlaceDistance: {
+    fontSize: 10,
+    fontWeight: "800",
+    color: BL,
+  },
+  recordPlaceCandidateSection: {
+    marginTop: 12,
+  },
+  recordPlaceCandidateHeader: {
+    marginBottom: 7,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  recordPlaceCandidateTitle: {
+    fontSize: 12,
+    fontWeight: "900",
+    color: T0,
+  },
+  recordPlaceCandidateCount: {
+    fontSize: 9,
+    color: T2,
+  },
+  recordPlaceCandidateButton: {
+    minHeight: 76,
+    marginBottom: 8,
+    flexDirection: "row",
+    alignItems: "center",
+    padding: 11,
+    backgroundColor: BG,
+    borderWidth: 1,
+    borderColor: T3,
+    borderRadius: 12,
+  },
+  recordPlaceCandidateButtonSelected: {
+    backgroundColor: BLL,
+    borderColor: BL,
+  },
+  recordPlaceCandidateRadio: {
+    width: 20,
+    height: 20,
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: 1.5,
+    borderColor: T2,
+    borderRadius: 10,
+  },
+  recordPlaceCandidateRadioSelected: {
+    borderColor: BL,
+  },
+  recordPlaceCandidateRadioDot: {
+    width: 10,
+    height: 10,
+    backgroundColor: BL,
+    borderRadius: 5,
+  },
+  recordPlaceCandidateText: {
+    flex: 1,
+    marginLeft: 10,
+  },
+  recordPlaceCandidateNameRow: {
+    flexDirection: "row",
+    alignItems: "center",
+  },
+  recordPlaceCandidateName: {
+    flex: 1,
+    marginRight: 8,
+    fontSize: 12,
+    fontWeight: "800",
+    color: T0,
+  },
+  recordPlaceCandidateDistance: {
+    fontSize: 10,
+    fontWeight: "800",
+    color: BL,
+  },
+  recordPlaceCandidateCategory: {
+    marginTop: 3,
+    fontSize: 9,
+    color: PINK,
+  },
+  recordPlaceCandidateAddress: {
+    marginTop: 3,
+    fontSize: 10,
+    lineHeight: 15,
+    color: T1,
+  },
+  recordPlaceEmptyBox: {
+    marginTop: 10,
+    padding: 12,
+    backgroundColor: BG,
+    borderWidth: 1,
+    borderColor: T3,
+    borderRadius: 12,
+  },
+  recordPlaceEmptyTitle: {
+    fontSize: 11,
+    fontWeight: "800",
+    color: T1,
+  },
+  recordPlaceNearbyEmptyText: {
+    marginTop: 4,
+    fontSize: 10,
+    lineHeight: 16,
+    color: T2,
+  },
+  recordActualPlaceHint: {
+    marginTop: 10,
+    fontSize: 10,
+    lineHeight: 16,
+    color: T2,
+  },
+  recordPlaceSearchInput: {
+    height: 44,
+    paddingHorizontal: 13,
+    fontSize: 13,
+    color: T0,
+    borderBottomWidth: 1,
+    borderBottomColor: T3,
+  },
+  recordPlaceLoading: {
+    minHeight: 100,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  recordPlaceLoadingText: {
+    marginTop: 8,
+    fontSize: 10,
+    color: T2,
+  },
+  recordPlaceList: {
+    maxHeight: 245,
+  },
+  recordPlaceOption: {
+    minHeight: 64,
+    flexDirection: "row",
+    alignItems: "center",
+    paddingHorizontal: 13,
+    paddingVertical: 10,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: T3,
+  },
+  recordPlaceOptionSelected: {
+    backgroundColor: BLL,
+  },
+  recordPlaceOptionText: {
+    flex: 1,
+    marginRight: 10,
+  },
+  recordPlaceOptionName: {
+    fontSize: 12,
+    fontWeight: "700",
+    color: T0,
+  },
+  recordPlaceOptionNameSelected: {
+    color: BL,
+  },
+  recordPlaceOptionAddress: {
+    marginTop: 4,
+    fontSize: 10,
+    color: T2,
+  },
+  recordPlaceOptionDistance: {
+    fontSize: 10,
+    fontWeight: "700",
+    color: BL,
+  },
+  recordPlaceEmpty: {
+    minHeight: 110,
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 16,
+  },
+  recordPlaceEmptyText: {
+    fontSize: 10,
+    lineHeight: 16,
+    color: T2,
+  },
+  recordPlaceReloadButton: {
+    marginTop: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    backgroundColor: BLL,
+    borderRadius: 9,
+  },
+  recordPlaceReloadButtonText: {
+    fontSize: 10,
+    fontWeight: "800",
+    color: BL,
+  },
+  recordHomeLocationBox: {
+    padding: 14,
+    backgroundColor: PINK_LIGHT,
+    borderRadius: 13,
+  },
+  recordHomeLocationTitle: {
+    fontSize: 13,
+    fontWeight: "800",
+    color: T0,
+  },
+  recordHomeLocationDesc: {
+    marginTop: 6,
+    fontSize: 10,
+    lineHeight: 17,
+    color: T1,
   },
   recordPlaceBox: {
     marginBottom: 18,
