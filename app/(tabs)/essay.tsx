@@ -1,6 +1,6 @@
 import Ionicons from "@expo/vector-icons/Ionicons";
 import { useFocusEffect } from "expo-router";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -17,15 +17,20 @@ import {
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import * as Sharing from "expo-sharing";
+import ViewShot from "react-native-view-shot";
 
 import { supabase } from "../../lib/supabase";
 import {
   createEssayDraft,
   EssayDashboardData,
   EssayDetail,
+  EssayGenerationMeta,
+  EssayKind,
   EssayRecord,
-  EssayStyle,
   EssaySummary,
+  EssayVersionNo,
+  PostcardFormat,
   generateEssayVersion,
   getBookWidthByDuration,
   getEssayById,
@@ -63,27 +68,6 @@ const BOOK_COLORS = [
   "#7A4A35",
 ];
 
-const STYLE_OPTIONS: Array<{
-  value: EssayStyle;
-  label: string;
-  description: string;
-}> = [
-  {
-    value: "plain",
-    label: "더 담백하게",
-    description: "행동과 사실 중심, 감정 표현은 최소화해요.",
-  },
-  {
-    value: "balanced",
-    label: "기본 균형",
-    description: "담담한 사실에 은은한 분위기를 더해요.",
-  },
-  {
-    value: "emotional",
-    label: "조금 더 감성적으로",
-    description: "분위기와 여운을 늘리되 과장하지 않아요.",
-  },
-];
 
 const EMOTION_LABELS: Record<string, string> = {
   comfortable: "😌 편안해요",
@@ -205,11 +189,122 @@ function getYear(value: string | null | undefined) {
     : String(date.getFullYear());
 }
 
-function getStyleLabel(style: EssayStyle) {
-  return (
-    STYLE_OPTIONS.find((option) => option.value === style)?.label ??
-    "기본 균형"
-  );
+
+function getDisplayNickname(value: string | null | undefined) {
+  const nickname = String(value ?? "").trim().replace(/님$/u, "");
+  return nickname || "나";
+}
+
+function getWeekLabel(durationDays: number) {
+  return `${Math.max(1, Math.ceil(durationDays / 7))}주`;
+}
+
+function personalizeTasteReportTitle(
+  title: string,
+  nickname: string,
+  durationDays: number,
+) {
+  const displayNickname = getDisplayNickname(nickname);
+  const fallbackTitle =
+    `AI가 분석한 ${displayNickname}님의 ${getWeekLabel(durationDays)}`;
+  const normalizedTitle = String(title ?? "").trim();
+
+  if (!normalizedTitle) return fallbackTitle;
+
+  const replaced = normalizedTitle
+    .replace(/\[?\s*닉네임\s*\]?\s*님?/gu, `${displayNickname}님`)
+    .replace(/(?:사용자|유저)\s*님/gu, `${displayNickname}님`)
+    .replace(/AI가 분석한\s+나의\s+(\d+주)/gu, `AI가 분석한 ${displayNickname}님의 $1`)
+    .replace(/님님/gu, "님");
+
+  return replaced || fallbackTitle;
+}
+
+function formatEssayParagraphs(value: string) {
+  const normalized = String(value ?? "")
+    .replace(/\r\n?/g, "\n")
+    .replace(/[ \t]+/g, " ")
+    .trim();
+
+  if (!normalized) return "";
+
+  const existingParagraphs = normalized
+    .split(/\n{2,}/)
+    .map((paragraph) => paragraph.replace(/\n+/g, " ").trim())
+    .filter(Boolean);
+
+  if (existingParagraphs.length > 1) {
+    return existingParagraphs.join("\n\n");
+  }
+
+  const sentences = normalized
+    .replace(/\n+/g, " ")
+    .match(/[^.!?。！？]+[.!?。！？]+|[^.!?。！？]+$/gu)
+    ?.map((sentence) => sentence.trim())
+    .filter(Boolean) ?? [];
+
+  if (sentences.length <= 1) return normalized;
+
+  return sentences.join("\n\n");
+}
+
+function prepareEssaySummaryForDisplay(
+  essay: EssaySummary,
+  nickname: string,
+): EssaySummary {
+  if (essay.kind !== "taste_report") return essay;
+
+  return {
+    ...essay,
+    title: personalizeTasteReportTitle(
+      essay.title,
+      nickname,
+      essay.durationDays,
+    ),
+    content: formatEssayParagraphs(essay.content),
+  };
+}
+
+function prepareEssayDetailForDisplay(detail: EssayDetail): EssayDetail {
+  return {
+    ...detail,
+    title:
+      detail.kind === "taste_report"
+        ? personalizeTasteReportTitle(
+            detail.title,
+            detail.nickname,
+            detail.durationDays,
+          )
+        : detail.title,
+    content:
+      detail.kind === "taste_report"
+        ? formatEssayParagraphs(detail.content)
+        : detail.content,
+    versions: detail.versions.map((version) =>
+      version.kind === "taste_report"
+        ? {
+            ...version,
+            title: personalizeTasteReportTitle(
+              version.title,
+              detail.nickname,
+              detail.durationDays,
+            ),
+            content: formatEssayParagraphs(version.content),
+          }
+        : version,
+    ),
+  };
+}
+
+function prepareDashboardForDisplay(
+  data: EssayDashboardData,
+): EssayDashboardData {
+  return {
+    ...data,
+    essays: data.essays.map((essay) =>
+      prepareEssaySummaryForDisplay(essay, data.nickname)
+    ),
+  };
 }
 
 function CoverVisual({
@@ -253,6 +348,226 @@ function CoverVisual({
   );
 }
 
+
+function getEssayKindLabel(kind: EssayKind) {
+  return kind === "postcard" ? "SNS 공유용 엽서" : "AI 취향 리포트";
+}
+
+function getPostcardFormatLabel(format: PostcardFormat | null) {
+  return format === "square" ? "게시물 1:1" : "스토리 9:16";
+}
+
+function PhotoCollage({
+  photoUrls,
+  compact = false,
+}: {
+  photoUrls: string[];
+  compact?: boolean;
+}) {
+  const photos = photoUrls.slice(0, 4);
+
+  if (photos.length === 0) {
+    return (
+      <View style={[styles.collageEmpty, compact && styles.collageEmptyCompact]}>
+        <Ionicons
+          name="images-outline"
+          size={compact ? 24 : 34}
+          color={COLORS.textMuted}
+        />
+        <Text style={styles.collageEmptyText}>이 여정에는 사진이 없어요</Text>
+      </View>
+    );
+  }
+
+  if (photos.length === 1) {
+    return (
+      <Image
+        source={{ uri: photos[0] }}
+        resizeMode="cover"
+        style={styles.collageSingleImage}
+      />
+    );
+  }
+
+  if (photos.length === 2) {
+    return (
+      <View style={styles.collageRow}>
+        {photos.map((url, index) => (
+          <Image
+            key={`${url}-${index}`}
+            source={{ uri: url }}
+            resizeMode="cover"
+            style={[
+              styles.collageHalfImage,
+              index === 0 && styles.collageImageGapRight,
+            ]}
+          />
+        ))}
+      </View>
+    );
+  }
+
+  if (photos.length === 3) {
+    return (
+      <View style={styles.collageRow}>
+        <Image
+          source={{ uri: photos[0] }}
+          resizeMode="cover"
+          style={[styles.collageHalfImage, styles.collageImageGapRight]}
+        />
+        <View style={styles.collageColumn}>
+          <Image
+            source={{ uri: photos[1] }}
+            resizeMode="cover"
+            style={[styles.collageQuarterImage, styles.collageImageGapBottom]}
+          />
+          <Image
+            source={{ uri: photos[2] }}
+            resizeMode="cover"
+            style={styles.collageQuarterImage}
+          />
+        </View>
+      </View>
+    );
+  }
+
+  const remainingCount = Math.max(photoUrls.length - 4, 0);
+
+  return (
+    <View style={styles.collageGrid}>
+      {[0, 1].map((row) => (
+        <View key={`row-${row}`} style={styles.collageGridRow}>
+          {[0, 1].map((column) => {
+            const photoIndex = row * 2 + column;
+            const url = photos[photoIndex];
+
+            return (
+              <View
+                key={`${url}-${photoIndex}`}
+                style={[
+                  styles.collageGridCell,
+                  column === 0 && styles.collageImageGapRight,
+                  row === 0 && styles.collageImageGapBottom,
+                ]}
+              >
+                <Image
+                  source={{ uri: url }}
+                  resizeMode="cover"
+                  style={styles.collageGridImage}
+                />
+                {photoIndex === 3 && remainingCount > 0 ? (
+                  <View style={styles.collageMoreOverlay}>
+                    <Text style={styles.collageMoreText}>+{remainingCount}</Text>
+                  </View>
+                ) : null}
+              </View>
+            );
+          })}
+        </View>
+      ))}
+    </View>
+  );
+}
+
+function PostcardCanvas({
+  title,
+  content,
+  meta,
+  photoUrls,
+  journeyTitle,
+  format,
+}: {
+  title: string;
+  content: string;
+  meta: EssayGenerationMeta;
+  photoUrls: string[];
+  journeyTitle: string;
+  format: PostcardFormat | null;
+}) {
+  const actualFormat = format ?? "story";
+
+  return (
+    <View
+      style={[
+        styles.postcardCanvas,
+        {
+          aspectRatio: actualFormat === "square" ? 1 : 9 / 16,
+          backgroundColor: meta.themeColor,
+        },
+      ]}
+    >
+      <View style={styles.postcardPhotoArea}>
+        <PhotoCollage photoUrls={photoUrls} compact />
+      </View>
+
+      <View style={styles.postcardTextArea}>
+        <View
+          style={[
+            styles.postcardAccentLine,
+            { backgroundColor: meta.accentColor },
+          ]}
+        />
+        <Text style={styles.postcardJourneyLabel}>{journeyTitle}</Text>
+        <Text style={styles.postcardTitle}>{title}</Text>
+        <Text style={styles.postcardBody}>{content}</Text>
+        {meta.hashtags.length > 0 ? (
+          <Text style={[styles.postcardHashtags, { color: meta.accentColor }]}>
+            {meta.hashtags.join("  ")}
+          </Text>
+        ) : null}
+      </View>
+    </View>
+  );
+}
+
+function TasteReportPreview({
+  title,
+  content,
+  meta,
+  photoUrls,
+  nickname,
+  period,
+  compact = false,
+}: {
+  title: string;
+  content: string;
+  meta: EssayGenerationMeta;
+  photoUrls: string[];
+  nickname: string;
+  period: string;
+  compact?: boolean;
+}) {
+  return (
+    <View style={[styles.reportCard, compact && styles.reportCardCompact]}>
+      <View style={compact ? styles.reportPhotosCompact : styles.reportPhotos}>
+        <PhotoCollage photoUrls={photoUrls} compact={compact} />
+      </View>
+
+      <View style={styles.reportContent}>
+        <Text style={styles.reportEyebrow}>AI TASTE REPORT</Text>
+        <Text style={[styles.reportTitle, compact && styles.reportTitleCompact]}>
+          {title}
+        </Text>
+        <Text style={styles.reportByline}>{nickname} · {period}</Text>
+        <Text style={[styles.reportBody, compact && styles.reportBodyCompact]}>
+          {content}
+        </Text>
+
+        {meta.insights.length > 0 ? (
+          <View style={styles.insightList}>
+            {meta.insights.map((insight, index) => (
+              <View key={`${insight.keyword}-${index}`} style={styles.insightItem}>
+                <Text style={styles.insightKeyword}>{insight.keyword}</Text>
+                <Text style={styles.insightDescription}>{insight.description}</Text>
+              </View>
+            ))}
+          </View>
+        ) : null}
+      </View>
+    </View>
+  );
+}
+
 export default function EssayScreen() {
   const [dashboard, setDashboard] =
     useState<EssayDashboardData | null>(null);
@@ -263,12 +578,10 @@ export default function EssayScreen() {
     useState<EssayDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailMode, setDetailMode] = useState<DetailMode>("view");
-  const [activeVersionNo, setActiveVersionNo] = useState<1 | 2>(1);
+  const [activeVersionNo, setActiveVersionNo] = useState<EssayVersionNo>(1);
 
   const [versionGenerating, setVersionGenerating] = useState(false);
-  const [styleModalVisible, setStyleModalVisible] = useState(false);
-  const [selectedStyle, setSelectedStyle] =
-    useState<EssayStyle>("plain");
+  const [regenerateModalVisible, setRegenerateModalVisible] = useState(false);
   const [versionSelecting, setVersionSelecting] = useState(false);
 
   const [editTitle, setEditTitle] = useState("");
@@ -278,11 +591,18 @@ export default function EssayScreen() {
   const [recordDetail, setRecordDetail] =
     useState<EssayRecord | null>(null);
 
+  const [createModalVisible, setCreateModalVisible] = useState(false);
+  const [selectedEssayKind, setSelectedEssayKind] =
+    useState<EssayKind>("taste_report");
+  const [selectedPostcardFormat, setSelectedPostcardFormat] =
+    useState<PostcardFormat>("story");
+  const postcardShotRef = useRef<ViewShot | null>(null);
+
   const loadDashboard = useCallback(async (showLoading = true) => {
     try {
       if (showLoading) setScreenLoading(true);
       const data = await withJwtRetry(() => getEssayDashboardData());
-      setDashboard(data);
+      setDashboard(prepareDashboardForDisplay(data));
     } catch (error) {
       const details = error as {
         code?: unknown;
@@ -317,7 +637,8 @@ export default function EssayScreen() {
     try {
       setDetailLoading(true);
       const essayId = typeof summary === "string" ? summary : summary.id;
-      const detail = await withJwtRetry(() => getEssayById(essayId));
+      const rawDetail = await withJwtRetry(() => getEssayById(essayId));
+      const detail = prepareEssayDetailForDisplay(rawDetail);
       setSelectedEssay(detail);
       setActiveVersionNo(detail.versions[0]?.versionNo ?? 1);
       setDetailMode(
@@ -335,13 +656,18 @@ export default function EssayScreen() {
     }
   };
 
-  const reloadSelectedEssay = async () => {
+  const reloadSelectedEssay = async (
+    preferredVersionNo?: EssayVersionNo,
+  ) => {
     if (!selectedEssay) return;
-    const detail = await withJwtRetry(() => getEssayById(selectedEssay.id));
+    const rawDetail = await withJwtRetry(() => getEssayById(selectedEssay.id));
+    const detail = prepareEssayDetailForDisplay(rawDetail);
     setSelectedEssay(detail);
     setEditTitle(detail.title);
     setEditContent(detail.content);
-    setActiveVersionNo(detail.versions[0]?.versionNo ?? 1);
+    setActiveVersionNo(
+      preferredVersionNo ?? detail.versions[0]?.versionNo ?? 1,
+    );
     setDetailMode(
       detail.selectedVersionNo === null ? "versions" : "view",
     );
@@ -378,40 +704,43 @@ export default function EssayScreen() {
     setRecordDetail(null);
   };
 
-  const handleCreateEssay = async () => {
+  const handleCreateEssay = () => {
+    const journey = dashboard?.journey;
+
+    if (!journey?.canCreateEssay || createLoading) return;
+    setSelectedEssayKind("taste_report");
+    setSelectedPostcardFormat("story");
+    setCreateModalVisible(true);
+  };
+
+  const handleConfirmCreateEssay = async () => {
     const journey = dashboard?.journey;
 
     if (!journey?.canCreateEssay || createLoading) return;
 
-    Alert.alert(
-      "AI 에세이를 만들까요?",
-      "이 여정의 아직 사용되지 않은 기록을 날짜순으로 모아 버전 1을 만들어요.",
-      [
-        { text: "취소", style: "cancel" },
-        {
-          text: "만들기",
-          onPress: async () => {
-            try {
-              setCreateLoading(true);
-              const essayId = await withJwtRetry(() => createEssayDraft(journey.id));
-              await loadDashboard(false);
-              await openEssay(essayId);
-            } catch (error) {
-              Alert.alert(
-                "에세이 생성 실패",
-                getErrorMessage(
-                  error,
-                  "AI 에세이를 생성하지 못했습니다.",
-                ),
-              );
-              await loadDashboard(false);
-            } finally {
-              setCreateLoading(false);
-            }
-          },
-        },
-      ],
-    );
+    try {
+      setCreateLoading(true);
+      setCreateModalVisible(false);
+      const essayId = await withJwtRetry(() =>
+        createEssayDraft(journey.id, {
+          kind: selectedEssayKind,
+          postcardFormat:
+            selectedEssayKind === "postcard"
+              ? selectedPostcardFormat
+              : null,
+        }),
+      );
+      await loadDashboard(false);
+      await openEssay(essayId);
+    } catch (error) {
+      Alert.alert(
+        "에세이 생성 실패",
+        getErrorMessage(error, "AI 에세이를 생성하지 못했습니다."),
+      );
+      await loadDashboard(false);
+    } finally {
+      setCreateLoading(false);
+    }
   };
 
   const handleRetryFirstVersion = async () => {
@@ -419,8 +748,13 @@ export default function EssayScreen() {
 
     try {
       setVersionGenerating(true);
-      await withJwtRetry(() => generateEssayVersion(selectedEssay.id, "balanced"));
-      await reloadSelectedEssay();
+      const generated = await withJwtRetry(() =>
+        generateEssayVersion(selectedEssay.id, {
+          kind: selectedEssay.kind,
+          postcardFormat: selectedEssay.postcardFormat,
+        }),
+      );
+      await reloadSelectedEssay(generated.versionNo);
       await loadDashboard(false);
     } catch (error) {
       Alert.alert(
@@ -432,31 +766,57 @@ export default function EssayScreen() {
     }
   };
 
-  const handleGenerateSecondVersion = async () => {
+  const openRegenerateModal = () => {
+    if (!selectedEssay || selectedEssay.versions.length >= 3) return;
+
+    const currentVersion = selectedEssay.versions.find(
+      (version) => version.versionNo === activeVersionNo,
+    );
+
+    setSelectedEssayKind(
+      currentVersion?.kind ?? selectedEssay.kind,
+    );
+    setSelectedPostcardFormat(
+      currentVersion?.postcardFormat ??
+        selectedEssay.postcardFormat ??
+        "story",
+    );
+    setRegenerateModalVisible(true);
+  };
+
+  const handleGenerateNextVersion = async () => {
     if (!selectedEssay || versionGenerating) return;
 
     try {
-      setStyleModalVisible(false);
+      setRegenerateModalVisible(false);
       setVersionGenerating(true);
-      await withJwtRetry(() => generateEssayVersion(selectedEssay.id, selectedStyle));
-      await reloadSelectedEssay();
+      const generated = await withJwtRetry(() =>
+        generateEssayVersion(selectedEssay.id, {
+          kind: selectedEssayKind,
+          postcardFormat:
+            selectedEssayKind === "postcard"
+              ? selectedPostcardFormat
+              : null,
+        }),
+      );
+      await reloadSelectedEssay(generated.versionNo);
       await loadDashboard(false);
     } catch (error) {
       Alert.alert(
         "AI로 다시 만들기 실패",
-        getErrorMessage(error, "버전 2를 만들지 못했습니다."),
+        getErrorMessage(error, "새 버전을 만들지 못했습니다."),
       );
     } finally {
       setVersionGenerating(false);
     }
   };
 
-  const handleSelectVersion = (versionNo: 1 | 2) => {
+  const handleSelectVersion = (versionNo: EssayVersionNo) => {
     if (!selectedEssay || versionSelecting) return;
 
     Alert.alert(
       `버전 ${versionNo}을 선택할까요?`,
-      "이 버전을 선택하면 다른 버전은 삭제됩니다. 선택한 버전으로 편집을 시작하시겠습니까?",
+      "이 버전을 최종 초안으로 채택하고 제목과 내용을 직접 다듬을 수 있어요.",
       [
         { text: "취소", style: "cancel" },
         {
@@ -465,7 +825,8 @@ export default function EssayScreen() {
             try {
               setVersionSelecting(true);
               await withJwtRetry(() => selectEssayVersion(selectedEssay.id, versionNo));
-              const detail = await withJwtRetry(() => getEssayById(selectedEssay.id));
+              const rawDetail = await withJwtRetry(() => getEssayById(selectedEssay.id));
+              const detail = prepareEssayDetailForDisplay(rawDetail);
               setSelectedEssay(detail);
               setEditTitle(detail.title);
               setEditContent(detail.content);
@@ -501,7 +862,8 @@ export default function EssayScreen() {
         title: editTitle,
         content: editContent,
       }));
-      const detail = await withJwtRetry(() => getEssayById(selectedEssay.id));
+      const rawDetail = await withJwtRetry(() => getEssayById(selectedEssay.id));
+      const detail = prepareEssayDetailForDisplay(rawDetail);
       setSelectedEssay(detail);
       setEditTitle(detail.title);
       setEditContent(detail.content);
@@ -531,7 +893,8 @@ export default function EssayScreen() {
           onPress: async () => {
             try {
               await withJwtRetry(() => publishEssay(selectedEssay.id));
-              const detail = await withJwtRetry(() => getEssayById(selectedEssay.id));
+              const rawDetail = await withJwtRetry(() => getEssayById(selectedEssay.id));
+              const detail = prepareEssayDetailForDisplay(rawDetail);
               setSelectedEssay(detail);
               await loadDashboard(false);
               Alert.alert("공개 완료", "에세이가 공개됐어요.");
@@ -551,15 +914,43 @@ export default function EssayScreen() {
     if (!selectedEssay) return;
 
     try {
+      if (selectedEssay.kind === "postcard") {
+        const canShare = await Sharing.isAvailableAsync();
+
+        if (!canShare) {
+          Alert.alert("공유 불가", "이 기기에서는 이미지 공유를 사용할 수 없어요.");
+          return;
+        }
+
+        const uri = await postcardShotRef.current?.capture?.();
+
+        if (!uri) {
+          throw new Error("엽서 이미지를 만들지 못했습니다.");
+        }
+
+        await Sharing.shareAsync(uri, {
+          mimeType: "image/png",
+          dialogTitle: "SNS 엽서 공유",
+          UTI: "public.png",
+        });
+        return;
+      }
+
       await Share.share({
         title: selectedEssay.title,
-        message: `${selectedEssay.title}\n${selectedEssay.nickname} · ${formatPeriod(
+        message: `${selectedEssay.title}
+${selectedEssay.nickname} · ${formatPeriod(
           selectedEssay.startDate,
           selectedEssay.endDate,
-        )}\n\n${selectedEssay.content}`,
+        )}
+
+${selectedEssay.content}`,
       });
-    } catch {
-      Alert.alert("공유 실패", "에세이를 공유하지 못했습니다.");
+    } catch (error) {
+      Alert.alert(
+        "공유 실패",
+        getErrorMessage(error, "에세이를 공유하지 못했습니다."),
+      );
     }
   };
 
@@ -568,6 +959,14 @@ export default function EssayScreen() {
       (version) => version.versionNo === activeVersionNo,
     );
   }, [activeVersionNo, selectedEssay]);
+
+  const selectedEssayPhotoUrls = useMemo(() => {
+    return Array.from(
+      new Set(
+        (selectedEssay?.records ?? []).flatMap((record) => record.photoUrls),
+      ),
+    );
+  }, [selectedEssay]);
 
   if (screenLoading) {
     return (
@@ -664,7 +1063,12 @@ export default function EssayScreen() {
                               selected && styles.versionTabStyleSelected,
                             ]}
                           >
-                            {getStyleLabel(version.style)}
+                            {getEssayKindLabel(version.kind)}
+                            {version.kind === "postcard"
+                              ? ` · ${getPostcardFormatLabel(
+                                  version.postcardFormat,
+                                )}`
+                              : ""}
                           </Text>
                         </Pressable>
                       );
@@ -686,12 +1090,31 @@ export default function EssayScreen() {
                       </Text>
                     </View>
 
-                    <Text style={styles.versionTitle}>
-                      {selectedVersion?.title}
-                    </Text>
-                    <Text style={styles.versionBody}>
-                      {selectedVersion?.content}
-                    </Text>
+                    {selectedVersion ? (
+                      selectedVersion.kind === "postcard" ? (
+                        <PostcardCanvas
+                          title={selectedVersion.title}
+                          content={selectedVersion.content}
+                          meta={selectedVersion.meta}
+                          photoUrls={selectedEssayPhotoUrls}
+                          journeyTitle={selectedEssay.journeyTitle}
+                          format={selectedVersion.postcardFormat}
+                        />
+                      ) : (
+                        <TasteReportPreview
+                          title={selectedVersion.title}
+                          content={selectedVersion.content}
+                          meta={selectedVersion.meta}
+                          photoUrls={selectedEssayPhotoUrls}
+                          nickname={selectedEssay.nickname}
+                          period={formatPeriod(
+                            selectedEssay.startDate,
+                            selectedEssay.endDate,
+                          )}
+                          compact
+                        />
+                      )
+                    ) : null}
 
                     <Pressable
                       onPress={() => handleSelectVersion(activeVersionNo)}
@@ -712,15 +1135,15 @@ export default function EssayScreen() {
                     </Pressable>
 
                     <Pressable
-                      onPress={() => setStyleModalVisible(true)}
+                      onPress={openRegenerateModal}
                       disabled={
-                        selectedEssay.versions.length >= 2 ||
+                        selectedEssay.versions.length >= 3 ||
                         versionGenerating
                       }
                       style={({ pressed }) => [
                         styles.secondaryButton,
                         pressed && styles.buttonPressed,
-                        (selectedEssay.versions.length >= 2 ||
+                        (selectedEssay.versions.length >= 3 ||
                           versionGenerating) && styles.disabledButton,
                       ]}
                     >
@@ -728,9 +1151,9 @@ export default function EssayScreen() {
                         <ActivityIndicator color={COLORS.primary} />
                       ) : (
                         <Text style={styles.secondaryButtonText}>
-                          {selectedEssay.versions.length >= 2
-                            ? "AI로 다시 만들기 사용 완료"
-                            : "AI로 다시 만들기"}
+                          {selectedEssay.versions.length >= 3
+                            ? "다시 만들기 2회 사용 완료"
+                            : `AI로 다시 만들기 (${Math.max(0, 3 - selectedEssay.versions.length)}회 남음)`}
                         </Text>
                       )}
                     </Pressable>
@@ -856,9 +1279,8 @@ export default function EssayScreen() {
               <ScrollView
                 style={styles.detailScroll}
                 showsVerticalScrollIndicator={false}
+                contentContainerStyle={styles.detailScrollContent}
               >
-                <CoverVisual uri={selectedEssay.coverPhotoUrl} height={220} />
-
                 <View style={styles.detailContent}>
                   <View style={styles.publicationRow}>
                     <View
@@ -895,21 +1317,50 @@ export default function EssayScreen() {
                           : "비공개 초안"}
                       </Text>
                     </View>
+                    <View style={styles.kindBadge}>
+                      <Text style={styles.kindBadgeText}>
+                        {getEssayKindLabel(selectedEssay.kind)}
+                      </Text>
+                    </View>
                   </View>
 
-                  <Text style={styles.detailTitle}>
-                    {selectedEssay.title}
-                  </Text>
-                  <Text style={styles.detailByline}>
-                    {selectedEssay.nickname} · {formatPeriod(
-                      selectedEssay.startDate,
-                      selectedEssay.endDate,
-                    )}
-                  </Text>
-
-                  <Text style={styles.essayBodyText}>
-                    {selectedEssay.content}
-                  </Text>
+                  {selectedEssay.kind === "postcard" ? (
+                    <>
+                      <Text style={styles.postcardFormatGuide}>
+                        {getPostcardFormatLabel(selectedEssay.postcardFormat)} · 이미지로 바로 공유할 수 있어요
+                      </Text>
+                      <ViewShot
+                        ref={postcardShotRef}
+                        style={styles.postcardShot}
+                        options={{
+                          format: "png",
+                          quality: 1,
+                          result: "tmpfile",
+                        }}
+                      >
+                        <PostcardCanvas
+                          title={selectedEssay.title}
+                          content={selectedEssay.content}
+                          meta={selectedEssay.selectedMeta}
+                          photoUrls={selectedEssayPhotoUrls}
+                          journeyTitle={selectedEssay.journeyTitle}
+                          format={selectedEssay.postcardFormat}
+                        />
+                      </ViewShot>
+                    </>
+                  ) : (
+                    <TasteReportPreview
+                      title={selectedEssay.title}
+                      content={selectedEssay.content}
+                      meta={selectedEssay.selectedMeta}
+                      photoUrls={selectedEssayPhotoUrls}
+                      nickname={selectedEssay.nickname}
+                      period={formatPeriod(
+                        selectedEssay.startDate,
+                        selectedEssay.endDate,
+                      )}
+                    />
+                  )}
 
                   <View style={styles.sourceSection}>
                     <Text style={styles.sourceSectionTitle}>
@@ -995,73 +1446,156 @@ export default function EssayScreen() {
         </View>
 
         <Modal
-          visible={styleModalVisible}
+          visible={regenerateModalVisible}
           transparent
           animationType="slide"
-          onRequestClose={() => setStyleModalVisible(false)}
+          onRequestClose={() => setRegenerateModalVisible(false)}
         >
           <View style={styles.modalOverlay}>
             <Pressable
               style={styles.modalBackdrop}
-              onPress={() => setStyleModalVisible(false)}
+              onPress={() => setRegenerateModalVisible(false)}
             />
-            <View style={styles.styleModalCard}>
+            <View style={styles.creationModalCard}>
               <View style={styles.modalHandle} />
-              <Text style={styles.styleModalCaption}>버전 2 생성</Text>
-              <Text style={styles.styleModalTitle}>
-                어떤 문체로 다시 만들까요?
+              <Text style={styles.creationModalCaption}>
+                버전 {selectedEssay.versions.length + 1} 생성
               </Text>
-              <Text style={styles.styleModalDescription}>
-                선택한 문체는 제목과 본문 전체에 적용돼요.
+              <Text style={styles.creationModalTitle}>
+                새 버전은 어떤 형식으로 만들까요?
               </Text>
-
-              {STYLE_OPTIONS.map((option) => {
-                const selected = selectedStyle === option.value;
-
-                return (
-                  <Pressable
-                    key={option.value}
-                    onPress={() => setSelectedStyle(option.value)}
-                    style={[
-                      styles.styleOption,
-                      selected && styles.styleOptionSelected,
-                    ]}
-                  >
-                    <View style={styles.styleOptionTextArea}>
-                      <Text
-                        style={[
-                          styles.styleOptionTitle,
-                          selected && styles.styleOptionTitleSelected,
-                        ]}
-                      >
-                        {option.label}
-                      </Text>
-                      <Text style={styles.styleOptionDescription}>
-                        {option.description}
-                      </Text>
-                    </View>
-                    <View
-                      style={[
-                        styles.radioCircle,
-                        selected && styles.radioCircleSelected,
-                      ]}
-                    >
-                      {selected ? <View style={styles.radioDot} /> : null}
-                    </View>
-                  </Pressable>
-                );
-              })}
+              <Text style={styles.creationModalDescription}>
+                기존 결과는 그대로 보관돼요. 취향 리포트와 SNS 엽서 중에서 다시 선택할 수 있어요.
+              </Text>
 
               <Pressable
-                onPress={() => void handleGenerateSecondVersion()}
+                onPress={() => setSelectedEssayKind("taste_report")}
+                style={[
+                  styles.creationOption,
+                  selectedEssayKind === "taste_report" &&
+                    styles.creationOptionSelected,
+                ]}
+              >
+                <View style={styles.creationOptionIcon}>
+                  <Ionicons
+                    name="analytics-outline"
+                    size={24}
+                    color={COLORS.primary}
+                  />
+                </View>
+                <View style={styles.creationOptionText}>
+                  <Text style={styles.creationOptionTitle}>
+                    AI 취향 리포트
+                  </Text>
+                  <Text style={styles.creationOptionDescription}>
+                    기록을 분석해 이번 여정의 취향과 다음 추천을 정리해요.
+                  </Text>
+                </View>
+                <View
+                  style={[
+                    styles.radioCircle,
+                    selectedEssayKind === "taste_report" &&
+                      styles.radioCircleSelected,
+                  ]}
+                >
+                  {selectedEssayKind === "taste_report" ? (
+                    <View style={styles.radioDot} />
+                  ) : null}
+                </View>
+              </Pressable>
+
+              <Pressable
+                onPress={() => setSelectedEssayKind("postcard")}
+                style={[
+                  styles.creationOption,
+                  selectedEssayKind === "postcard" &&
+                    styles.creationOptionSelected,
+                ]}
+              >
+                <View style={styles.creationOptionIcon}>
+                  <Ionicons
+                    name="image-outline"
+                    size={24}
+                    color={COLORS.pink}
+                  />
+                </View>
+                <View style={styles.creationOptionText}>
+                  <Text style={styles.creationOptionTitle}>
+                    SNS 공유용 엽서
+                  </Text>
+                  <Text style={styles.creationOptionDescription}>
+                    사진 콜라주와 짧은 글을 SNS에 올리기 좋은 형태로 만들어요.
+                  </Text>
+                </View>
+                <View
+                  style={[
+                    styles.radioCircle,
+                    selectedEssayKind === "postcard" &&
+                      styles.radioCircleSelected,
+                  ]}
+                >
+                  {selectedEssayKind === "postcard" ? (
+                    <View style={styles.radioDot} />
+                  ) : null}
+                </View>
+              </Pressable>
+
+              {selectedEssayKind === "postcard" ? (
+                <View style={styles.formatSection}>
+                  <Text style={styles.formatSectionTitle}>엽서 비율</Text>
+                  <View style={styles.formatRow}>
+                    <Pressable
+                      onPress={() => setSelectedPostcardFormat("story")}
+                      style={[
+                        styles.formatOption,
+                        selectedPostcardFormat === "story" &&
+                          styles.formatOptionSelected,
+                      ]}
+                    >
+                      <Ionicons
+                        name="phone-portrait-outline"
+                        size={20}
+                        color={COLORS.primary}
+                      />
+                      <Text style={styles.formatOptionTitle}>스토리</Text>
+                      <Text style={styles.formatOptionMeta}>9:16 세로형</Text>
+                    </Pressable>
+                    <Pressable
+                      onPress={() => setSelectedPostcardFormat("square")}
+                      style={[
+                        styles.formatOption,
+                        selectedPostcardFormat === "square" &&
+                          styles.formatOptionSelected,
+                      ]}
+                    >
+                      <Ionicons
+                        name="square-outline"
+                        size={20}
+                        color={COLORS.primary}
+                      />
+                      <Text style={styles.formatOptionTitle}>게시물</Text>
+                      <Text style={styles.formatOptionMeta}>1:1 정사각형</Text>
+                    </Pressable>
+                  </View>
+                </View>
+              ) : null}
+
+              <Pressable
+                onPress={() => void handleGenerateNextVersion()}
+                disabled={versionGenerating}
                 style={({ pressed }) => [
                   styles.primaryButton,
                   pressed && styles.buttonPressed,
+                  versionGenerating && styles.disabledButton,
                 ]}
               >
-                <Text style={styles.primaryButtonText}>
-                  이 문체로 버전 2 만들기
-                </Text>
+                {versionGenerating ? (
+                  <ActivityIndicator color={COLORS.white} />
+                ) : (
+                  <Text style={styles.primaryButtonText}>
+                    이 형식으로 새 버전 만들기
+                  </Text>
+                )}
               </Pressable>
             </View>
           </View>
@@ -1177,7 +1711,7 @@ export default function EssayScreen() {
         <View style={styles.header}>
           <Text style={styles.headerTitle}>나의 에세이</Text>
           <Text style={styles.headerDescription}>
-            진행한 여정을 하나의 글로 모아봐요
+            여정을 취향 리포트나 SNS 엽서로 남겨봐요
           </Text>
         </View>
 
@@ -1349,7 +1883,7 @@ export default function EssayScreen() {
                     }
                   >
                     {journey.canCreateEssay
-                      ? "AI 에세이 만들기"
+                      ? "에세이 만들기"
                       : `에세이 만들기 (${remainingDayCount}일 남음)`}
                   </Text>
                 )}
@@ -1441,7 +1975,7 @@ export default function EssayScreen() {
                     )}
                   </Text>
                   <Text style={styles.essayListMeta}>
-                    {essay.durationDays}일 여정 · 기록 {essay.sourceRecordCount}개
+                    {getEssayKindLabel(essay.kind)} · 기록 {essay.sourceRecordCount}개
                   </Text>
                 </View>
 
@@ -1458,7 +1992,7 @@ export default function EssayScreen() {
                 아직 만든 에세이가 없어요
               </Text>
               <Text style={styles.emptyCardDescription}>
-                여정을 완료하면 AI가 일상의 기록을 블로그형 글로 정리해줘요.
+                여정을 완료하면 AI가 기록을 취향 리포트나 SNS 엽서로 정리해줘요.
               </Text>
             </View>
           )}
@@ -1466,6 +2000,140 @@ export default function EssayScreen() {
 
         <View style={styles.bottomSpace} />
       </ScrollView>
+
+      <Modal
+        visible={createModalVisible}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setCreateModalVisible(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <Pressable
+            style={styles.modalBackdrop}
+            onPress={() => setCreateModalVisible(false)}
+          />
+          <View style={styles.creationModalCard}>
+            <View style={styles.modalHandle} />
+            <Text style={styles.creationModalCaption}>에세이 형식 선택</Text>
+            <Text style={styles.creationModalTitle}>
+              이번 여정을 어떻게 남길까요?
+            </Text>
+            <Text style={styles.creationModalDescription}>
+              사진은 두 형식 모두에 함께 들어가고, 작성한 기록은 AI 분석에 사용돼요.
+            </Text>
+
+            <Pressable
+              onPress={() => setSelectedEssayKind("taste_report")}
+              style={[
+                styles.creationOption,
+                selectedEssayKind === "taste_report" &&
+                  styles.creationOptionSelected,
+              ]}
+            >
+              <View style={styles.creationOptionIcon}>
+                <Ionicons name="analytics-outline" size={24} color={COLORS.primary} />
+              </View>
+              <View style={styles.creationOptionText}>
+                <Text style={styles.creationOptionTitle}>AI 취향 리포트</Text>
+                <Text style={styles.creationOptionDescription}>
+                  기록의 활동·감정·카테고리를 분석해 이번 여정의 취향과 다음 추천을 정리해요.
+                </Text>
+              </View>
+              <View
+                style={[
+                  styles.radioCircle,
+                  selectedEssayKind === "taste_report" &&
+                    styles.radioCircleSelected,
+                ]}
+              >
+                {selectedEssayKind === "taste_report" ? (
+                  <View style={styles.radioDot} />
+                ) : null}
+              </View>
+            </Pressable>
+
+            <Pressable
+              onPress={() => setSelectedEssayKind("postcard")}
+              style={[
+                styles.creationOption,
+                selectedEssayKind === "postcard" &&
+                  styles.creationOptionSelected,
+              ]}
+            >
+              <View style={styles.creationOptionIcon}>
+                <Ionicons name="image-outline" size={24} color={COLORS.pink} />
+              </View>
+              <View style={styles.creationOptionText}>
+                <Text style={styles.creationOptionTitle}>SNS 공유용 엽서</Text>
+                <Text style={styles.creationOptionDescription}>
+                  여정 사진을 콜라주로 배치하고 기록 속 문장을 짧고 감성적으로 담아요.
+                </Text>
+              </View>
+              <View
+                style={[
+                  styles.radioCircle,
+                  selectedEssayKind === "postcard" &&
+                    styles.radioCircleSelected,
+                ]}
+              >
+                {selectedEssayKind === "postcard" ? (
+                  <View style={styles.radioDot} />
+                ) : null}
+              </View>
+            </Pressable>
+
+            {selectedEssayKind === "postcard" ? (
+              <View style={styles.formatSection}>
+                <Text style={styles.formatSectionTitle}>엽서 비율</Text>
+                <View style={styles.formatRow}>
+                  <Pressable
+                    onPress={() => setSelectedPostcardFormat("story")}
+                    style={[
+                      styles.formatOption,
+                      selectedPostcardFormat === "story" &&
+                        styles.formatOptionSelected,
+                    ]}
+                  >
+                    <Ionicons name="phone-portrait-outline" size={20} color={COLORS.primary} />
+                    <Text style={styles.formatOptionTitle}>스토리</Text>
+                    <Text style={styles.formatOptionMeta}>9:16 세로형</Text>
+                  </Pressable>
+                  <Pressable
+                    onPress={() => setSelectedPostcardFormat("square")}
+                    style={[
+                      styles.formatOption,
+                      selectedPostcardFormat === "square" &&
+                        styles.formatOptionSelected,
+                    ]}
+                  >
+                    <Ionicons name="square-outline" size={20} color={COLORS.primary} />
+                    <Text style={styles.formatOptionTitle}>게시물</Text>
+                    <Text style={styles.formatOptionMeta}>1:1 정사각형</Text>
+                  </Pressable>
+                </View>
+              </View>
+            ) : null}
+
+            <Pressable
+              onPress={() => void handleConfirmCreateEssay()}
+              disabled={createLoading}
+              style={({ pressed }) => [
+                styles.primaryButton,
+                pressed && styles.buttonPressed,
+                createLoading && styles.disabledButton,
+              ]}
+            >
+              {createLoading ? (
+                <ActivityIndicator color={COLORS.white} />
+              ) : (
+                <Text style={styles.primaryButtonText}>
+                  이 형식으로 만들기
+                </Text>
+              )}
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -2417,6 +3085,327 @@ const styles = StyleSheet.create({
     fontSize: 14,
     lineHeight: 24,
     color: COLORS.textMain,
+  },
+  detailScrollContent: {
+    paddingBottom: 12,
+  },
+  kindBadge: {
+    marginLeft: 7,
+    paddingHorizontal: 9,
+    paddingVertical: 5,
+    backgroundColor: COLORS.background,
+    borderRadius: 8,
+  },
+  kindBadgeText: {
+    fontSize: 10,
+    fontWeight: "700",
+    color: COLORS.textSub,
+  },
+  collageEmpty: {
+    flex: 1,
+    minHeight: 190,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#ECEEF3",
+  },
+  collageEmptyCompact: {
+    minHeight: 140,
+  },
+  collageEmptyText: {
+    marginTop: 7,
+    fontSize: 10,
+    color: COLORS.textMuted,
+  },
+  collageSingleImage: {
+    width: "100%",
+    height: "100%",
+    backgroundColor: COLORS.border,
+  },
+  collageRow: {
+    flex: 1,
+    flexDirection: "row",
+  },
+  collageColumn: {
+    flex: 1,
+  },
+  collageHalfImage: {
+    flex: 1,
+    height: "100%",
+    backgroundColor: COLORS.border,
+  },
+  collageQuarterImage: {
+    flex: 1,
+    width: "100%",
+    backgroundColor: COLORS.border,
+  },
+  collageImageGapRight: {
+    marginRight: 3,
+  },
+  collageImageGapBottom: {
+    marginBottom: 3,
+  },
+  collageGrid: {
+    flex: 1,
+  },
+  collageGridRow: {
+    flex: 1,
+    flexDirection: "row",
+  },
+  collageGridCell: {
+    flex: 1,
+    position: "relative",
+    overflow: "hidden",
+  },
+  collageGridImage: {
+    width: "100%",
+    height: "100%",
+    backgroundColor: COLORS.border,
+  },
+  collageMoreOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(15,15,15,0.46)",
+  },
+  collageMoreText: {
+    fontSize: 22,
+    fontWeight: "800",
+    color: COLORS.white,
+  },
+  postcardShot: {
+    width: "100%",
+  },
+  postcardCanvas: {
+    width: "100%",
+    overflow: "hidden",
+    borderRadius: 18,
+  },
+  postcardPhotoArea: {
+    flex: 1.25,
+    overflow: "hidden",
+  },
+  postcardTextArea: {
+    flex: 0.75,
+    justifyContent: "center",
+    paddingHorizontal: 20,
+    paddingVertical: 18,
+  },
+  postcardAccentLine: {
+    width: 36,
+    height: 3,
+    marginBottom: 10,
+    borderRadius: 2,
+  },
+  postcardJourneyLabel: {
+    marginBottom: 5,
+    fontSize: 8,
+    fontWeight: "700",
+    letterSpacing: 1.2,
+    color: "rgba(15,15,15,0.54)",
+  },
+  postcardTitle: {
+    marginBottom: 8,
+    fontSize: 21,
+    lineHeight: 28,
+    fontWeight: "900",
+    color: COLORS.textMain,
+  },
+  postcardBody: {
+    fontSize: 10,
+    lineHeight: 17,
+    color: "rgba(15,15,15,0.76)",
+  },
+  postcardHashtags: {
+    marginTop: 10,
+    fontSize: 8,
+    lineHeight: 13,
+    fontWeight: "700",
+  },
+  postcardFormatGuide: {
+    marginBottom: 10,
+    textAlign: "center",
+    fontSize: 11,
+    color: COLORS.textMuted,
+  },
+  reportCard: {
+    overflow: "hidden",
+    backgroundColor: COLORS.white,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: 20,
+  },
+  reportCardCompact: {
+    marginBottom: 22,
+  },
+  reportPhotos: {
+    height: 230,
+    overflow: "hidden",
+  },
+  reportPhotosCompact: {
+    height: 170,
+    overflow: "hidden",
+  },
+  reportContent: {
+    paddingHorizontal: 20,
+    paddingVertical: 21,
+  },
+  reportEyebrow: {
+    marginBottom: 8,
+    fontSize: 9,
+    fontWeight: "800",
+    letterSpacing: 1.1,
+    color: COLORS.primary,
+  },
+  reportTitle: {
+    marginBottom: 7,
+    fontSize: 23,
+    lineHeight: 32,
+    fontWeight: "900",
+    color: COLORS.textMain,
+  },
+  reportTitleCompact: {
+    fontSize: 20,
+    lineHeight: 28,
+  },
+  reportByline: {
+    marginBottom: 18,
+    fontSize: 11,
+    color: COLORS.textMuted,
+  },
+  reportBody: {
+    fontSize: 15,
+    lineHeight: 28,
+    color: COLORS.textMain,
+    letterSpacing: -0.1,
+  },
+  reportBodyCompact: {
+    fontSize: 14,
+    lineHeight: 24,
+  },
+  insightList: {
+    marginTop: 20,
+  },
+  insightItem: {
+    marginBottom: 8,
+    paddingHorizontal: 13,
+    paddingVertical: 12,
+    backgroundColor: COLORS.primaryLight,
+    borderRadius: 12,
+  },
+  insightKeyword: {
+    marginBottom: 4,
+    fontSize: 12,
+    fontWeight: "800",
+    color: COLORS.primary,
+  },
+  insightDescription: {
+    fontSize: 11,
+    lineHeight: 18,
+    color: COLORS.textSub,
+  },
+  creationModalCard: {
+    maxHeight: "92%",
+    paddingHorizontal: 20,
+    paddingBottom: 28,
+    backgroundColor: COLORS.white,
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+  },
+  creationModalCaption: {
+    marginBottom: 5,
+    fontSize: 11,
+    fontWeight: "800",
+    color: COLORS.primary,
+  },
+  creationModalTitle: {
+    marginBottom: 7,
+    fontSize: 21,
+    lineHeight: 29,
+    fontWeight: "900",
+    color: COLORS.textMain,
+  },
+  creationModalDescription: {
+    marginBottom: 18,
+    fontSize: 12,
+    lineHeight: 19,
+    color: COLORS.textSub,
+  },
+  creationOption: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginBottom: 10,
+    padding: 14,
+    backgroundColor: COLORS.background,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: 15,
+  },
+  creationOptionSelected: {
+    backgroundColor: COLORS.primaryLight,
+    borderColor: COLORS.primary,
+  },
+  creationOptionIcon: {
+    width: 42,
+    height: 42,
+    alignItems: "center",
+    justifyContent: "center",
+    marginRight: 12,
+    backgroundColor: COLORS.white,
+    borderRadius: 12,
+  },
+  creationOptionText: {
+    flex: 1,
+    paddingRight: 10,
+  },
+  creationOptionTitle: {
+    marginBottom: 4,
+    fontSize: 14,
+    fontWeight: "800",
+    color: COLORS.textMain,
+  },
+  creationOptionDescription: {
+    fontSize: 10,
+    lineHeight: 16,
+    color: COLORS.textSub,
+  },
+  formatSection: {
+    marginBottom: 17,
+    paddingTop: 4,
+  },
+  formatSectionTitle: {
+    marginBottom: 8,
+    fontSize: 12,
+    fontWeight: "800",
+    color: COLORS.textMain,
+  },
+  formatRow: {
+    flexDirection: "row",
+  },
+  formatOption: {
+    flex: 1,
+    minHeight: 82,
+    alignItems: "center",
+    justifyContent: "center",
+    marginRight: 8,
+    backgroundColor: COLORS.background,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: 13,
+  },
+  formatOptionSelected: {
+    backgroundColor: COLORS.primaryLight,
+    borderColor: COLORS.primary,
+  },
+  formatOptionTitle: {
+    marginTop: 5,
+    fontSize: 12,
+    fontWeight: "800",
+    color: COLORS.textMain,
+  },
+  formatOptionMeta: {
+    marginTop: 2,
+    fontSize: 9,
+    color: COLORS.textMuted,
   },
   disabledButton: {
     opacity: 0.55,
