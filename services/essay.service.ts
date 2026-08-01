@@ -5,7 +5,7 @@ const ESSAY_FUNCTION_NAME =
     process.env.EXPO_PUBLIC_ESSAY_FUNCTION_NAME ?? "generate-essay",
   ).trim() || "generate-essay";
 
-const AI_GENERATION_TIMEOUT_MS = 45_000;
+const AI_GENERATION_TIMEOUT_MS = 120_000;
 
 export type EssayStyle = "plain" | "balanced" | "emotional";
 export type EssayVisibility = "private" | "anonymous" | "nickname";
@@ -1477,7 +1477,7 @@ export async function generateEssayVersion(
         },
       ),
       AI_GENERATION_TIMEOUT_MS,
-      "AI 응답이 45초 안에 오지 않았습니다. 잠시 후 다시 시도해주세요.",
+      "AI 응답이 2분 안에 오지 않았습니다. 잠시 후 다시 시도해주세요.",
     );
 
     console.log(
