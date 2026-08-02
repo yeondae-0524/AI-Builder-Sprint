@@ -34,6 +34,19 @@ type AvailablePlace = {
   distance?: number | string;
   district?: string;
   category?: string;
+  categoryName?: string;
+  category_name?: string;
+  categoryGroupCode?: string;
+  category_group_code?: string;
+  categoryGroupName?: string;
+  category_group_name?: string;
+  kakaoCategoryName?: string;
+  kakao_category_name?: string;
+  kakaoCategoryGroupCode?: string;
+  kakao_category_group_code?: string;
+  kakaoCategoryGroupName?: string;
+  kakao_category_group_name?: string;
+  foodOnly?: boolean;
 };
 
 type RequestBody = {
@@ -58,6 +71,7 @@ type RequestBody = {
   homeMissionLimit?: number;
   atHomeMissionLimit?: number;
   flexibleMissionLimit?: number;
+  minimumFlexibleMissionCount?: number;
   flexiblePlaceAllowed?: boolean;
   generationInstruction?: string;
   recommendationReasonInstruction?: string;
@@ -83,6 +97,27 @@ type AiMission = {
   required_items?: string[];
 };
 
+type AppCategory =
+  | "음식"
+  | "카페 및 디저트"
+  | "산책"
+  | "배움"
+  | "감상"
+  | "활동"
+  | "휴식"
+  | "기타";
+
+type FlexibleMissionExample = {
+  category: AppCategory;
+  title: string;
+  description: string;
+  instructions: string;
+  recommendationReason: string;
+  durationText: string;
+  costText: string;
+  requiredItems: string[];
+};
+
 type NormalizedPlace = {
   id?: string;
   name: string;
@@ -91,7 +126,11 @@ type NormalizedPlace = {
   lng: number;
   distance?: number;
   district?: string;
-  category?: string;
+  category: AppCategory;
+  kakaoCategoryName?: string;
+  kakaoCategoryGroupCode?: string;
+  kakaoCategoryGroupName?: string;
+  foodOnly: boolean;
 };
 
 const corsHeaders = {
@@ -118,15 +157,91 @@ const ALL_CATEGORIES = [
 
 const CATEGORY_GROUP_CODES: Record<string, string[]> = {
   "카페 및 디저트": ["CE7"],
-  음식: ["FD6"],
+  음식: ["FD6", "MT1", "CS2"],
   산책: ["AT4"],
-  // 휴식 미션을 카페로 강제 매칭하지 않는다. 실제 장소가 필요하다면 공원·산책 계열만 허용한다.
-  휴식: ["AT4"],
-  활동: ["AT4"],
-  감상: ["CT1"],
-  배움: ["CT1"],
+  배움: ["CT1", "AT4"],
+  감상: ["CT1", "AT4"],
+  활동: ["AT4", "MT1"],
+  휴식: ["AD5", "AT4"],
   기타: [],
 };
+
+// Solar가 '어디서나 가능' 미션의 방향과 문장 스타일을 참고할 few-shot 예시다.
+// 예시는 그대로 추천되는 고정 미션이 아니라, 매 생성 요청의 프롬프트에 참고 자료로 전달된다.
+const FLEXIBLE_MISSION_EXAMPLES: FlexibleMissionExample[] = [
+  {
+    category: "산책",
+    title: "오늘의 하늘",
+    description: "오늘의 하늘을 사진으로 기록해보세요.",
+    instructions:
+      "지금 보이는 하늘을 사진으로 남겨보세요. 빛과 구름의 모습을 천천히 살펴보며 잠시 여유를 느낄 수 있을 거예요.",
+    recommendationReason:
+      "짧은 시간 동안 주변을 바라보며 기분을 환기하기 좋아요.",
+    durationText: "3분",
+    costText: "무료",
+    requiredItems: ["휴대폰"],
+  },
+  {
+    category: "산책",
+    title: "계절을 담은 사진",
+    description: "지금 계절의 모습을 사진으로 기록해보세요.",
+    instructions:
+      "주변에서 지금 계절이 잘 드러나는 풍경이나 사물을 찾아 사진으로 남겨보세요. 사계절의 사진이 하나씩 모이면 일상의 변화를 담은 좋은 추억이 될 거예요.",
+    recommendationReason:
+      "익숙한 주변에서도 계절의 새로운 모습을 발견하기 좋아요.",
+    durationText: "5분",
+    costText: "무료",
+    requiredItems: ["휴대폰"],
+  },
+  {
+    category: "감상",
+    title: "주변의 소리 감상하기",
+    description: "지금 있는 곳의 소리에 잠시 집중해보세요.",
+    instructions:
+      "잠시 하던 일을 멈추고 주변에서 들려오는 소리를 5분 동안 감상해보세요. 평소에는 지나쳤던 공간의 분위기와 새로운 소리를 발견할 수 있을 거예요.",
+    recommendationReason:
+      "특별한 준비 없이 현재 공간을 새롭게 느껴보기 좋아요.",
+    durationText: "5분",
+    costText: "무료",
+    requiredItems: [],
+  },
+];
+
+const BLOCKED_MISSION_TITLE_PATTERNS = [
+  "천장구름관찰하기",
+] as const;
+
+const BLOCKED_MISSION_TEXT_PATTERNS = [
+  /천장\s*(?:의|에|에서)?\s*구름/u,
+  /구름.*천장/u,
+] as const;
+
+function isBlockedMissionText(value: unknown) {
+  const text = String(value ?? "").trim();
+  const normalized = normalizeComparableText(text);
+
+  return (
+    BLOCKED_MISSION_TITLE_PATTERNS.some(
+      (pattern) => normalized.includes(pattern),
+    ) ||
+    BLOCKED_MISSION_TEXT_PATTERNS.some((pattern) =>
+      pattern.test(text),
+    )
+  );
+}
+
+function isAiFlexibleMission(mission: AiMission) {
+  const normalizedPlaceName = normalizeComparableText(
+    mission.place_name,
+  );
+
+  return (
+    mission.is_at_home !== true &&
+    (mission.is_flexible === true ||
+      mission.requires_place === false ||
+      normalizedPlaceName === "어디서나가능")
+  );
+}
 
 function jsonResponse(body: unknown, status = 200) {
   return Response.json(body, {
@@ -182,10 +297,10 @@ function inferCategory(text: string) {
   if (/(산책|걷기|공원|골목|해변|강변|둘레길|동네|자연)/.test(normalized)) {
     return "산책";
   }
-  if (/(독서|책|공부|배우|학습|강의|도서관|서점)/.test(normalized)) {
+  if (/(독서|책|공부|배우|학습|강의|도서관|서점|박물관|역사관|기념관|사찰|성당|교회|역사유적|문화재)/.test(normalized)) {
     return "배움";
   }
-  if (/(음악|영화|공연|전시|버스킹|미술관|박물관|감상|사진)/.test(normalized)) {
+  if (/(음악|영화|공연|전시|버스킹|미술관|갤러리|감상|사진)/.test(normalized)) {
     return "감상";
   }
   if (/(운동|체험|만들기|공방|자전거|클라이밍|러닝|요가|춤|볼링)/.test(normalized)) {
@@ -208,30 +323,175 @@ function normalizeCategory(value: unknown, fallbackText = "") {
   return inferCategory(`${category} ${fallbackText}`);
 }
 
-const PLACE_CATEGORY_COMPATIBILITY: Record<string, string[]> = {
-  음식: ["음식"],
-  "카페 및 디저트": ["카페 및 디저트"],
-  산책: ["산책"],
-  배움: ["배움", "감상"],
-  감상: ["감상", "배움"],
-  활동: ["활동", "산책"],
-  // 휴식은 공원·산책 공간에서는 가능하지만 카페와 자동 매칭하지 않는다.
-  휴식: ["휴식", "산책"],
-  기타: ["기타"],
-};
-
-function isPlaceCategoryCompatible(
-  missionCategory: string,
-  placeCategory: string | undefined,
-) {
-  if (!placeCategory) {
-    return false;
+function firstNonEmptyString(...values: unknown[]) {
+  for (const value of values) {
+    const text = String(value ?? "").trim();
+    if (text) {
+      return text;
+    }
   }
 
-  return (
-    PLACE_CATEGORY_COMPATIBILITY[missionCategory] ??
-    [missionCategory]
-  ).includes(placeCategory);
+  return "";
+}
+
+function isAppCategory(value: string): value is AppCategory {
+  return ALL_CATEGORIES.includes(
+    value as (typeof ALL_CATEGORIES)[number],
+  );
+}
+
+function resolveKakaoPlaceCategory(
+  place: AvailablePlace | Record<string, unknown>,
+): {
+  category: AppCategory;
+  foodOnly: boolean;
+  kakaoCategoryName?: string;
+  kakaoCategoryGroupCode?: string;
+  kakaoCategoryGroupName?: string;
+} | null {
+  const raw = place as AvailablePlace;
+  const name = firstNonEmptyString(raw.name);
+  const address = firstNonEmptyString(raw.address);
+  const rawCategory = firstNonEmptyString(raw.category);
+  const kakaoCategoryName = firstNonEmptyString(
+    raw.kakao_category_name,
+    raw.kakaoCategoryName,
+    raw.category_name,
+    raw.categoryName,
+    isAppCategory(rawCategory) ? "" : rawCategory,
+  );
+  const kakaoCategoryGroupCode = firstNonEmptyString(
+    raw.kakao_category_group_code,
+    raw.kakaoCategoryGroupCode,
+    raw.category_group_code,
+    raw.categoryGroupCode,
+  ).toUpperCase();
+  const kakaoCategoryGroupName = firstNonEmptyString(
+    raw.kakao_category_group_name,
+    raw.kakaoCategoryGroupName,
+    raw.category_group_name,
+    raw.categoryGroupName,
+  );
+  const explicitAppCategory = [
+    rawCategory,
+    kakaoCategoryName,
+  ].find(isAppCategory);
+  const sourceText = `${kakaoCategoryName} ${kakaoCategoryGroupName} ${name} ${address}`
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+
+  const excludedPattern =
+    /(병원|의원|치과|한의원|약국|은행|증권|보험|부동산|중개업|주차장|주유소|충전소|행정복지센터|주민센터|시청|구청|군청|경찰서|소방서|우체국|공공기관|공사|공단|법원|검찰청|세무서|관공서)/u;
+
+  if (
+    excludedPattern.test(sourceText) ||
+    ["PK6", "OL7", "BK9", "AG2", "PO3", "HP8", "PM9"].includes(
+      kakaoCategoryGroupCode,
+    )
+  ) {
+    return null;
+  }
+
+  const build = (
+    category: AppCategory,
+    foodOnly = false,
+  ) => ({
+    category,
+    foodOnly,
+    kakaoCategoryName: kakaoCategoryName || undefined,
+    kakaoCategoryGroupCode: kakaoCategoryGroupCode || undefined,
+    kakaoCategoryGroupName: kakaoCategoryGroupName || undefined,
+  });
+
+  if (
+    /(편의점|대형마트|슈퍼마켓|식료품점|식자재마트|마트)/u.test(
+      sourceText,
+    ) ||
+    ["MT1", "CS2"].includes(kakaoCategoryGroupCode)
+  ) {
+    return build("음식", true);
+  }
+
+  if (
+    /(카페|커피전문점|커피숍|찻집|전통찻집|베이커리|제과점|빵집|디저트|아이스크림|케이크)/u.test(
+      sourceText,
+    ) ||
+    kakaoCategoryGroupCode === "CE7"
+  ) {
+    return build("카페 및 디저트");
+  }
+
+  if (
+    /(음식점|한식|중식|일식|양식|분식|패스트푸드|치킨|피자|국수|냉면|고기집|식당|레스토랑|뷔페|샐러드|김밥|도시락)/u.test(
+      sourceText,
+    ) ||
+    kakaoCategoryGroupCode === "FD6"
+  ) {
+    return build("음식");
+  }
+
+  if (
+    /(영화관|공연장|극장|콘서트홀|아트홀|문화예술회관|버스킹|공연무대|미술관|갤러리|전시장|전시관|아쿠아리움|수족관|동물원|오페라|뮤지컬)/u.test(
+      sourceText,
+    )
+  ) {
+    return build("감상");
+  }
+
+  if (
+    /(도서관|서점|과학관|천문대|박물관|역사관|기념관|사찰|성당|교회|역사유적|유적지|문화재|향교|서원|고택|생가|기념비)/u.test(
+      sourceText,
+    )
+  ) {
+    return build("배움");
+  }
+
+  if (
+    /(공원|산책로|둘레길|해변|해수욕장|숲|수목원|정원|강변|하천|호수|생태공원|자연휴양림|등산로|전망대|광장|수변공원)/u.test(
+      sourceText,
+    )
+  ) {
+    return build("산책");
+  }
+
+  if (
+    /(마사지|피부관리|피부미용|미용실|헤어샵|네일숍|네일샵|스파|찜질방|사우나|온천|호텔|펜션|게스트하우스|리조트|모텔|숙박|휴양소)/u.test(
+      sourceText,
+    ) ||
+    kakaoCategoryGroupCode === "AD5"
+  ) {
+    return build("휴식");
+  }
+
+  if (
+    /(소품샵|소품점|문구점|전통시장|시장|쇼핑몰|백화점|아울렛|편집숍|공방|체험장|체육시설|운동장|헬스장|수영장|볼링장|클라이밍|노래방|오락실|pc방|피시방|놀이공원|테마파크|캠핑장|낚시터|자전거|사진관|포토부스|스케이트장|야구장|축구장|테니스장|골프장)/u.test(
+      sourceText,
+    )
+  ) {
+    return build("활동");
+  }
+
+  if (explicitAppCategory && explicitAppCategory !== "기타") {
+    return build(explicitAppCategory);
+  }
+
+  console.warn(
+    "앱 카테고리로 확정하지 못한 카카오 장소를 추천에서 제외합니다:",
+    {
+      name,
+      kakaoCategoryName,
+      kakaoCategoryGroupCode,
+      kakaoCategoryGroupName,
+    },
+  );
+  return null;
+}
+
+function isFoodMissionText(value: string) {
+  return /(먹|맛보|음식|식사|간식|메뉴|도시락|과자|음료|식재료|장보기|구매|골라|신제품|시그니처)/u.test(
+    value.replace(/\s+/g, " ").toLowerCase(),
+  );
 }
 
 function isMissionTextCompatibleWithPlace(
@@ -239,20 +499,20 @@ function isMissionTextCompatibleWithPlace(
   place: NormalizedPlace,
   missionText: string,
 ) {
-  const placeCategory = normalizeCategory(
-    place.category,
-    `${place.name} ${place.address}`,
-  );
   const normalizedText = missionText
     .replace(/\s+/g, " ")
     .toLowerCase();
 
-  if (!isPlaceCategoryCompatible(missionCategory, placeCategory)) {
+  // 실제 장소 미션의 최종 카테고리는 카카오 상세 카테고리와 정확히 같아야 한다.
+  if (missionCategory !== place.category) {
     return false;
   }
 
-  // 장소 종류와 무관한 행동을 억지로 붙이는 대표적인 오류를 저장 전에 차단한다.
-  if (placeCategory === "카페 및 디저트") {
+  if (place.foodOnly) {
+    return isFoodMissionText(normalizedText);
+  }
+
+  if (place.category === "카페 및 디저트") {
     return (
       /(카페|커피|차|음료|디저트|빵|케이크|메뉴|맛|주문|시그니처|분위기)/u.test(
         normalizedText,
@@ -263,56 +523,44 @@ function isMissionTextCompatibleWithPlace(
     );
   }
 
-  if (placeCategory === "음식") {
+  if (place.category === "음식") {
     return (
-      /(음식|식사|메뉴|맛|먹|요리|주문|한\s*끼|시그니처)/u.test(
-        normalizedText,
-      ) &&
+      isFoodMissionText(normalizedText) &&
       !/(명상|요가|러닝|낮잠|독서|공부)/u.test(normalizedText)
     );
   }
 
-  if (placeCategory === "산책") {
-    const actionMatches =
-      missionCategory === "활동"
-        ? /(체험|활동|운동|타기|도전|참여|탐방)/u.test(
-            normalizedText,
-          )
-        : missionCategory === "휴식"
-          ? /(쉬|휴식|여유|명상|호흡|편안|멍|자연)/u.test(
-              normalizedText,
-            )
-          : /(걷|산책|풍경|자연|둘러보|살펴보|사진|관찰|탐방)/u.test(
-              normalizedText,
-            );
-
-    return (
-      actionMatches &&
-      !/(메뉴를\s*주문|음식을\s*주문|커피를\s*주문)/u.test(
-        normalizedText,
-      )
-    );
-  }
-
-  if (placeCategory === "감상" || placeCategory === "배움") {
-    return /(감상|관람|전시|공연|작품|책|읽|배우|알아보|둘러보|문화|사진)/u.test(
+  if (place.category === "감상") {
+    return /(감상|관람|전시|공연|영화|작품|무대|버스킹|둘러보|바라보|관찰)/u.test(
       normalizedText,
     );
   }
 
-  if (placeCategory === "활동") {
-    return /(체험|활동|운동|만들|타기|도전|참여|배우)/u.test(
+  if (place.category === "배움") {
+    return /(배우|알아보|읽|역사|문화|건축|유래|탐방|관찰|지식|이야기)/u.test(
       normalizedText,
     );
   }
 
-  if (placeCategory === "휴식") {
-    return /(쉬|휴식|여유|명상|호흡|편안|멍)/u.test(
+  if (place.category === "산책") {
+    return /(걷|산책|풍경|자연|둘러보|살펴보|사진|관찰|탐방)/u.test(
       normalizedText,
     );
   }
 
-  return missionCategory === placeCategory;
+  if (place.category === "활동") {
+    return /(체험|활동|운동|만들|고르|구경|쇼핑|타기|도전|참여|노래|게임|찾아|발견|둘러보)/u.test(
+      normalizedText,
+    );
+  }
+
+  if (place.category === "휴식") {
+    return /(쉬|휴식|여유|관리|마사지|미용|숙박|머물|편안|재충전|헤어|머리|네일|피부|스타일|손질|케어|꾸며|변신|체크인|숙소|하룻밤)/u.test(
+      normalizedText,
+    );
+  }
+
+  return false;
 }
 
 function parseDurationMinutes(value: unknown) {
@@ -569,6 +817,11 @@ function normalizePlaces(value: unknown): NormalizedPlace[] {
       continue;
     }
 
+    const categoryResolution = resolveKakaoPlaceCategory(place);
+    if (!categoryResolution) {
+      continue;
+    }
+
     const key = `${normalizeComparableText(name)}:${lat.toFixed(5)}:${lng.toFixed(5)}`;
     if (seen.has(key)) {
       continue;
@@ -585,9 +838,14 @@ function normalizePlaces(value: unknown): NormalizedPlace[] {
       district: place.district
         ? String(place.district).trim()
         : undefined,
-      category: place.category
-        ? normalizeCategory(place.category, name)
-        : undefined,
+      category: categoryResolution.category,
+      kakaoCategoryName: categoryResolution.kakaoCategoryName,
+      kakaoCategoryGroupCode:
+        categoryResolution.kakaoCategoryGroupCode,
+      kakaoCategoryGroupName:
+        categoryResolution.kakaoCategoryGroupName,
+      foodOnly:
+        place.foodOnly === true || categoryResolution.foodOnly,
     });
   }
 
@@ -613,10 +871,10 @@ async function searchNearbyPlaces(
         )
         .filter(Boolean),
     ),
-  ).slice(0, 4);
+  ).slice(0, 8);
 
   if (categoryCodes.length === 0) {
-    categoryCodes.push("CE7", "FD6", "AT4", "CT1");
+    categoryCodes.push("CE7", "FD6", "AT4", "CT1", "AD5", "MT1", "CS2");
   }
 
   const responses = await Promise.all(
@@ -652,35 +910,36 @@ async function searchNearbyPlaces(
 
   return normalizePlaces(
     responses.flat().map((place: any) => ({
+      id: place.id,
       name: place.place_name,
       address: place.road_address_name || place.address_name,
       latitude: Number.parseFloat(place.y),
       longitude: Number.parseFloat(place.x),
       distance: Number.parseFloat(place.distance),
-      category: place.category_group_code === "CE7"
-        ? "카페 및 디저트"
-        : place.category_group_code === "FD6"
-          ? "음식"
-          : place.category_group_code === "AT4"
-            ? "산책"
-            : place.category_group_code === "CT1"
-              ? "감상"
-              : "기타",
+      categoryName: place.category_name,
+      categoryGroupCode: place.category_group_code,
+      categoryGroupName: place.category_group_name,
     })),
-  ).slice(0, 40);
+  ).slice(0, 60);
 }
 
 function buildPlacesPrompt(places: NormalizedPlace[]) {
   if (places.length === 0) {
-    return "사용 가능한 실제 장소가 없습니다. 이 경우 모든 미션을 '내 방'에서 수행 가능한 미션으로 만들어주세요.";
+    return "사용 가능한 실제 장소가 없습니다. 이 경우 모든 미션을 '내 방' 또는 '어디서나 가능' 미션으로 만들어주세요.";
   }
 
   return places
-    .slice(0, 30)
+    .slice(0, 40)
     .map((place, index) => {
       const parts = [
         `${index + 1}. ${place.name}`,
-        place.category ? `카테고리: ${place.category}` : "",
+        `앱 카테고리: ${place.category}`,
+        place.kakaoCategoryName
+          ? `카카오 상세 카테고리: ${place.kakaoCategoryName}`
+          : "",
+        place.foodOnly
+          ? "사용 조건: 먹거리 관련 미션에만 사용 가능"
+          : "",
         place.address ? `주소: ${place.address}` : "",
         place.district ? `지역: ${place.district}` : "",
       ].filter(Boolean);
@@ -688,6 +947,44 @@ function buildPlacesPrompt(places: NormalizedPlace[]) {
       return parts.join(" | ");
     })
     .join("\n");
+}
+
+function buildFlexibleMissionExamplesPrompt(
+  categories: string[],
+) {
+  const categorySet = new Set(
+    categories.map((category) =>
+      normalizeCategory(category, category),
+    ),
+  );
+
+  const matchingExamples = FLEXIBLE_MISSION_EXAMPLES
+    .filter((example) => categorySet.has(example.category))
+    .slice(0, 8);
+
+  if (matchingExamples.length === 0) {
+    return "현재 선택된 카테고리에 해당하는 참고 예시는 없습니다.";
+  }
+
+  return matchingExamples
+    .map((example, index) =>
+      [
+        `${index + 1}.`,
+        `카테고리: ${example.category}`,
+        `제목: ${example.title}`,
+        `설명: ${example.description}`,
+        `미션 안내: ${example.instructions}`,
+        `추천 이유: ${example.recommendationReason}`,
+        `예상 시간: ${example.durationText}`,
+        `비용: ${example.costText}`,
+        `준비물: ${
+          example.requiredItems.length > 0
+            ? example.requiredItems.join(", ")
+            : "없음"
+        }`,
+      ].join("\n"),
+    )
+    .join("\n\n");
 }
 
 function extractJsonObject(raw: string) {
@@ -762,7 +1059,7 @@ async function callUpstage({
   const retryInstruction =
     attempt === 1
       ? ""
-      : "\n\n이전 응답을 사용할 수 없었습니다. 반드시 missions 배열을 포함한 유효한 JSON 객체만 반환하세요. instructions는 번호나 단계형 지시문이 아닌 자연스러운 미션 소개로 쓰세요. 반드시 정확히 2문장으로 작성합니다. 첫 문장은 무엇을 할지 부드럽게 권유하고, 둘째 문장은 경험의 매력이나 기대를 설명하세요. 세 번째 문장은 절대 작성하지 마세요. 모든 문장은 높임말로 작성하세요. recommendationReason은 높임말 한 문장만 작성하세요. 실제 장소 미션은 장소의 업종·성격과 행동이 반드시 맞아야 하며, 카페에서 명상·운동을 시키거나 음식점에서 독서·명상을 시키지 마세요. 마크다운 코드블록과 설명은 절대 쓰지 마세요.";
+      : "\n\n이전 응답을 사용할 수 없었습니다. 반드시 missions 배열을 포함한 유효한 JSON 객체만 반환하세요. instructions는 번호나 단계형 지시문이 아닌 자연스러운 미션 소개로 쓰세요. 반드시 정확히 2문장으로 작성합니다. 첫 문장은 무엇을 할지 부드럽게 권유하고, 둘째 문장은 경험의 매력이나 기대를 설명하세요. 세 번째 문장은 절대 작성하지 마세요. 모든 문장은 높임말로 작성하세요. recommendationReason은 높임말 한 문장만 작성하세요. 실제 장소 미션의 category는 장소 목록의 앱 카테고리와 정확히 같아야 합니다. 장소의 업종·성격과 행동도 반드시 맞아야 하며, 카페에서 명상·운동을 시키거나 음식점에서 독서·명상을 시키지 마세요. 마크다운 코드블록과 설명은 절대 쓰지 마세요.";
 
   const response = await fetch(
     "https://api.upstage.ai/v1/chat/completions",
@@ -883,6 +1180,19 @@ denoRuntime.serve(async (req) => {
           3,
         );
 
+    const minimumFlexibleMissionCount =
+      flexibleMissionLimit === 0
+        ? 0
+        : clamp(
+            Math.round(
+              toFiniteNumber(
+                body.minimumFlexibleMissionCount,
+              ) ?? 2,
+            ),
+            0,
+            flexibleMissionLimit,
+          );
+
     const latitude = toFiniteNumber(body.latitude);
     const longitude = toFiniteNumber(body.longitude);
 
@@ -900,13 +1210,19 @@ denoRuntime.serve(async (req) => {
       );
     }
 
+    places = places.filter((place) =>
+      categories.includes(place.category),
+    );
+
     console.log("요청 카테고리:", categories.join(", "));
     console.log("요청 좌표:", latitude, longitude);
-    console.log("사용 가능한 장소 수:", places.length);
+    console.log("카카오 상세 카테고리 적용 후 장소 수:", places.length);
 
     const excludedTitles = normalizeStringArray(body.excludeTitles);
     const categoryText = categories.join(", ");
     const placePrompt = buildPlacesPrompt(places);
+    const flexibleMissionExamplesPrompt =
+      buildFlexibleMissionExamplesPrompt(categories);
 
     const systemPrompt = `
 너는 사용자의 일상 속 작은 행복과 의미를 찾는 챌린지 미션 추천 AI다.
@@ -919,7 +1235,8 @@ denoRuntime.serve(async (req) => {
 4. 법이나 윤리에 어긋나는 행동
 5. 특정 날씨나 계절에만 가능한 미션
 6. 사용자가 마음먹어도 완료 여부를 통제할 수 없는 미션
-7. 가짜 장소, '자유 장소', '지역 내 어디서나', '현재 위치 주변의 편한 장소' 같은 표현
+7. 천장에 구름이 있다고 가정하거나 천장 무늬를 구름처럼 관찰하게 하는 미션, 특히 '천장 구름 관찰하기'
+8. 가짜 장소, '자유 장소', '지역 내 어디서나', '현재 위치 주변의 편한 장소' 같은 표현
    단, 특정 장소가 필요 없는 미션은 place_name을 정확히 '어디서나 가능'으로 쓸 수 있다.
 
 [생성 규칙]
@@ -927,6 +1244,9 @@ denoRuntime.serve(async (req) => {
 2. 허용 카테고리는 다음뿐이다: ${categoryText}
 3. 카테고리가 여러 개라면 최소 4개 카테고리를 섞고, 같은 카테고리는 최대 2개까지만 사용한다.
 4. 특정 장소 미션은 아래 실제 장소 목록의 이름을 정확히 그대로 place_name에 넣고 requires_place를 true로 한다.
+4-1. 특정 장소 미션의 category는 장소 목록에 적힌 '앱 카테고리'와 반드시 정확히 같아야 한다. AI가 임의로 다른 카테고리를 선택하면 안 된다.
+4-2. 카카오 상세 카테고리가 미션 카테고리보다 우선한다. 장소가 영화관·공연장·전시장·미술관처럼 관람 대상이 있는 곳이면 '감상', 사찰·성당·교회·역사 유적·기념관이면 '배움'으로 작성한다.
+4-3. 편의점·대형마트는 장소 목록에 '먹거리 관련 미션에만 사용 가능'이라고 표시된 경우에만 음식 미션에 사용할 수 있다.
 4-1. 실제 장소 미션은 반드시 장소 목록에 적힌 카테고리와 행동이 자연스럽게 맞아야 한다.
 4-2. 카페 및 디저트 장소에서는 메뉴·음료·디저트·맛·공간 분위기를 경험하는 미션만 만든다. 명상, 요가, 운동, 낮잠 미션을 만들지 않는다.
 4-3. 음식 장소에서는 메뉴·식사·맛을 경험하는 미션만 만들고 독서, 명상, 운동 미션을 만들지 않는다.
@@ -935,7 +1255,7 @@ denoRuntime.serve(async (req) => {
 4-6. 장소 이름만 문장에 붙인 뒤 그 장소와 무관한 행동을 시키는 미션은 절대 만들지 않는다.
 5. 집에서 하는 미션은 place_name을 정확히 '내 방'으로 쓰고 is_at_home을 true, requires_place를 false로 한다.
 6. 특정 장소가 필요 없는 미션은 place_name을 정확히 '어디서나 가능'으로 쓰고 is_flexible을 true, requires_place를 false로 한다.
-7. 집 미션은 최대 ${homeMissionLimit}개, 어디서나 가능 미션은 최대 ${flexibleMissionLimit}개다.
+7. 집 미션은 최대 ${homeMissionLimit}개다. 어디서나 가능 미션은 최소 ${minimumFlexibleMissionCount}개, 최대 ${flexibleMissionLimit}개를 반드시 포함한다.
 8. '어디서나 가능' 외에 자유 장소를 뜻하는 다른 표현은 절대 쓰지 않는다.
 9. 제목, 설명, 수행 안내, 추천 이유를 모두 자연스러운 한국어로 작성한다.
 10. instructions는 세부 절차나 체크리스트가 아니라 홈 화면에서 읽는 자연스러운 '미션 상세 소개'로 작성한다.
@@ -954,6 +1274,18 @@ denoRuntime.serve(async (req) => {
 23. durationText는 '15분', '30분', '1시간'처럼 쓴다.
 24. costText는 '무료' 또는 '약 6,000원'처럼 쓴다.
 25. 각 미션은 사용자가 마음만 먹으면 100% 수행할 수 있어야 한다.
+
+[어디서나 가능 미션 참고 예시]
+${flexibleMissionExamplesPrompt}
+
+[참고 예시 사용 규칙]
+1. 위 예시는 '어디서나 가능' 미션의 구체성, 난이도, 문장 흐름을 참고하기 위한 자료다.
+2. 예시의 제목, 설명, 문장을 그대로 복사하거나 단어만 조금 바꿔 재사용하지 않는다.
+3. 새 미션은 특정 상점, 시설, 행사, 타인의 반응이 없어도 사용자가 스스로 시작하고 완료할 수 있어야 한다.
+4. 완료 여부가 분명한 관찰, 기록, 사진, 짧은 이동, 선택, 감상 같은 행동을 우선한다.
+5. 사용자의 현재 위치가 실내이거나 실외여도 무리 없이 수행 가능한 미션을 우선한다.
+6. 예시와 같은 자연스러운 높임말 두 문장 구조를 따르되, 미션마다 새로운 소재와 행동을 사용한다.
+7. 위 예시는 모두 place_name을 '어디서나 가능', is_flexible을 true, requires_place를 false로 작성해야 하는 유형이다.
 
 [응답 형식]
 반드시 설명이나 마크다운 없이 아래 모양의 JSON 객체 하나만 반환한다.
@@ -999,6 +1331,7 @@ ${placePrompt}
 
 추가 지시:
 ${body.generationInstruction ?? "조건에 맞는 서로 다른 미션을 추천해줘."}
+이번 응답에는 Solar가 새로 만든 '어디서나 가능' 미션을 최소 ${minimumFlexibleMissionCount}개 포함하세요. 해당 미션은 place_name='어디서나 가능', is_flexible=true, requires_place=false로 작성하세요.
 실제 장소 미션은 장소 카테고리와 수행 행동을 반드시 일치시키세요. 특히 카페에서 명상·요가·운동을 하게 하거나 음식점에서 독서·명상을 하게 하는 조합은 금지합니다.
 ${body.recommendationReasonInstruction ?? ""}
 `;
@@ -1008,12 +1341,25 @@ ${body.recommendationReasonInstruction ?? ""}
 
     for (let attempt = 1; attempt <= 2; attempt += 1) {
       try {
-        aiMissions = await callUpstage({
+        const generatedMissions = await callUpstage({
           apiKey: upstageApiKey,
           systemPrompt,
           userPrompt,
           attempt,
         });
+        const generatedFlexibleCount =
+          generatedMissions.filter(isAiFlexibleMission).length;
+
+        if (
+          generatedFlexibleCount <
+          minimumFlexibleMissionCount
+        ) {
+          throw new Error(
+            `어디서나 가능 미션이 ${generatedFlexibleCount}개만 생성되었습니다. 최소 ${minimumFlexibleMissionCount}개가 필요합니다.`,
+          );
+        }
+
+        aiMissions = generatedMissions;
         break;
       } catch (error) {
         lastError = error;
@@ -1077,7 +1423,19 @@ ${body.recommendationReasonInstruction ?? ""}
           return null;
         }
 
-        const category = normalizeCategory(
+        if (
+          isBlockedMissionText(
+            `${title} ${description} ${rawInstructions}`,
+          )
+        ) {
+          console.warn(
+            "차단된 미션을 저장하지 않습니다:",
+            title,
+          );
+          return null;
+        }
+
+        const aiCategory = normalizeCategory(
           mission.category,
           `${title} ${description} ${rawInstructions}`,
         );
@@ -1115,23 +1473,24 @@ ${body.recommendationReasonInstruction ?? ""}
           if (
             matchedPlace &&
             !isMissionTextCompatibleWithPlace(
-              category,
+              matchedPlace.category,
               matchedPlace,
               missionText,
             )
           ) {
             console.warn(
-              "장소와 맞지 않는 AI 미션을 제외합니다:",
+              "카카오 상세 카테고리와 미션 내용이 맞지 않아 제외합니다:",
               title,
               matchedPlace.name,
-              category,
+              matchedPlace.kakaoCategoryName,
+              matchedPlace.category,
             );
             matchedPlace = null;
           }
 
           if (!matchedPlace) {
             matchedPlace = chooseFallbackPlace(
-              category,
+              aiCategory,
               missionText,
               places,
               usedPlaceNames,
@@ -1156,6 +1515,10 @@ ${body.recommendationReasonInstruction ?? ""}
           : isFlexible
             ? "어디서나 가능"
             : matchedPlace?.name ?? null;
+        const resolvedCategory: AppCategory =
+          !isAtHome && !isFlexible && matchedPlace
+            ? matchedPlace.category
+            : aiCategory as AppCategory;
 
         const instructions = cleanAiInstructions(
           rawInstructions,
@@ -1168,7 +1531,7 @@ ${body.recommendationReasonInstruction ?? ""}
 
         return {
           category_id:
-            categoryIdByName.get(category) ??
+            categoryIdByName.get(resolvedCategory) ??
             fallbackCategoryId,
           title,
           short_description:

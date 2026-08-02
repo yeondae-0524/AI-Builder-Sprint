@@ -70,6 +70,13 @@ const SECTION_INDICATOR_WIDTH =
   (SCREEN_WIDTH - SECTION_HORIZONTAL_MARGIN * 2) / 3;
 
 const KAKAO_JS_KEY = "f937d15a94db64ab114b3495f8b6ad3c";
+const KAKAO_REST_API_KEY = "c10a1b62f7bbf1d90e0ff60bb94bdadd";
+const KAKAO_PLACE_CATEGORY_CODES = [
+  "MT1", "CS2", "PS3", "SC4", "AC5", "PK6", "OL7", "SW8", "BK9",
+  "CT1", "AG2", "PO3", "AT4", "AD5", "FD6", "CE7", "HP8", "PM9",
+] as const;
+const KAKAO_PLACE_SEARCH_RADII_M = [500, 2000] as const;
+const KAKAO_PLACE_CANDIDATE_LIMIT = 5;
 const DEFAULT_ANY_RADIUS_KM = 3;
 const DISTRICT_TOPOJSON_URL =
   "https://raw.githubusercontent.com/southkorea/southkorea-maps/master/kostat/2018/json/skorea-municipalities-2018-topo-simple.json";
@@ -135,6 +142,31 @@ type Coordinate = {
 
 type RecordLocationKind = "place" | "map" | "home";
 
+type KakaoPlaceDocument = {
+  id?: string;
+  place_name?: string;
+  category_name?: string;
+  category_group_name?: string;
+  road_address_name?: string;
+  address_name?: string;
+  x?: string;
+  y?: string;
+  distance?: string;
+};
+
+type KakaoAddressDocument = {
+  address?: {
+    address_name?: string;
+    region_3depth_name?: string;
+  } | null;
+  road_address?: {
+    address_name?: string;
+    region_3depth_name?: string;
+    road_name?: string;
+    building_name?: string;
+  } | null;
+};
+
 type LngLat = [number, number];
 type DistrictPolygon = LngLat[][];
 
@@ -145,7 +177,13 @@ type PlaceCandidate = {
   longitude: number;
   address?: string;
   districtName?: string;
-  category?: CategoryName;
+  category: CategoryName;
+  kakaoCategoryName?: string;
+  kakaoCategoryGroupCode?: string;
+  kakaoCategoryGroupName?: string;
+  foodOnly?: boolean;
+  categoryDetail?: string;
+  distanceM?: number;
 };
 
 type HomeMission = {
@@ -169,6 +207,8 @@ type HomeMission = {
   isAtHome?: boolean;
   isLocationFlexible?: boolean;
   isFallback?: boolean;
+  placeEligible?: boolean;
+  placeFoodOnly?: boolean;
 };
 
 type ExtendedBackendMission = Partial<BackendMission> & {
@@ -184,6 +224,12 @@ type ExtendedBackendMission = Partial<BackendMission> & {
   category_name?: string | null;
   categoryName?: string | null;
   cat?: string | null;
+  kakao_category_name?: string | null;
+  kakaoCategoryName?: string | null;
+  category_group_code?: string | null;
+  categoryGroupCode?: string | null;
+  category_group_name?: string | null;
+  categoryGroupName?: string | null;
   cost_type?: string | null;
   costType?: string | null;
   estimatedTime?: number | string | null;
@@ -445,6 +491,17 @@ const SECTION_INDEX: Record<SheetSection, number> = {
   recommended: 1,
   records: 2,
 };
+
+// 과거 AI 생성 결과나 DB에 남아 있는 부적절한 미션을 추천에서 차단한다.
+// 제목을 코드에 고정해 추천하는 용도가 아니라, 이미 저장된 문제 미션을 숨기는 안전장치다.
+const BLOCKED_MISSION_TITLE_PATTERNS = [
+  "천장구름관찰하기",
+] as const;
+
+const BLOCKED_MISSION_TEXT_PATTERNS = [
+  /천장\s*(?:의|에|에서)?\s*구름/u,
+  /구름.*천장/u,
+] as const;
 
 const FALLBACK_MISSIONS: HomeMission[] = [
   {
@@ -755,7 +812,7 @@ function inferCategoryFromText(text: string): CategoryName {
   }
 
   if (
-    /(독서|책 읽|공부|배우|학습|강의|도서관|서점에서 읽|새로운 지식)/.test(
+    /(독서|책 읽|공부|배우|학습|강의|도서관|서점에서 읽|새로운 지식|박물관|역사관|기념관|사찰|성당|교회|역사 유적|문화재)/.test(
       normalized,
     )
   ) {
@@ -763,7 +820,7 @@ function inferCategoryFromText(text: string): CategoryName {
   }
 
   if (
-    /(음악|영화|공연|전시|버스킹|미술관|박물관|감상|사진전|사진|그림|연극)/.test(
+    /(음악|영화|공연|전시|버스킹|미술관|갤러리|감상|사진전|사진|그림|연극)/.test(
       normalized,
     )
   ) {
@@ -949,6 +1006,241 @@ function haversineDistanceKm(
   return earthRadiusKm * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
+async function fetchKakaoCategoryPlaces(
+  coordinate: Coordinate,
+  categoryCode: string,
+  radiusM: number,
+): Promise<KakaoPlaceDocument[]> {
+  const url =
+    `https://dapi.kakao.com/v2/local/search/category.json` +
+    `?category_group_code=${encodeURIComponent(categoryCode)}` +
+    `&x=${encodeURIComponent(String(coordinate.lng))}` +
+    `&y=${encodeURIComponent(String(coordinate.lat))}` +
+    `&radius=${radiusM}&sort=distance&size=15`;
+
+  const response = await fetch(url, {
+    headers: {
+      Authorization: `KakaoAK ${KAKAO_REST_API_KEY}`,
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(`카카오 장소 검색 실패 (${response.status})`);
+  }
+
+  const data = (await response.json()) as {
+    documents?: KakaoPlaceDocument[];
+  };
+
+  return Array.isArray(data.documents) ? data.documents : [];
+}
+
+async function fetchKakaoKeywordPlaces(
+  coordinate: Coordinate,
+  query: string,
+  radiusM: number,
+): Promise<KakaoPlaceDocument[]> {
+  const url =
+    `https://dapi.kakao.com/v2/local/search/keyword.json` +
+    `?query=${encodeURIComponent(query)}` +
+    `&x=${encodeURIComponent(String(coordinate.lng))}` +
+    `&y=${encodeURIComponent(String(coordinate.lat))}` +
+    `&radius=${radiusM}&sort=distance&size=15`;
+
+  const response = await fetch(url, {
+    headers: {
+      Authorization: `KakaoAK ${KAKAO_REST_API_KEY}`,
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(`카카오 장소 검색 실패 (${response.status})`);
+  }
+
+  const data = (await response.json()) as {
+    documents?: KakaoPlaceDocument[];
+  };
+
+  return Array.isArray(data.documents) ? data.documents : [];
+}
+
+async function fetchKakaoAddressKeywords(
+  coordinate: Coordinate,
+): Promise<string[]> {
+  const url =
+    `https://dapi.kakao.com/v2/local/geo/coord2address.json` +
+    `?x=${encodeURIComponent(String(coordinate.lng))}` +
+    `&y=${encodeURIComponent(String(coordinate.lat))}`;
+
+  const response = await fetch(url, {
+    headers: {
+      Authorization: `KakaoAK ${KAKAO_REST_API_KEY}`,
+    },
+  });
+
+  if (!response.ok) {
+    return [];
+  }
+
+  const data = (await response.json()) as {
+    documents?: KakaoAddressDocument[];
+  };
+  const document = Array.isArray(data.documents)
+    ? data.documents[0]
+    : undefined;
+
+  if (!document) {
+    return [];
+  }
+
+  const address = document.address;
+  const roadAddress = document.road_address;
+  const roadAreaKeyword = [
+    roadAddress?.region_3depth_name,
+    roadAddress?.road_name,
+  ]
+    .filter((value): value is string => Boolean(value?.trim()))
+    .join(" ");
+
+  return [
+    roadAddress?.building_name,
+    roadAddress?.address_name,
+    address?.address_name,
+    roadAreaKeyword,
+    roadAddress?.region_3depth_name,
+    address?.region_3depth_name,
+  ]
+    .map((value) => String(value ?? "").trim())
+    .filter(
+      (value, index, values) =>
+        value.length >= 2 && values.indexOf(value) === index,
+    )
+    .slice(0, 5);
+}
+
+function toRecordPlaceCandidate(
+  document: KakaoPlaceDocument,
+  coordinate: Coordinate,
+): PlaceCandidate | null {
+  const id = String(document.id ?? "").trim();
+  const name = String(document.place_name ?? "").trim();
+  const latitude = Number(document.y);
+  const longitude = Number(document.x);
+
+  if (
+    !id ||
+    !name ||
+    !Number.isFinite(latitude) ||
+    !Number.isFinite(longitude)
+  ) {
+    return null;
+  }
+
+  const categoryText = String(
+    document.category_group_name ?? document.category_name ?? "",
+  );
+  const apiDistanceM = Number(document.distance);
+  const distanceM = Number.isFinite(apiDistanceM)
+    ? Math.max(0, Math.round(apiDistanceM))
+    : Math.max(
+        0,
+        Math.round(
+          haversineDistanceKm(coordinate, {
+            lat: latitude,
+            lng: longitude,
+          }) * 1000,
+        ),
+      );
+
+  return {
+    id,
+    name,
+    latitude,
+    longitude,
+    address:
+      document.road_address_name ||
+      document.address_name ||
+      undefined,
+    category: normalizeCategory(
+      categoryText,
+      `${name} ${document.category_name ?? ""}`,
+    ),
+    categoryDetail:
+      document.category_name ||
+      document.category_group_name ||
+      undefined,
+    distanceM,
+  };
+}
+
+async function searchNearbyKakaoPlacesForRecord(
+  coordinate: Coordinate,
+): Promise<PlaceCandidate[]> {
+  const uniquePlaces = new Map<string, PlaceCandidate>();
+  let addressKeywords: string[] = [];
+  let successfulRequestCount = 0;
+  let lastError: unknown = null;
+
+  try {
+    addressKeywords = await fetchKakaoAddressKeywords(coordinate);
+  } catch (error) {
+    lastError = error;
+  }
+
+  for (const radiusM of KAKAO_PLACE_SEARCH_RADII_M) {
+    const requests = [
+      ...KAKAO_PLACE_CATEGORY_CODES.map((code) =>
+        fetchKakaoCategoryPlaces(coordinate, code, radiusM),
+      ),
+      ...addressKeywords.map((keyword) =>
+        fetchKakaoKeywordPlaces(coordinate, keyword, radiusM),
+      ),
+    ];
+
+    const results = await Promise.allSettled(requests);
+
+    for (const result of results) {
+      if (result.status === "rejected") {
+        lastError = result.reason;
+        continue;
+      }
+
+      successfulRequestCount += 1;
+
+      for (const document of result.value) {
+        const candidate = toRecordPlaceCandidate(document, coordinate);
+        if (!candidate) {
+          continue;
+        }
+
+        const previous = uniquePlaces.get(candidate.id);
+        if (
+          !previous ||
+          (candidate.distanceM ?? Number.POSITIVE_INFINITY) <
+            (previous.distanceM ?? Number.POSITIVE_INFINITY)
+        ) {
+          uniquePlaces.set(candidate.id, candidate);
+        }
+      }
+    }
+
+    if (uniquePlaces.size >= KAKAO_PLACE_CANDIDATE_LIMIT) {
+      break;
+    }
+  }
+
+  if (successfulRequestCount === 0 && lastError) {
+    throw lastError;
+  }
+
+  return [...uniquePlaces.values()]
+    .sort(
+      (left, right) =>
+        (left.distanceM ?? Number.POSITIVE_INFINITY) -
+        (right.distanceM ?? Number.POSITIVE_INFINITY),
+    )
+    .slice(0, KAKAO_PLACE_CANDIDATE_LIMIT);
+}
 
 function containsHangul(value: string | null | undefined) {
   return /[가-힣]/.test(value ?? "");
@@ -1506,59 +1798,199 @@ function getDistrictCenter(polygons: DistrictPolygon[]) {
   };
 }
 
-function inferPlaceCategory(place: any): CategoryName {
-  const name = String(place?.name ?? "");
-  const address = String(
-    place?.road_address_name ??
-      place?.address ??
-      place?.address_name ??
-      "",
-  );
-  const rawCategory = String(
-    place?.category ??
-      place?.category_name ??
-      place?.type ??
-      "",
-  );
-
-  return normalizeCategory(rawCategory, `${name} ${address}`);
-}
-
-const PLACE_CATEGORY_COMPATIBILITY: Record<
-  CategoryName,
-  CategoryName[]
-> = {
-  음식: ["음식"],
-  "카페 및 디저트": ["카페 및 디저트"],
-  산책: ["산책"],
-  배움: ["배움", "감상"],
-  감상: ["감상", "배움"],
-  활동: ["활동", "산책"],
-  휴식: ["휴식", "산책"],
-  기타: ["기타"],
+type KakaoPlaceCategoryResolution = {
+  category: CategoryName;
+  foodOnly: boolean;
+  kakaoCategoryName?: string;
+  kakaoCategoryGroupCode?: string;
+  kakaoCategoryGroupName?: string;
 };
 
-function isMissionPlaceCategoryCompatible(
-  missionCategory: CategoryName,
-  placeCategory: CategoryName | undefined,
-) {
-  if (!placeCategory) {
-    return false;
+function firstNonEmptyString(...values: unknown[]) {
+  for (const value of values) {
+    const text = String(value ?? "").trim();
+    if (text) {
+      return text;
+    }
   }
 
-  return PLACE_CATEGORY_COMPATIBILITY[
-    missionCategory
-  ].includes(placeCategory);
+  return "";
+}
+
+function isAppCategory(value: string): value is CategoryName {
+  return CATEGORIES.includes(value as CategoryName);
+}
+
+function resolveKakaoPlaceCategory(
+  place: any,
+): KakaoPlaceCategoryResolution | null {
+  const name = firstNonEmptyString(place?.name, place?.place_name);
+  const address = firstNonEmptyString(
+    place?.road_address_name,
+    place?.address_name,
+    place?.address,
+  );
+  const rawCategory = firstNonEmptyString(place?.category);
+  const kakaoCategoryName = firstNonEmptyString(
+    place?.kakao_category_name,
+    place?.kakaoCategoryName,
+    place?.category_name,
+    place?.categoryName,
+    isAppCategory(rawCategory) ? "" : rawCategory,
+  );
+  const kakaoCategoryGroupCode = firstNonEmptyString(
+    place?.kakao_category_group_code,
+    place?.kakaoCategoryGroupCode,
+    place?.category_group_code,
+    place?.categoryGroupCode,
+  ).toUpperCase();
+  const kakaoCategoryGroupName = firstNonEmptyString(
+    place?.kakao_category_group_name,
+    place?.kakaoCategoryGroupName,
+    place?.category_group_name,
+    place?.categoryGroupName,
+  );
+  const explicitAppCategory = [
+    rawCategory,
+    kakaoCategoryName,
+  ].find(isAppCategory);
+  const sourceText = `${kakaoCategoryName} ${kakaoCategoryGroupName} ${name} ${address}`
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+
+  const excludedPattern =
+    /(병원|의원|치과|한의원|약국|은행|증권|보험|부동산|중개업|주차장|주유소|충전소|행정복지센터|주민센터|시청|구청|군청|경찰서|소방서|우체국|공공기관|공사|공단|법원|검찰청|세무서|관공서)/u;
+
+  if (
+    excludedPattern.test(sourceText) ||
+    ["PK6", "OL7", "BK9", "AG2", "PO3", "HP8", "PM9"].includes(
+      kakaoCategoryGroupCode,
+    )
+  ) {
+    return null;
+  }
+
+  const build = (
+    category: CategoryName,
+    foodOnly = false,
+  ): KakaoPlaceCategoryResolution => ({
+    category,
+    foodOnly,
+    kakaoCategoryName: kakaoCategoryName || undefined,
+    kakaoCategoryGroupCode: kakaoCategoryGroupCode || undefined,
+    kakaoCategoryGroupName: kakaoCategoryGroupName || undefined,
+  });
+
+  // 편의점과 대형마트는 먹거리 관련 미션일 때만 음식 장소로 사용한다.
+  if (
+    /(편의점|대형마트|슈퍼마켓|식료품점|식자재마트|마트)/u.test(
+      sourceText,
+    ) ||
+    ["MT1", "CS2"].includes(kakaoCategoryGroupCode)
+  ) {
+    return build("음식", true);
+  }
+
+  if (
+    /(카페|커피전문점|커피숍|찻집|전통찻집|베이커리|제과점|빵집|디저트|아이스크림|케이크)/u.test(
+      sourceText,
+    ) ||
+    kakaoCategoryGroupCode === "CE7"
+  ) {
+    return build("카페 및 디저트");
+  }
+
+  if (
+    /(음식점|한식|중식|일식|양식|분식|패스트푸드|치킨|피자|국수|냉면|고기집|식당|레스토랑|뷔페|샐러드|김밥|도시락)/u.test(
+      sourceText,
+    ) ||
+    kakaoCategoryGroupCode === "FD6"
+  ) {
+    return build("음식");
+  }
+
+  // 감상은 실제로 관람할 대상이 있는 장소에만 부여한다.
+  if (
+    /(영화관|공연장|극장|콘서트홀|아트홀|문화예술회관|버스킹|공연무대|미술관|갤러리|전시장|전시관|아쿠아리움|수족관|동물원|오페라|뮤지컬)/u.test(
+      sourceText,
+    )
+  ) {
+    return build("감상");
+  }
+
+  if (
+    /(도서관|서점|과학관|천문대|박물관|역사관|기념관|사찰|절\b|성당|교회|역사유적|유적지|문화재|향교|서원|고택|생가|기념비)/u.test(
+      sourceText,
+    )
+  ) {
+    return build("배움");
+  }
+
+  if (
+    /(공원|산책로|둘레길|해변|해수욕장|숲|수목원|정원|강변|하천|호수|생태공원|자연휴양림|등산로|전망대|광장|수변공원)/u.test(
+      sourceText,
+    )
+  ) {
+    return build("산책");
+  }
+
+  if (
+    /(마사지|피부관리|피부미용|미용실|헤어샵|네일숍|네일샵|스파|찜질방|사우나|온천|호텔|펜션|게스트하우스|리조트|모텔|숙박|휴양소)/u.test(
+      sourceText,
+    ) ||
+    kakaoCategoryGroupCode === "AD5"
+  ) {
+    return build("휴식");
+  }
+
+  if (
+    /(소품샵|소품점|문구점|전통시장|시장|쇼핑몰|백화점|아울렛|편집숍|공방|체험장|체육시설|운동장|헬스장|수영장|볼링장|클라이밍|노래방|오락실|pc방|피시방|놀이공원|테마파크|캠핑장|낚시터|자전거|사진관|포토부스|스케이트장|야구장|축구장|테니스장|골프장)/u.test(
+      sourceText,
+    )
+  ) {
+    return build("활동");
+  }
+
+  // 상세 카테고리가 없는 기존 places 행은 저장된 앱 카테고리를 보조 기준으로만 사용한다.
+  if (explicitAppCategory && explicitAppCategory !== "기타") {
+    return build(explicitAppCategory);
+  }
+
+  console.warn(
+    "앱 카테고리로 확정하지 못한 카카오 장소를 추천에서 제외합니다:",
+    {
+      name,
+      kakaoCategoryName,
+      kakaoCategoryGroupCode,
+      kakaoCategoryGroupName,
+    },
+  );
+  return null;
+}
+
+function isFoodMissionText(value: string) {
+  return /(먹|맛보|음식|식사|간식|메뉴|도시락|과자|음료|식재료|장보기|구매|골라|신제품|시그니처)/u.test(
+    value.replace(/\s+/g, " ").toLowerCase(),
+  );
 }
 
 function isMissionTextCompatibleWithPlaceCategory(
   mission: HomeMission,
   placeCategory: CategoryName,
+  foodOnly = false,
 ) {
-  const text =
-    `${mission.title} ${mission.desc} ${mission.instructions}`
-      .replace(/\s+/g, " ")
-      .toLowerCase();
+  const text = `${mission.title} ${mission.desc} ${mission.instructions}`
+    .replace(/\s+/g, " ")
+    .toLowerCase();
+
+  if (mission.cat !== placeCategory) {
+    return false;
+  }
+
+  if (foodOnly) {
+    return isFoodMissionText(text);
+  }
 
   if (placeCategory === "카페 및 디저트") {
     return (
@@ -1573,76 +2005,52 @@ function isMissionTextCompatibleWithPlaceCategory(
 
   if (placeCategory === "음식") {
     return (
-      /(음식|식사|메뉴|맛|먹|요리|주문|한\s*끼|시그니처)/u.test(
-        text,
-      ) &&
+      isFoodMissionText(text) &&
       !/(명상|요가|러닝|낮잠|독서|공부)/u.test(text)
     );
   }
 
-  if (placeCategory === "산책") {
-    const actionMatches =
-      mission.cat === "활동"
-        ? /(체험|활동|운동|타기|도전|참여|탐방)/u.test(
-            text,
-          )
-        : mission.cat === "휴식"
-          ? /(쉬|휴식|여유|명상|호흡|편안|멍|자연)/u.test(
-              text,
-            )
-          : /(걷|산책|풍경|자연|둘러보|살펴보|사진|관찰|탐방)/u.test(
-              text,
-            );
-
-    return (
-      actionMatches &&
-      !/(메뉴를\s*주문|음식을\s*주문|커피를\s*주문)/u.test(
-        text,
-      )
+  if (placeCategory === "감상") {
+    return /(감상|관람|전시|공연|영화|작품|무대|버스킹|둘러보|바라보|관찰)/u.test(
+      text,
     );
   }
 
-  if (placeCategory === "감상" || placeCategory === "배움") {
-    return /(감상|관람|전시|공연|작품|책|읽|배우|알아보|둘러보|문화|사진)/u.test(
+  if (placeCategory === "배움") {
+    return /(배우|알아보|읽|역사|문화|건축|유래|탐방|관찰|지식|이야기)/u.test(
+      text,
+    );
+  }
+
+  if (placeCategory === "산책") {
+    return /(걷|산책|풍경|자연|둘러보|살펴보|사진|관찰|탐방)/u.test(
       text,
     );
   }
 
   if (placeCategory === "활동") {
-    return /(체험|활동|운동|만들|타기|도전|참여|배우)/u.test(
+    return /(체험|활동|운동|만들|고르|구경|쇼핑|타기|도전|참여|노래|게임|찾아|발견|둘러보)/u.test(
       text,
     );
   }
 
   if (placeCategory === "휴식") {
-    return /(쉬|휴식|여유|명상|호흡|편안|멍)/u.test(
+    return /(쉬|휴식|여유|관리|마사지|미용|숙박|머물|편안|재충전|헤어|머리|네일|피부|스타일|손질|케어|꾸며|변신|체크인|숙소|하룻밤)/u.test(
       text,
     );
   }
 
-  return mission.cat === placeCategory;
+  return false;
 }
 
 function isPlaceCandidateCompatibleWithMission(
   mission: HomeMission,
   place: PlaceCandidate,
 ) {
-  const placeCategory =
-    place.category ??
-    normalizeCategory(
-      null,
-      `${place.name} ${place.address ?? ""}`,
-    );
-
-  return (
-    isMissionPlaceCategoryCompatible(
-      mission.cat,
-      placeCategory,
-    ) &&
-    isMissionTextCompatibleWithPlaceCategory(
-      mission,
-      placeCategory,
-    )
+  return isMissionTextCompatibleWithPlaceCategory(
+    mission,
+    place.category,
+    place.foodOnly === true,
   );
 }
 
@@ -1653,21 +2061,14 @@ function isExistingMissionPlaceObviouslyInvalid(
     return false;
   }
 
-  const combined =
-    `${mission.placeName ?? ""} ${mission.placeAddress ?? ""} ${mission.title} ${mission.instructions}`
-      .replace(/\s+/g, " ")
-      .toLowerCase();
+  if (mission.placeEligible === false) {
+    return true;
+  }
 
-  const looksLikeCafe =
-    /(카페|커피|디저트|베이커리|빵집|스타벅스|투썸|메가커피|컴포즈|이디야)/u.test(
-      combined,
-    );
-
-  return (
-    looksLikeCafe &&
-    /(명상|호흡\s*운동|요가|러닝|달리기|낮잠|스트레칭|근력\s*운동)/u.test(
-      combined,
-    )
+  return !isMissionTextCompatibleWithPlaceCategory(
+    mission,
+    mission.cat,
+    mission.placeFoodOnly === true,
   );
 }
 
@@ -1684,27 +2085,38 @@ async function fetchPlaceCandidates({
 }): Promise<PlaceCandidate[]> {
   let rows: any[] = [];
 
-  const extendedResult = await retrySupabaseResultOnJwt(() => supabase
+  const detailedResult = await retrySupabaseResultOnJwt(() => supabase
     .from("places")
     .select(
-      "id, name, latitude, longitude, address, address_name, road_address_name, category, category_name, district, gu",
+      "id, name, latitude, longitude, address, address_name, road_address_name, category, category_name, category_group_code, category_group_name, kakao_category_name, kakao_category_group_code, kakao_category_group_name, district, gu",
     )
     .limit(500));
 
-  if (!extendedResult.error) {
-    rows = extendedResult.data ?? [];
+  if (!detailedResult.error) {
+    rows = detailedResult.data ?? [];
   } else {
-    const basicResult = await retrySupabaseResultOnJwt(() => supabase
+    const existingCategoryResult = await retrySupabaseResultOnJwt(() => supabase
       .from("places")
-      .select("id, name, latitude, longitude")
+      .select(
+        "id, name, latitude, longitude, address, address_name, road_address_name, category, category_name, district, gu",
+      )
       .limit(500));
 
-    if (basicResult.error) {
-      console.warn("실제 장소 목록 조회 실패:", basicResult.error);
-      return [];
-    }
+    if (!existingCategoryResult.error) {
+      rows = existingCategoryResult.data ?? [];
+    } else {
+      const basicResult = await retrySupabaseResultOnJwt(() => supabase
+        .from("places")
+        .select("id, name, latitude, longitude")
+        .limit(500));
 
-    rows = basicResult.data ?? [];
+      if (basicResult.error) {
+        console.warn("실제 장소 목록 조회 실패:", basicResult.error);
+        return [];
+      }
+
+      rows = basicResult.data ?? [];
+    }
   }
 
   const districtCenter = district
@@ -1747,6 +2159,12 @@ async function fetchPlaceCandidates({
           place.district ?? place.gu ?? "",
         ).trim();
 
+        const categoryResolution = resolveKakaoPlaceCategory(place);
+
+        if (!categoryResolution) {
+          return null;
+        }
+
         return {
           id: String(place.id),
           name,
@@ -1757,7 +2175,13 @@ async function fetchPlaceCandidates({
             district
               ? `부산광역시 ${district}`
               : districtName || undefined,
-          category: inferPlaceCategory(place),
+          category: categoryResolution.category,
+          kakaoCategoryName: categoryResolution.kakaoCategoryName,
+          kakaoCategoryGroupCode:
+            categoryResolution.kakaoCategoryGroupCode,
+          kakaoCategoryGroupName:
+            categoryResolution.kakaoCategoryGroupName,
+          foodOnly: categoryResolution.foodOnly,
         };
       })
       .filter((place): place is PlaceCandidate => place !== null)
@@ -1826,27 +2250,38 @@ async function hydrateMissionPlaces(
   }
 
   let data: any[] = [];
-  const extendedResult = await retrySupabaseResultOnJwt(() => supabase
+  const detailedResult = await retrySupabaseResultOnJwt(() => supabase
     .from("places")
     .select(
-      "id, name, latitude, longitude, address, address_name, road_address_name, district, gu",
+      "id, name, latitude, longitude, address, address_name, road_address_name, category, category_name, category_group_code, category_group_name, kakao_category_name, kakao_category_group_code, kakao_category_group_name, district, gu",
     )
     .in("id", placeIds));
 
-  if (!extendedResult.error) {
-    data = extendedResult.data ?? [];
+  if (!detailedResult.error) {
+    data = detailedResult.data ?? [];
   } else {
-    const basicResult = await retrySupabaseResultOnJwt(() => supabase
+    const existingCategoryResult = await retrySupabaseResultOnJwt(() => supabase
       .from("places")
-      .select("id, name, latitude, longitude")
+      .select(
+        "id, name, latitude, longitude, address, address_name, road_address_name, category, category_name, district, gu",
+      )
       .in("id", placeIds));
 
-    if (basicResult.error) {
-      console.warn("추천 장소 좌표 보완 실패:", basicResult.error);
-      return missions;
-    }
+    if (!existingCategoryResult.error) {
+      data = existingCategoryResult.data ?? [];
+    } else {
+      const basicResult = await retrySupabaseResultOnJwt(() => supabase
+        .from("places")
+        .select("id, name, latitude, longitude")
+        .in("id", placeIds));
 
-    data = basicResult.data ?? [];
+      if (basicResult.error) {
+        console.warn("추천 장소 좌표 보완 실패:", basicResult.error);
+        return missions;
+      }
+
+      data = basicResult.data ?? [];
+    }
   }
 
   const placeMap = new Map(
@@ -1895,8 +2330,11 @@ async function hydrateMissionPlaces(
           }).toFixed(1)}km`
         : mission.dist;
 
+    const categoryResolution = resolveKakaoPlaceCategory(place);
+
     return {
       ...mission,
+      cat: categoryResolution?.category ?? mission.cat,
       placeLat,
       placeLng,
       placeName,
@@ -1904,6 +2342,8 @@ async function hydrateMissionPlaces(
       districtName,
       dist,
       isLocationFlexible: false,
+      placeEligible: Boolean(categoryResolution),
+      placeFoodOnly: categoryResolution?.foodOnly ?? false,
     };
   });
 }
@@ -1991,6 +2431,7 @@ function assignActualPlaces(
 
       return {
         ...mission,
+        cat: place.category,
         placeId: place.id,
         placeName: place.name,
         placeLat: place.latitude,
@@ -1999,6 +2440,8 @@ function assignActualPlaces(
         districtName: place.districtName,
         dist,
         isLocationFlexible: false,
+        placeEligible: true,
+        placeFoodOnly: place.foodOnly === true,
       };
     })
     .filter((mission): mission is HomeMission => mission !== null);
@@ -2108,6 +2551,13 @@ function mapBackendMission(
     name?: string | null;
     latitude?: number | string | null;
     longitude?: number | string | null;
+    category?: string | null;
+    category_name?: string | null;
+    category_group_code?: string | null;
+    category_group_name?: string | null;
+    kakao_category_name?: string | null;
+    kakao_category_group_code?: string | null;
+    kakao_category_group_name?: string | null;
   } | null,
 ): HomeMission {
   const title = String(
@@ -2161,10 +2611,14 @@ function mapBackendMission(
     rawRecommendationReason,
   ].join(" ");
 
-  const category = normalizeCategory(
+  const backendCategory = normalizeCategory(
     getRawCategoryName(backendMission),
     inferenceText,
   );
+  const placeCategoryResolution = placeOverride
+    ? resolveKakaoPlaceCategory(placeOverride)
+    : null;
+  const category = placeCategoryResolution?.category ?? backendCategory;
 
   const durationMinutes = parseDurationMinutes(
     backendMission.estimated_duration_min ??
@@ -2328,6 +2782,13 @@ function mapBackendMission(
     isAtHome,
     isLocationFlexible,
     isFallback: !isUuid(id),
+    placeEligible:
+      isAtHome || isLocationFlexible
+        ? true
+        : placeOverride
+          ? Boolean(placeCategoryResolution)
+          : undefined,
+    placeFoodOnly: placeCategoryResolution?.foodOnly ?? false,
   };
 }
 
@@ -2432,6 +2893,60 @@ function missionMatchesFilters(
   }
 
   return true;
+}
+
+function isBlockedRecommendationMission(
+  mission: HomeMission,
+) {
+  const normalizedTitle = normalizeComparableText(
+    mission.title,
+  );
+  const fullText = `${mission.title} ${mission.desc} ${mission.instructions}`;
+
+  return (
+    BLOCKED_MISSION_TITLE_PATTERNS.some(
+      (pattern) => normalizedTitle === pattern,
+    ) ||
+    BLOCKED_MISSION_TEXT_PATTERNS.some((pattern) =>
+      pattern.test(fullText),
+    )
+  );
+}
+
+function ensureCurrentAiFlexibleRecommendations({
+  selected,
+  aiFlexibleCandidates,
+  minimumCount,
+  limit,
+}: {
+  selected: HomeMission[];
+  aiFlexibleCandidates: HomeMission[];
+  minimumCount: number;
+  limit: number;
+}) {
+  const required = dedupeMissions(
+    aiFlexibleCandidates.filter(
+      (mission) =>
+        mission.isLocationFlexible === true &&
+        !isBlockedRecommendationMission(mission),
+    ),
+  ).slice(0, minimumCount);
+
+  if (required.length === 0) {
+    return selected.slice(0, limit);
+  }
+
+  const requiredIds = new Set(
+    required.map((mission) => mission.id),
+  );
+  const withoutRequiredDuplicates = selected.filter(
+    (mission) => !requiredIds.has(mission.id),
+  );
+
+  return dedupeMissions([
+    ...required,
+    ...withoutRequiredDuplicates,
+  ]).slice(0, limit);
 }
 
 function dedupeMissions(missions: HomeMission[]) {
@@ -3483,6 +3998,7 @@ export default function HomeScreen() {
     useState(false);
   const [recordExternalPlaceSearch, setRecordExternalPlaceSearch] =
     useState<ActualPlaceSearchRequest | null>(null);
+  const recordPlaceSearchSequenceRef = useRef(0);
   const [recordSaving, setRecordSaving] =
     useState(false);
   const [recordDetail, setRecordDetail] =
@@ -3721,6 +4237,7 @@ export default function HomeScreen() {
             "flexible",
           ],
           flexibleMissionLimit: 3,
+          minimumFlexibleMissionCount: 2,
           availablePlaces: availablePlaces.slice(0, 100).map((place) => ({
             id: place.id,
             name: place.name,
@@ -3729,6 +4246,10 @@ export default function HomeScreen() {
             address: place.address,
             district: place.districtName,
             category: place.category,
+            categoryName: place.kakaoCategoryName,
+            categoryGroupCode: place.kakaoCategoryGroupCode,
+            categoryGroupName: place.kakaoCategoryGroupName,
+            foodOnly: place.foodOnly,
           })),
           latitude: requestCoordinate?.lat,
           longitude: requestCoordinate?.lng,
@@ -3797,7 +4318,7 @@ export default function HomeScreen() {
           recommendationReasonInstruction:
             "각 미션마다 가장 핵심적인 추천 이유 하나만 recommendation_reason 필드에 가능하면 한 줄 분량의 짧은 한국어 한 문장으로 작성해주세요. 반드시 '~해요.', '~좋아요.', '~추천드려요.'처럼 높임말 완결형으로 끝내고, 말줄임표나 미완성 표현을 쓰지 마세요. 미션마다 서로 다른 이유를 쓰고 같은 문장을 반복하지 마세요.",
           generationInstruction:
-            `제목, 설명, 미션 안내, 추천 이유를 모두 자연스러운 한국어로 작성하세요. instructions는 반드시 정확히 두 문장으로 작성하세요. 첫 문장은 무엇을 할지 부드러운 높임말로 안내하고, 둘째 문장은 그 경험의 기대나 매력을 높임말로 설명하세요. 번호, 불릿, 단계 나열, 세 번째 문장은 절대 쓰지 마세요. 추천 이유는 가능하면 한 줄 분량으로 짧게 쓰되 반드시 높임말 완결형으로 끝내고 말줄임표를 사용하지 마세요. 카테고리를 상관없음으로 선택했을 때는 사용자의 초기 관심 카테고리를 약 60% 비중으로 우선하되, 관심사 밖의 카테고리도 반드시 섞으세요. 가능한 경우 최소 4개 이상의 서로 다른 카테고리를 포함하고 같은 카테고리는 최대 2개까지만 포함하세요. 장소 유형은 세 가지입니다. 특정 장소 미션은 availablePlaces에 포함된 실제 장소의 이름과 ID를 사용하고, 반드시 그 장소의 category와 실제 수행 행동을 일치시키세요. 카페 및 디저트 장소에서는 메뉴·음료·디저트·맛·공간 분위기 미션만 만들고 명상·요가·운동·낮잠 미션은 만들지 마세요. 음식 장소에서는 메뉴·식사·맛 미션만 만들고 독서·명상·운동 미션은 만들지 마세요. 산책 장소에서는 걷기·풍경 관찰·사진·자연 감상·가벼운 휴식 미션을 만드세요. 감상·배움 장소에서는 작품 관람·전시·공연·독서·학습처럼 해당 시설을 실제로 이용하는 미션을 만드세요. 장소 이름만 문장에 붙이고 무관한 행동을 시키는 조합은 절대 만들지 마세요. 집에서 하는 미션은 place_name을 정확히 '내 방'으로 쓰고 requires_place를 false로 설정하세요. 특정 장소가 필요 없는 미션은 place_name을 정확히 '어디서나 가능'으로 쓰고 requires_place를 false로 설정하세요. '자유 장소', '지역 내 어디서나', '현재 위치 주변의 편한 장소' 같은 다른 표현은 사용하지 마세요. 집 미션은 전체 10개 중 최대 2개, 어디서나 가능 미션은 최대 3개만 포함하세요. 반드시 데이터베이스에 저장된 UUID 미션만 반환하세요. ${
+            `제목, 설명, 미션 안내, 추천 이유를 모두 자연스러운 한국어로 작성하세요. instructions는 반드시 정확히 두 문장으로 작성하세요. 첫 문장은 무엇을 할지 부드러운 높임말로 안내하고, 둘째 문장은 그 경험의 기대나 매력을 높임말로 설명하세요. 번호, 불릿, 단계 나열, 세 번째 문장은 절대 쓰지 마세요. 추천 이유는 가능하면 한 줄 분량으로 짧게 쓰되 반드시 높임말 완결형으로 끝내고 말줄임표를 사용하지 마세요. 카테고리를 상관없음으로 선택했을 때는 사용자의 초기 관심 카테고리를 약 60% 비중으로 우선하되, 관심사 밖의 카테고리도 반드시 섞으세요. 가능한 경우 최소 4개 이상의 서로 다른 카테고리를 포함하고 같은 카테고리는 최대 2개까지만 포함하세요. 장소 유형은 세 가지입니다. 특정 장소 미션은 availablePlaces에 포함된 실제 장소의 이름과 ID를 사용하고, 반드시 그 장소의 category와 실제 수행 행동을 일치시키세요. 카페 및 디저트 장소에서는 메뉴·음료·디저트·맛·공간 분위기 미션만 만들고 명상·요가·운동·낮잠 미션은 만들지 마세요. 음식 장소에서는 메뉴·식사·맛 미션만 만들고 독서·명상·운동 미션은 만들지 마세요. 산책 장소에서는 걷기·풍경 관찰·사진·자연 감상·가벼운 휴식 미션을 만드세요. 감상·배움 장소에서는 작품 관람·전시·공연·독서·학습처럼 해당 시설을 실제로 이용하는 미션을 만드세요. 장소 이름만 문장에 붙이고 무관한 행동을 시키는 조합은 절대 만들지 마세요. 집에서 하는 미션은 place_name을 정확히 '내 방'으로 쓰고 requires_place를 false로 설정하세요. 특정 장소가 필요 없는 미션은 place_name을 정확히 '어디서나 가능'으로 쓰고 requires_place를 false로 설정하세요. '자유 장소', '지역 내 어디서나', '현재 위치 주변의 편한 장소' 같은 다른 표현은 사용하지 마세요. 집 미션은 전체 10개 중 최대 2개만 포함하세요. 어디서나 가능 미션은 Solar가 이번 요청에서 새로 만든 미션으로 최소 2개, 최대 3개 포함하세요. 천장에 구름이 있다고 가정하거나 천장의 무늬를 구름처럼 관찰하게 하는 미션과 '천장 구름 관찰하기'는 절대 만들지 마세요. 반드시 데이터베이스에 저장된 UUID 미션만 반환하세요. ${
               avoidCurrent
                 ? "직전 추천에 나온 미션과 장소는 가능한 한 제외하고 새로운 조합을 반환하세요."
                 : ""
@@ -3840,7 +4361,11 @@ export default function HomeScreen() {
                 effectiveCenter,
               ),
             )
-            .filter(isUsableRecommendation);
+            .filter(isUsableRecommendation)
+            .filter(
+              (mission) =>
+                !isBlockedRecommendationMission(mission),
+            );
         } catch (error) {
           console.warn(
             "AI 추천 호출 실패, DB 추천으로 대체:",
@@ -3867,13 +4392,30 @@ export default function HomeScreen() {
                 effectiveCenter,
               ),
             )
-            .filter(isUsableRecommendation);
+            .filter(isUsableRecommendation)
+            .filter(
+              (mission) =>
+                !isBlockedRecommendationMission(mission),
+            )
+            // 어디서나 가능 미션은 과거 DB 풀에서 재사용하지 않는다.
+            // 이번 clever-task 호출에서 새로 생성된 AI 결과만 사용한다.
+            .filter(
+              (mission) =>
+                mission.isLocationFlexible !== true,
+            );
         } catch (error) {
           console.warn(
             "DB 추천 조회 실패:",
             getErrorMessage(error, "알 수 없는 오류"),
           );
         }
+
+        const currentAiFlexibleCandidates =
+          aiCandidates.filter(
+            (mission) =>
+              mission.isLocationFlexible === true &&
+              !isBlockedRecommendationMission(mission),
+          );
 
         const hydratedCandidates = await hydrateMissionPlaces(
           dedupeMissions([
@@ -3890,6 +4432,7 @@ export default function HomeScreen() {
         );
 
         const filtered = placedCandidates.filter((mission) =>
+          !isBlockedRecommendationMission(mission) &&
           hasUsableMissionLocation(mission) &&
           missionMatchesFilters(
             mission,
@@ -3919,8 +4462,23 @@ export default function HomeScreen() {
           limit: 10,
         });
 
+        const filteredAiFlexibleCandidates =
+          currentAiFlexibleCandidates.filter((mission) =>
+            filtered.some(
+              (candidate) => candidate.id === mission.id,
+            ),
+          );
+        const recommendationsWithAiFlexible =
+          ensureCurrentAiFlexibleRecommendations({
+            selected: balanced,
+            aiFlexibleCandidates:
+              filteredAiFlexibleCandidates,
+            minimumCount: 2,
+            limit: 10,
+          });
+
         if (requestId === recommendationRequestIdRef.current) {
-          setMissions(balanced);
+          setMissions(recommendationsWithAiFlexible);
         }
       } catch (error) {
         console.error("추천 미션 새로고침 실패:", error);
@@ -4043,27 +4601,65 @@ export default function HomeScreen() {
           name: string | null;
           latitude: number | null;
           longitude: number | null;
+          category?: string | null;
+          category_name?: string | null;
+          category_group_code?: string | null;
+          category_group_name?: string | null;
+          kakao_category_name?: string | null;
+          kakao_category_group_code?: string | null;
+          kakao_category_group_name?: string | null;
         }
       > = {};
 
       if (placeIds.length > 0) {
-        const { data: placeRows, error: placeError } =
-          await retrySupabaseResultOnJwt(() => supabase
+        let placeRows: any[] = [];
+        const detailedPlaceResult = await retrySupabaseResultOnJwt(() => supabase
+          .from("places")
+          .select(
+            "id, name, latitude, longitude, category, category_name, category_group_code, category_group_name, kakao_category_name, kakao_category_group_code, kakao_category_group_name",
+          )
+          .in("id", placeIds));
+
+        if (!detailedPlaceResult.error) {
+          placeRows = detailedPlaceResult.data ?? [];
+        } else {
+          const existingCategoryResult = await retrySupabaseResultOnJwt(() => supabase
             .from("places")
-            .select("id, name, latitude, longitude")
+            .select("id, name, latitude, longitude, category, category_name")
             .in("id", placeIds));
 
-        if (placeError) {
-          console.warn("장소 정보 조회 실패:", placeError);
-        } else {
-          for (const place of placeRows ?? []) {
-            placeMap[String(place.id)] = {
-              id: String(place.id),
-              name: place.name ?? null,
-              latitude: toFiniteNumber(place.latitude),
-              longitude: toFiniteNumber(place.longitude),
-            };
+          if (!existingCategoryResult.error) {
+            placeRows = existingCategoryResult.data ?? [];
+          } else {
+            const basicPlaceResult = await retrySupabaseResultOnJwt(() => supabase
+              .from("places")
+              .select("id, name, latitude, longitude")
+              .in("id", placeIds));
+
+            if (basicPlaceResult.error) {
+              console.warn("장소 정보 조회 실패:", basicPlaceResult.error);
+            } else {
+              placeRows = basicPlaceResult.data ?? [];
+            }
           }
+        }
+
+        for (const place of placeRows) {
+          placeMap[String(place.id)] = {
+            id: String(place.id),
+            name: place.name ?? null,
+            latitude: toFiniteNumber(place.latitude),
+            longitude: toFiniteNumber(place.longitude),
+            category: place.category ?? null,
+            category_name: place.category_name ?? null,
+            category_group_code: place.category_group_code ?? null,
+            category_group_name: place.category_group_name ?? null,
+            kakao_category_name: place.kakao_category_name ?? null,
+            kakao_category_group_code:
+              place.kakao_category_group_code ?? null,
+            kakao_category_group_name:
+              place.kakao_category_group_name ?? null,
+          };
         }
       }
 
@@ -5090,57 +5686,63 @@ export default function HomeScreen() {
     setRecordExternalPlaceSearch(null);
   };
 
-  const loadRecordPlaceCandidates = async () => {
-    if (recordPlacesLoading) return;
+  const handleRecordPlaceMapSelect = async (
+    coordinate: Coordinate,
+  ) => {
+    const requestId = ++recordPlaceSearchSequenceRef.current;
+
+    // 발견 탭과 동일하게, 먼저 누른 지점에 핀을 남긴다.
+    setRecordLocation(coordinate);
+    setRecordSelectedPlace(null);
+    setRecordPlaceCandidates([]);
+    setRecordPlaceSearch("");
+    setRecordPlacesLoading(true);
 
     try {
-      setRecordPlacesLoading(true);
-      const center =
-        userLocation ?? recommendationCenter ?? DEFAULT_CENTER;
-      const places = await fetchPlaceCandidates({
-        // 과거에 방문한 장소도 찾을 수 있도록 현재 반경으로 제한하지 않는다.
-        center: null,
-        radiusKm: 10,
-        district: null,
-        districtPolygons: [],
-      });
+      const candidates =
+        await searchNearbyKakaoPlacesForRecord(coordinate);
 
-      const sorted = [...places].sort((left, right) => {
-        const leftDistance = haversineDistanceKm(center, {
-          lat: left.latitude,
-          lng: left.longitude,
-        });
-        const rightDistance = haversineDistanceKm(center, {
-          lat: right.latitude,
-          lng: right.longitude,
-        });
-        return leftDistance - rightDistance;
-      });
+      if (requestId !== recordPlaceSearchSequenceRef.current) {
+        return;
+      }
 
-      setRecordPlaceCandidates(sorted);
+      setRecordPlaceCandidates(candidates);
+
+      if (candidates.length === 0) {
+        Alert.alert(
+          "주변 장소를 찾지 못했어요",
+          "다른 위치를 누르거나 장소명이 없는 곳이라면 ‘길 위·야외’를 선택해주세요.",
+        );
+      }
     } catch (error) {
-      console.error("기록 장소 목록 조회 실패:", error);
+      if (requestId !== recordPlaceSearchSequenceRef.current) {
+        return;
+      }
+
+      console.error("기록 장소 검색 실패:", error);
       Alert.alert(
-        "장소를 불러오지 못했어요",
+        "장소 검색에 실패했어요",
         getErrorMessage(
           error,
           "잠시 후 다시 시도하거나 ‘길 위·야외’를 선택해주세요.",
         ),
       );
     } finally {
-      setRecordPlacesLoading(false);
+      if (requestId === recordPlaceSearchSequenceRef.current) {
+        setRecordPlacesLoading(false);
+      }
     }
   };
 
   const chooseRecordLocationKind = (kind: RecordLocationKind) => {
+    // 이전 위치 검색 응답이 늦게 도착해 새 선택을 덮어쓰지 않게 무효화한다.
+    recordPlaceSearchSequenceRef.current += 1;
     setRecordLocationKind(kind);
     setRecordLocation(null);
     setRecordSelectedPlace(null);
+    setRecordPlaceCandidates([]);
     setRecordPlaceSearch("");
-
-    if (kind === "place" && recordPlaceCandidates.length === 0) {
-      void loadRecordPlaceCandidates();
-    }
+    setRecordPlacesLoading(false);
   };
 
   const addRecordPhotos = (
@@ -6782,16 +7384,13 @@ export default function HomeScreen() {
                       <View style={styles.recordLocationHeader}>
                         <View style={styles.recordLocationHeaderText}>
                           <Text style={styles.recordLocationHelp}>
-                            지도에 표시된 실제 장소 마커를 눌러 미션을 수행한 장소를 선택해주세요.
+                            지도에서 미션을 수행한 위치를 눌러주세요. 핀이 표시되면 그 주변 실제 장소 중 한 곳을 선택할 수 있어요.
                           </Text>
                         </View>
                         <Pressable
                           onPress={() => {
                             if (userLocation) {
-                              setRecordExternalPlaceSearch({
-                                coordinate: userLocation,
-                                nonce: Date.now(),
-                              });
+                              void handleRecordPlaceMapSelect(userLocation);
                             } else {
                               Alert.alert(
                                 "현재 위치를 확인할 수 없어요",
@@ -6802,107 +7401,133 @@ export default function HomeScreen() {
                           style={styles.recordCurrentLocationButton}
                         >
                           <Text style={styles.recordCurrentLocationButtonText}>
-                            현재 위치로 이동
+                            현재 위치 찍기
                           </Text>
                         </Pressable>
                       </View>
 
                       <View style={styles.recordLocationMapWrapper}>
-                        <ActualPlacePickerMap
+                        <RecordLocationPickerMap
                           center={
+                            recordLocation ??
                             userLocation ??
                             recommendationCenter ??
                             DEFAULT_CENTER
                           }
-                          selectedPlace={recordSelectedPlace}
-                          searchRequest={recordExternalPlaceSearch}
-                          onLoadingChange={setRecordPlacesLoading}
-                          onPlaceSelected={(place) => {
-                            setRecordSelectedPlace(place);
-                            setRecordPlaceSearch("");
+                          pickedLocation={recordLocation}
+                          onSelect={(coordinate) => {
+                            void handleRecordPlaceMapSelect(coordinate);
                           }}
                         />
                       </View>
+
+                      <Text
+                        style={[
+                          styles.recordLocationStatus,
+                          recordLocation &&
+                            styles.recordLocationStatusSelected,
+                        ]}
+                      >
+                        {recordLocation
+                          ? "선택한 위치 주변의 실제 장소를 확인해주세요."
+                          : "지도에서 위치를 한 번 눌러주세요."}
+                      </Text>
 
                       {recordPlacesLoading ? (
                         <View style={styles.recordPlaceLoading}>
                           <ActivityIndicator color={BL} />
                           <Text style={styles.recordPlaceLoadingText}>
-                            지도 주변의 실제 장소를 불러오는 중이에요...
+                            선택한 위치 주변의 실제 장소를 찾는 중이에요...
                           </Text>
                         </View>
                       ) : null}
 
-                      <TextInput
-                        value={recordPlaceSearch}
-                        onChangeText={setRecordPlaceSearch}
-                        placeholder="목록에서 장소 이름이나 주소 검색"
-                        placeholderTextColor={T2}
-                        style={styles.recordPlaceSearchInput}
-                      />
+                      {recordPlaceCandidates.length > 0 ? (
+                        <>
+                          <TextInput
+                            value={recordPlaceSearch}
+                            onChangeText={setRecordPlaceSearch}
+                            placeholder="주변 장소 이름이나 주소 검색"
+                            placeholderTextColor={T2}
+                            style={styles.recordPlaceSearchInput}
+                          />
 
-                      {visibleRecordPlaceCandidates.length > 0 ? (
-                        <ScrollView
-                          nestedScrollEnabled
-                          style={styles.recordPlaceList}
-                          keyboardShouldPersistTaps="handled"
-                        >
-                          {visibleRecordPlaceCandidates.map((place) => {
-                            const selected = recordSelectedPlace?.id === place.id;
-                            const distance = userLocation
-                              ? haversineDistanceKm(userLocation, {
-                                  lat: place.latitude,
-                                  lng: place.longitude,
-                                })
-                              : null;
+                          <ScrollView
+                            nestedScrollEnabled
+                            style={styles.recordPlaceList}
+                            keyboardShouldPersistTaps="handled"
+                          >
+                            {visibleRecordPlaceCandidates.map((place) => {
+                              const selected =
+                                recordSelectedPlace?.id === place.id;
+                              const distanceM =
+                                place.distanceM ??
+                                (recordLocation
+                                  ? Math.round(
+                                      haversineDistanceKm(recordLocation, {
+                                        lat: place.latitude,
+                                        lng: place.longitude,
+                                      }) * 1000,
+                                    )
+                                  : null);
 
-                            return (
-                              <Pressable
-                                key={place.id}
-                                onPress={() => {
-                                  setRecordSelectedPlace(place);
-                                  setRecordPlaceSearch("");
-                                  setRecordExternalPlaceSearch({
-                                    coordinate: {
+                              return (
+                                <Pressable
+                                  key={place.id}
+                                  onPress={() => {
+                                    setRecordSelectedPlace(place);
+                                    setRecordLocation({
                                       lat: place.latitude,
                                       lng: place.longitude,
-                                    },
-                                    nonce: Date.now(),
-                                  });
-                                }}
-                                style={[
-                                  styles.recordPlaceOption,
-                                  selected && styles.recordPlaceOptionSelected,
-                                ]}
-                              >
-                                <View style={styles.recordPlaceOptionText}>
+                                    });
+                                    setRecordPlaceSearch("");
+                                  }}
+                                  style={[
+                                    styles.recordPlaceOption,
+                                    selected &&
+                                      styles.recordPlaceOptionSelected,
+                                  ]}
+                                >
+                                  <View style={styles.recordPlaceOptionText}>
+                                    <Text
+                                      numberOfLines={1}
+                                      style={[
+                                        styles.recordPlaceOptionName,
+                                        selected &&
+                                          styles.recordPlaceOptionNameSelected,
+                                      ]}
+                                    >
+                                      {place.name}
+                                    </Text>
+                                    <Text
+                                      numberOfLines={1}
+                                      style={styles.recordPlaceOptionAddress}
+                                    >
+                                      {place.address ??
+                                        place.categoryDetail ??
+                                        "주소 정보 없음"}
+                                    </Text>
+                                  </View>
                                   <Text
-                                    numberOfLines={1}
-                                    style={[
-                                      styles.recordPlaceOptionName,
-                                      selected && styles.recordPlaceOptionNameSelected,
-                                    ]}
+                                    style={styles.recordPlaceOptionDistance}
                                   >
-                                    {place.name}
+                                    {selected
+                                      ? "선택됨"
+                                      : distanceM !== null
+                                        ? distanceM < 1000
+                                          ? `${distanceM}m`
+                                          : `${(distanceM / 1000).toFixed(1)}km`
+                                        : "선택"}
                                   </Text>
-                                  <Text
-                                    numberOfLines={1}
-                                    style={styles.recordPlaceOptionAddress}
-                                  >
-                                    {place.address ?? place.districtName ?? "주소 정보 없음"}
-                                  </Text>
-                                </View>
-                                <Text style={styles.recordPlaceOptionDistance}>
-                                  {selected
-                                    ? "선택됨"
-                                    : distance !== null
-                                      ? `${distance.toFixed(1)}km`
-                                      : "선택"}
-                                </Text>
-                              </Pressable>
-                            );
-                          })}
-                        </ScrollView>
+                                </Pressable>
+                              );
+                            })}
+                          </ScrollView>
+                        </>
+                      ) : recordLocation && !recordPlacesLoading ? (
+                        <Text style={styles.recordLocationStatus}>
+                          이 위치 주변에서 선택할 장소를 찾지 못했어요. 다른 위치를 눌러보세요.
+                        </Text>
                       ) : null}
 
                       {recordSelectedPlace ? (
