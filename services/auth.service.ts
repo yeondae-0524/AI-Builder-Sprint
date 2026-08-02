@@ -227,29 +227,13 @@ export async function requestPasswordReset(): Promise<void> {
  * 4. 회원 탈퇴
  */
 export async function deleteAccount(): Promise<void> {
-  const {
-    data: { user },
-    error: userError,
-  } = await supabase.auth.getUser();
+  const { error } = await supabase.functions.invoke("delete-user");
 
-  if (userError || !user) {
-    throw new Error("사용자 정보를 확인할 수 없습니다.");
+  if (error) {
+    throw error;
   }
 
-  const { error: profileDeleteError } = await supabase
-    .from("profiles")
-    .delete()
-    .eq("id", user.id);
-
-  if (profileDeleteError) {
-    console.warn("프로필 삭제 권한 경고:", profileDeleteError.message);
-  }
-
-  const { error: signOutError } = await supabase.auth.signOut({
+  await supabase.auth.signOut({
     scope: "global",
   });
-
-  if (signOutError) {
-    throw signOutError;
-  }
 }
