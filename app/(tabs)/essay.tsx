@@ -109,6 +109,7 @@ type DraftEssay = {
   comic: { episodeTitle: string; panels: ComicPanel[] } | null;
   persona: PersonaType;
   records: JourneyRecordItem[];
+  aiSummary: string;
 };
 
 type CompletedEssay = {
