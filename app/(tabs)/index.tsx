@@ -117,7 +117,7 @@ type CategoryName = (typeof CATEGORIES)[number];
 type CostStatus = "무료" | "유료" | "유료/무료";
 type SheetSection = "active" | "recommended" | "records";
 type ListKind = "active" | "recommended" | "record";
-type RecordVisibility = "private" | "anonymous";
+type RecordVisibility = "private" | "nickname";
 type EmotionValue =
   | "comfortable"
   | "joyful"
@@ -6080,7 +6080,7 @@ export default function HomeScreen() {
 
       let discoverWarning = "";
 
-      if (recordVisibility === "anonymous") {
+      if (recordVisibility === "nickname") {
         try {
           await createDiscoverPost({
             placeName: savedLocationName,
@@ -6089,6 +6089,8 @@ export default function HomeScreen() {
             category: recordMission.cat,
             content: recordContent.trim(),
             emotion: recordEmotion as EmotionValue,
+            // 주변 기록 조회 서비스는 공개 게시물을 anonymous 값으로
+            // 조회하므로 내부 저장값은 유지하고 표시 방식만 닉네임 공유로 기록한다.
             visibility: "anonymous",
             photos: recordPhotos.map((photo) => ({
               uri: photo.uri,
@@ -6100,7 +6102,7 @@ export default function HomeScreen() {
           // 실제 미션명을 제목으로 표시할 수 있도록 메타데이터를 연결한다.
           const { error: discoverMetadataError } =
             await retrySupabaseResultOnJwt(() =>
-              supabase.rpc("set_latest_discover_post_metadata", {
+              supabase.rpc("set_latest_discover_post_metadata_v2", {
                 p_place_name: savedLocationName,
                 p_content: recordContent.trim(),
                 p_title: recordMission.title,
@@ -6108,6 +6110,7 @@ export default function HomeScreen() {
                 p_source_mission_id: isUuid(recordMission.id)
                   ? recordMission.id
                   : null,
+                p_share_mode: "nickname",
               }),
             );
 
@@ -6118,11 +6121,11 @@ export default function HomeScreen() {
           }
         } catch (discoverError) {
           console.error(
-            "발견 탭 익명 공유 실패:",
+            "발견 탭 닉네임 공유 실패:",
             discoverError,
           );
           discoverWarning =
-            "\n\n기록은 저장됐지만 발견 탭 익명 공유에는 실패했어요.";
+            "\n\n기록은 저장됐지만 발견 탭 닉네임 공유에는 실패했어요.";
         }
       }
 
@@ -7570,7 +7573,7 @@ export default function HomeScreen() {
                         🏠 내 방에서 한 미션
                       </Text>
                       <Text style={styles.recordHomeLocationDesc}>
-                        집 주소나 좌표는 저장하지 않아요. 익명 공유를 선택해도 위치가 없기 때문에 발견 지도에는 표시되지 않아요.
+                        집 주소나 좌표는 저장하지 않아요. 닉네임 공유를 선택해도 위치가 없기 때문에 발견 지도에는 표시되지 않아요.
                       </Text>
                     </View>
                   ) : null}
@@ -7833,30 +7836,30 @@ export default function HomeScreen() {
                 </Pressable>
                 <Pressable
                   onPress={() =>
-                    setRecordVisibility("anonymous")
+                    setRecordVisibility("nickname")
                   }
                   style={[
                     styles.visibilityOption,
                     styles.visibilityOptionLast,
-                    recordVisibility === "anonymous" &&
+                    recordVisibility === "nickname" &&
                       styles.visibilityOptionSelected,
                   ]}
                 >
                   <Text
                     style={[
                       styles.visibilityOptionTitle,
-                      recordVisibility === "anonymous" &&
+                      recordVisibility === "nickname" &&
                         styles.visibilityOptionTitleSelected,
                     ]}
                   >
-                    익명 공유
+                    닉네임 공유
                   </Text>
                   <Text style={styles.visibilityOptionDesc}>
                     {recordMission?.isAtHome ||
                     (recordMission?.isLocationFlexible &&
                       recordLocationKind === "home")
-                      ? "지도 대신 발견 탭의 방 안 기록 공간에 익명으로 공유해요"
-                      : "이름 없이 발견 탭에 공유해요"}
+                      ? "지도 대신 발견 탭의 방 안 기록 공간에 내 닉네임으로 공유해요"
+                      : "내 닉네임과 함께 발견 탭에 공유해요"}
                   </Text>
                 </Pressable>
               </View>
@@ -7938,9 +7941,7 @@ export default function HomeScreen() {
                       <Text style={styles.recordDetailVisibilityText}>
                         {recordDetail.visibility === "private"
                           ? "나만 보기"
-                          : recordDetail.visibility === "anonymous"
-                            ? "익명 공유"
-                            : "닉네임 공유"}
+                          : "닉네임 공유"}
                       </Text>
                     </View>
                   </View>

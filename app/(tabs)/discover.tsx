@@ -48,7 +48,22 @@ const KAKAO_JS_KEY = "f937d15a94db64ab114b3495f8b6ad3c";
 const KAKAO_REST_API_KEY = "c10a1b62f7bbf1d90e0ff60bb94bdadd";
 
 const SCREEN_HEIGHT = Dimensions.get("window").height;
+const SCREEN_WIDTH = Dimensions.get("window").width;
 const SHEET_CLOSE_POSITION = SCREEN_HEIGHT * 0.6;
+const HOME_SHEET_TOP = 188;
+const HOME_SHEET_HEIGHT = Math.max(SCREEN_HEIGHT - HOME_SHEET_TOP, 1);
+const HOME_SHEET_CLOSE_POSITION = HOME_SHEET_HEIGHT + 28;
+const MY_SHEET_TOP = 188;
+const MY_SHEET_HEIGHT = Math.max(SCREEN_HEIGHT - MY_SHEET_TOP, 1);
+const MY_SHEET_COLLAPSED_VISIBLE_HEIGHT = 188;
+const MY_SHEET_COLLAPSED_POSITION = Math.max(
+  MY_SHEET_HEIGHT - MY_SHEET_COLLAPSED_VISIBLE_HEIGHT,
+  0,
+);
+const MY_SHEET_CLOSE_POSITION = MY_SHEET_HEIGHT + 28;
+const MY_RECORD_TAB_HORIZONTAL_MARGIN = 14;
+const MY_RECORD_TAB_INDICATOR_WIDTH =
+  (SCREEN_WIDTH - MY_RECORD_TAB_HORIZONTAL_MARGIN * 2) / 3;
 const MAX_PHOTOS = 5;
 const SEARCH_RESULT_RADIUS_KM = 0.5;
 const MAP_AUTO_SEARCH_RADIUS_KM = 5;
@@ -83,7 +98,7 @@ const FILTERS = ["방 안 기록", "내 기록", "가까운 기록", "최근 기
 const CATEGORIES = ["음식", "카페 및 디저트", "산책", "배움", "감상", "활동", "휴식", "기타"];
 
 type EmotionValue = "comfortable" | "joyful" | "new" | "uncomfortable" | "unsure";
-type RecordVisibility = "private" | "anonymous";
+type RecordVisibility = "private" | "nickname";
 type RecordLocationKind = "place" | "map" | "home";
 type MapPickerMode = Exclude<RecordLocationKind, "home">;
 
@@ -136,6 +151,13 @@ type PlaceCandidate = {
 };
 
 type HomeArchiveTab = "shared" | "mine";
+type MyRecordVisibilityFilter = "all" | "private" | "nickname";
+
+const MY_RECORD_FILTER_INDEX: Record<MyRecordVisibilityFilter, number> = {
+  all: 0,
+  private: 1,
+  nickname: 2,
+};
 
 type HomeRoomRecord = {
   id: string;
@@ -150,6 +172,8 @@ type HomeRoomRecord = {
   createdAt: string;
   likes: number;
   sourceKind: "independent" | "mission";
+  nickname: string;
+  shareMode: "private" | "anonymous" | "nickname";
 };
 
 type MyRecordItem = {
@@ -167,6 +191,7 @@ type MyRecordItem = {
   likes: number;
   lat: number | null;
   lng: number | null;
+  photo?: string;
 };
 
 type DiscoverPostPhoto = {
@@ -467,7 +492,12 @@ async function buildBubbleList(posts: any[]): Promise<DiscoverBubble[]> {
     .filter(Boolean);
   const metadataById = new Map<
     string,
-    { title: string; sourceKind: "independent" | "mission" }
+    {
+      title: string;
+      sourceKind: "independent" | "mission";
+      authorNickname: string;
+      shareMode: "anonymous" | "nickname";
+    }
   >();
 
   if (postIds.length > 0) {
@@ -484,6 +514,10 @@ async function buildBubbleList(posts: any[]): Promise<DiscoverBubble[]> {
           title: String(row.title ?? "").trim(),
           sourceKind:
             row.source_kind === "mission" ? "mission" : "independent",
+          authorNickname:
+            String(row.author_nickname ?? "").trim() || "사용자",
+          shareMode:
+            row.share_mode === "nickname" ? "nickname" : "anonymous",
         });
       }
     }
@@ -534,7 +568,10 @@ async function buildBubbleList(posts: any[]): Promise<DiscoverBubble[]> {
           metadata?.sourceKind ||
           (p.source_kind === "mission" ? "mission" : "independent"),
         time: new Date(p.created_at).toLocaleDateString("ko-KR"),
-        nick: p.visibility === "anonymous" ? "익명" : "작성자",
+        nick:
+          metadata?.shareMode === "nickname"
+            ? metadata.authorNickname
+            : "익명",
         emotion: EMOTION_LABEL[p.emotion] ?? String(p.emotion ?? ""),
         note: content,
         likes: Number(p.likes_count ?? 0),
@@ -719,23 +756,55 @@ function RecordLocationPickerMap({
   );
 }
 
-function normalizeInterests(value: unknown): string[] {
-  if (Array.isArray(value)) {
-    return value.filter((item): item is string => typeof item === "string");
+
+function inferRecordCategory(text: string): string {
+  const normalized = text.replace(/\s+/g, " ").toLowerCase();
+
+  if (/(카페|디저트|베이커리|빵|커피|라떼|케이크|아이스크림)/.test(normalized)) {
+    return "카페 및 디저트";
   }
-  return [];
+  if (/(음식|식사|맛집|요리|먹기|국밥|라면|국수|분식|한 끼)/.test(normalized)) {
+    return "음식";
+  }
+  if (/(산책|걷기|공원|골목|해변|강변|둘레길|등산|자연)/.test(normalized)) {
+    return "산책";
+  }
+  if (/(독서|책|공부|배움|학습|강의|도서관|서점)/.test(normalized)) {
+    return "배움";
+  }
+  if (/(음악|영화|공연|전시|미술관|박물관|감상|사진|그림|연극)/.test(normalized)) {
+    return "감상";
+  }
+  if (/(운동|체험|만들기|공방|자전거|클라이밍|러닝|요가|춤|볼링)/.test(normalized)) {
+    return "활동";
+  }
+  if (/(휴식|명상|호흡|온천|찜질|낮잠|힐링|쉬기)/.test(normalized)) {
+    return "휴식";
+  }
+
+  return "기타";
 }
 
-function isArchiveFilter(value: string) {
-  return value === "방 안 기록";
+function normalizeRecordCategory(
+  rawCategory: unknown,
+  textForInference: string,
+) {
+  const category = String(rawCategory ?? "").trim();
+
+  if (CATEGORIES.includes(category)) {
+    return category;
+  }
+
+  return inferRecordCategory(`${category} ${textForInference}`);
 }
 
-function isPersonalMapFilter(value: string) {
-  return value === "내 기록";
-}
+type MissionRecordMetadata = {
+  title: string;
+  category: string;
+};
 
-async function getMissionTitlesByAttemptIds(attemptIds: string[]) {
-  const result = new Map<string, string>();
+async function getMissionMetadataByAttemptIds(attemptIds: string[]) {
+  const result = new Map<string, MissionRecordMetadata>();
   const uniqueAttemptIds = Array.from(new Set(attemptIds.filter(Boolean)));
 
   if (uniqueAttemptIds.length === 0) return result;
@@ -755,29 +824,163 @@ async function getMissionTitlesByAttemptIds(attemptIds: string[]) {
   );
   if (missionIds.length === 0) return result;
 
-  const { data: missions, error: missionsError } = await supabase
+  let missionRows: any[] = [];
+  const extendedMissionResult = await supabase
     .from("missions")
-    .select("id, title")
+    .select("id, title, category_id")
     .in("id", missionIds);
 
-  if (missionsError) {
-    console.log("미션 제목 조회 실패:", missionsError.message);
-    return result;
+  if (extendedMissionResult.error) {
+    const basicMissionResult = await supabase
+      .from("missions")
+      .select("id, title")
+      .in("id", missionIds);
+
+    if (basicMissionResult.error) {
+      console.log("미션 정보 조회 실패:", basicMissionResult.error.message);
+      return result;
+    }
+
+    missionRows = basicMissionResult.data ?? [];
+  } else {
+    missionRows = extendedMissionResult.data ?? [];
   }
 
-  const titleByMissionId = new Map(
-    (missions ?? []).map((row) => [String(row.id), String(row.title ?? "미션 기록")]),
+  const categoryIds = Array.from(
+    new Set(
+      missionRows
+        .map((row) => String(row.category_id ?? ""))
+        .filter(Boolean),
+    ),
   );
+  const categoryNameById = new Map<string, string>();
+
+  if (categoryIds.length > 0) {
+    const { data: categories, error: categoriesError } = await supabase
+      .from("categories")
+      .select("id, name")
+      .in("id", categoryIds);
+
+    if (!categoriesError) {
+      for (const category of categories ?? []) {
+        categoryNameById.set(
+          String(category.id),
+          String(category.name ?? ""),
+        );
+      }
+    }
+  }
+
+  const metadataByMissionId = new Map<string, MissionRecordMetadata>();
+
+  for (const mission of missionRows) {
+    const title = String(mission.title ?? "미션 기록");
+    const rawCategory = categoryNameById.get(
+      String(mission.category_id ?? ""),
+    );
+    metadataByMissionId.set(String(mission.id), {
+      title,
+      category: normalizeRecordCategory(rawCategory, title),
+    });
+  }
 
   for (const attempt of attempts ?? []) {
+    const metadata = metadataByMissionId.get(String(attempt.mission_id));
     result.set(
       String(attempt.id),
-      titleByMissionId.get(String(attempt.mission_id)) ?? "미션 기록",
+      metadata ?? {
+        title: "미션 기록",
+        category: "기타",
+      },
     );
   }
 
   return result;
 }
+
+async function resolveDiscoverCoverPhoto(row: any) {
+  const photos: Array<DiscoverPostPhoto & { sort_order?: number | null }> =
+    Array.isArray(row?.photos) ? row.photos : [];
+  const sorted = [...photos].sort((left, right) => {
+    if (Boolean(left.is_cover) !== Boolean(right.is_cover)) {
+      return left.is_cover ? -1 : 1;
+    }
+    return Number(left.sort_order ?? 0) - Number(right.sort_order ?? 0);
+  });
+  const storagePath = String(sorted[0]?.storage_path ?? "").trim();
+
+  if (!storagePath) return undefined;
+
+  try {
+    return await getDiscoverPhotoUrl(storagePath);
+  } catch (error) {
+    console.log(
+      "내 발견 기록 사진 URL 조회 실패:",
+      error instanceof Error ? error.message : error,
+    );
+    return undefined;
+  }
+}
+
+async function resolveRecordCoverPhoto(row: any) {
+  const photos: Array<DiscoverPostPhoto & { sort_order?: number | null }> =
+    Array.isArray(row?.record_photos) ? row.record_photos : [];
+  const sorted = [...photos].sort((left, right) => {
+    if (Boolean(left.is_cover) !== Boolean(right.is_cover)) {
+      return left.is_cover ? -1 : 1;
+    }
+    return Number(left.sort_order ?? 0) - Number(right.sort_order ?? 0);
+  });
+  const storagePath = String(sorted[0]?.storage_path ?? "").trim();
+
+  if (!storagePath) return undefined;
+
+  const { data, error } = await supabase.storage
+    .from("record-photos")
+    .createSignedUrl(storagePath, 3600);
+
+  if (error) {
+    console.log("내 미션 기록 사진 URL 조회 실패:", error.message);
+    return undefined;
+  }
+
+  return data.signedUrl;
+}
+
+function normalizeInterests(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value.filter((item): item is string => typeof item === "string");
+  }
+  return [];
+}
+
+function normalizeRecordVisibility(value: unknown): "private" | "nickname" {
+  return String(value ?? "") === "private" ? "private" : "nickname";
+}
+
+function getCategoryEmoji(category: string) {
+  const emojis: Record<string, string> = {
+    음식: "🍽️",
+    "카페 및 디저트": "☕",
+    산책: "🌿",
+    배움: "📚",
+    감상: "🎧",
+    활동: "🏃",
+    휴식: "🛋️",
+    기타: "✨",
+  };
+  return emojis[category] ?? "✨";
+}
+
+function isArchiveFilter(value: string) {
+  return value === "방 안 기록";
+}
+
+function isPersonalMapFilter(value: string) {
+  return value === "내 기록";
+}
+
+
 
 export default function DiscoverScreen() {
   const router = useRouter();
@@ -798,6 +1001,7 @@ export default function DiscoverScreen() {
   const [mapRefreshAvailable, setMapRefreshAvailable] = useState(false);
   const [tryingMission, setTryingMission] = useState(false);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+  const [currentNickname, setCurrentNickname] = useState("나");
   const [deleting, setDeleting] = useState(false);
   const [myInterests, setMyInterests] = useState<string[]>([]);
 
@@ -819,6 +1023,14 @@ export default function DiscoverScreen() {
   const [homeRecordsLoading, setHomeRecordsLoading] = useState(false);
   const [myRecords, setMyRecords] = useState<MyRecordItem[]>([]);
   const [myRecordsLoading, setMyRecordsLoading] = useState(false);
+  const [myRecordVisibilityFilter, setMyRecordVisibilityFilter] =
+    useState<MyRecordVisibilityFilter>("all");
+  const [focusedMyRecordKey, setFocusedMyRecordKey] = useState<string | null>(
+    null,
+  );
+  const [selectedMapBubbleId, setSelectedMapBubbleId] = useState<string | null>(
+    null,
+  );
 
   const [registerVisible, setRegisterVisible] = useState(false);
   const [recordTitle, setRecordTitle] = useState("");
@@ -832,6 +1044,17 @@ export default function DiscoverScreen() {
 
   const sheetTranslateY = useRef(new Animated.Value(SHEET_CLOSE_POSITION)).current;
   const dragStart = useRef(0);
+  const homeSheetTranslateY = useRef(
+    new Animated.Value(HOME_SHEET_CLOSE_POSITION),
+  ).current;
+  const homeDragStart = useRef(0);
+  const mySheetTranslateY = useRef(
+    new Animated.Value(MY_SHEET_CLOSE_POSITION),
+  ).current;
+  const mySheetDragStart = useRef(0);
+  const myRecordsListRef = useRef<ScrollView | null>(null);
+  const myRecordFilterIndicator = useRef(new Animated.Value(0)).current;
+  const myRecordContentAnimation = useRef(new Animated.Value(1)).current;
   const searchDebounce = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pickerPlaceSearchDebounce = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mapSearchSequence = useRef(0);
@@ -925,15 +1148,45 @@ export default function DiscoverScreen() {
         console.log("내 방 미션 기록 조회 실패:", missionResult.error.message);
       }
 
-      const missionTitleByAttemptId = await getMissionTitlesByAttemptIds(
-        (missionResult.data ?? [])
-          .map((row) => String(row.mission_attempt_id ?? ""))
-          .filter(Boolean),
-      );
+      const missionMetadataByAttemptId =
+        await getMissionMetadataByAttemptIds(
+          (missionResult.data ?? [])
+            .map((row) => String(row.mission_attempt_id ?? ""))
+            .filter(Boolean),
+        );
+
+      const homeDisplayMetadata = new Map<
+        string,
+        { nickname: string; shareMode: "anonymous" | "nickname" }
+      >();
+      const homePostIds = discoverRows
+        .map((row) => String(row.id ?? ""))
+        .filter(Boolean);
+
+      if (homePostIds.length > 0) {
+        const { data: displayRows, error: displayError } = await supabase.rpc(
+          "get_discover_post_display_metadata",
+          { p_post_ids: homePostIds },
+        );
+
+        if (displayError) {
+          console.log("방 안 기록 닉네임 조회 실패:", displayError.message);
+        } else {
+          for (const row of displayRows ?? []) {
+            homeDisplayMetadata.set(String(row.id), {
+              nickname:
+                String(row.author_nickname ?? "").trim() || "사용자",
+              shareMode:
+                row.share_mode === "nickname" ? "nickname" : "anonymous",
+            });
+          }
+        }
+      }
 
       const discoverRecords: HomeRoomRecord[] = discoverRows.map((row) => {
         const ownerId = row.user_id ? String(row.user_id) : null;
         const content = String(row.content ?? "");
+        const displayMetadata = homeDisplayMetadata.get(String(row.id));
 
         return {
           id: String(row.id),
@@ -950,6 +1203,10 @@ export default function DiscoverScreen() {
           createdAt: String(row.created_at ?? ""),
           likes: Number(row.likes_count ?? 0),
           sourceKind: row.source_kind === "mission" ? "mission" : "independent",
+          nickname:
+            displayMetadata?.nickname ??
+            (ownerId === userId ? "나" : "익명"),
+          shareMode: displayMetadata?.shareMode ?? "anonymous",
         };
       });
 
@@ -961,16 +1218,22 @@ export default function DiscoverScreen() {
             source: "mission",
             userId,
             isMine: true,
-            title: missionTitleByAttemptId.get(attemptId) ?? "미션 기록",
+            title:
+              missionMetadataByAttemptId.get(attemptId)?.title ??
+              "미션 기록",
             content: String(row.content ?? ""),
             emotion:
               EMOTION_LABEL[String(row.emotion ?? "")] ??
               String(row.emotion ?? ""),
-            category: "미션 기록",
+            category:
+              missionMetadataByAttemptId.get(attemptId)?.category ??
+              "기타",
             visibility: String(row.visibility ?? "private"),
             createdAt: String(row.recorded_at ?? row.created_at ?? ""),
             likes: 0,
             sourceKind: "mission",
+            nickname: "나",
+            shareMode: normalizeRecordVisibility(row.visibility),
           };
         },
       );
@@ -980,7 +1243,7 @@ export default function DiscoverScreen() {
 
       setSharedHomeRecords(
         discoverRecords
-          .filter((record) => record.visibility === "anonymous")
+          .filter((record) => record.visibility !== "private")
           .sort(byNewest),
       );
       setMyHomeRecords(
@@ -998,88 +1261,217 @@ export default function DiscoverScreen() {
     setMyRecordsLoading(true);
 
     try {
-      const [discoverResult, recordsResult] = await Promise.all([
-        supabase
+      let discoverRows: any[] = [];
+      let discoverErrorMessage = "";
+
+      const discoverSelections = [
+        `
+          id,
+          title,
+          source_kind,
+          content,
+          emotion,
+          category,
+          visibility,
+          share_mode,
+          likes_count,
+          created_at,
+          place_name,
+          lat,
+          lng,
+          photos:discover_post_photos (
+            storage_path,
+            is_cover,
+            sort_order
+          )
+        `,
+        `
+          id,
+          title,
+          source_kind,
+          content,
+          emotion,
+          category,
+          visibility,
+          share_mode,
+          likes_count,
+          created_at,
+          place_name,
+          lat,
+          lng,
+          photos:discover_photos (
+            storage_path,
+            is_cover,
+            sort_order
+          )
+        `,
+        `
+          id,
+          title,
+          source_kind,
+          content,
+          emotion,
+          category,
+          visibility,
+          share_mode,
+          likes_count,
+          created_at,
+          place_name,
+          lat,
+          lng,
+          photos (
+            storage_path,
+            is_cover,
+            sort_order
+          )
+        `,
+      ];
+
+      for (const selection of discoverSelections) {
+        const result = await supabase
+          .from("discover_posts")
+          .select(selection)
+          .eq("user_id", userId)
+          .order("created_at", { ascending: false });
+
+        if (!result.error) {
+          discoverRows = result.data ?? [];
+          discoverErrorMessage = "";
+          break;
+        }
+
+        discoverErrorMessage = result.error.message;
+      }
+
+      if (discoverRows.length === 0 && discoverErrorMessage) {
+        const fallbackDiscoverResult = await supabase
           .from("discover_posts")
           .select(
             "id, title, source_kind, content, emotion, category, visibility, likes_count, created_at, place_name, lat, lng",
           )
           .eq("user_id", userId)
-          .order("created_at", { ascending: false }),
-        supabase
-          .from("records")
-          .select(
-            "id, mission_attempt_id, content, emotion, visibility, recorded_at, created_at, location_name, location_type, location_latitude, location_longitude",
-          )
-          .eq("user_id", userId)
-          .order("recorded_at", { ascending: false }),
-      ]);
+          .order("created_at", { ascending: false });
 
-      if (discoverResult.error) {
-        console.log("내 발견 기록 조회 실패:", discoverResult.error.message);
+        if (fallbackDiscoverResult.error) {
+          console.log(
+            "내 발견 기록 조회 실패:",
+            fallbackDiscoverResult.error.message,
+          );
+        } else {
+          discoverRows = fallbackDiscoverResult.data ?? [];
+        }
       }
+
+      const recordsResult = await supabase
+        .from("records")
+        .select(`
+          id,
+          mission_attempt_id,
+          content,
+          emotion,
+          visibility,
+          recorded_at,
+          created_at,
+          location_name,
+          location_type,
+          location_latitude,
+          location_longitude,
+          record_photos (
+            storage_path,
+            is_cover,
+            sort_order
+          )
+        `)
+        .eq("user_id", userId)
+        .order("recorded_at", { ascending: false });
+
       if (recordsResult.error) {
         console.log("내 미션 기록 조회 실패:", recordsResult.error.message);
       }
 
-      const missionTitleByAttemptId = await getMissionTitlesByAttemptIds(
-        (recordsResult.data ?? [])
-          .map((row) => String(row.mission_attempt_id ?? ""))
-          .filter(Boolean),
+      const missionMetadataByAttemptId =
+        await getMissionMetadataByAttemptIds(
+          (recordsResult.data ?? [])
+            .map((row) => String(row.mission_attempt_id ?? ""))
+            .filter(Boolean),
+        );
+
+      const independentRecords = await Promise.all(
+        discoverRows
+          .filter((row) => row.source_kind !== "mission")
+          .map(async (row): Promise<MyRecordItem> => {
+            const content = String(row.content ?? "");
+            const title =
+              String(row.title ?? "").trim() ||
+              content.slice(0, 40) ||
+              "기록";
+
+            return {
+              key: `discover-${row.id}`,
+              id: String(row.id),
+              source: "discover",
+              discoverPostId: String(row.id),
+              title,
+              content,
+              placeName: String(row.place_name ?? "장소 정보 없음"),
+              emotion:
+                EMOTION_LABEL[String(row.emotion ?? "")] ??
+                String(row.emotion ?? ""),
+              category: normalizeRecordCategory(
+                row.category,
+                `${title} ${content}`,
+              ),
+              visibility: normalizeRecordVisibility(
+                row.share_mode ?? row.visibility,
+              ),
+              createdAt: String(row.created_at ?? ""),
+              likes: Number(row.likes_count ?? 0),
+              lat: Number.isFinite(Number(row.lat)) ? Number(row.lat) : null,
+              lng: Number.isFinite(Number(row.lng)) ? Number(row.lng) : null,
+              photo: await resolveDiscoverCoverPhoto(row),
+            };
+          }),
       );
 
-      const independentRecords: MyRecordItem[] = (discoverResult.data ?? [])
-        .filter((row) => row.source_kind !== "mission")
-        .map((row) => {
-          const content = String(row.content ?? "");
-          return {
-            key: `discover-${row.id}`,
-            id: String(row.id),
-            source: "discover",
-            discoverPostId: String(row.id),
-            title: String(row.title ?? "").trim() || content.slice(0, 40) || "기록",
-            content,
-            placeName: String(row.place_name ?? "장소 정보 없음"),
-            emotion:
-              EMOTION_LABEL[String(row.emotion ?? "")] ??
-              String(row.emotion ?? ""),
-            category: String(row.category ?? "기타"),
-            visibility: String(row.visibility ?? "private"),
-            createdAt: String(row.created_at ?? ""),
-            likes: Number(row.likes_count ?? 0),
-            lat: Number.isFinite(Number(row.lat)) ? Number(row.lat) : null,
-            lng: Number.isFinite(Number(row.lng)) ? Number(row.lng) : null,
-          };
-        });
+      const missionRecords = await Promise.all(
+        (recordsResult.data ?? []).map(
+          async (row): Promise<MyRecordItem> => {
+            const attemptId = String(row.mission_attempt_id ?? "");
+            const metadata = missionMetadataByAttemptId.get(attemptId);
+            const content = String(row.content ?? "");
+            const title = metadata?.title ?? "미션 기록";
 
-      const missionRecords: MyRecordItem[] = (recordsResult.data ?? []).map(
-        (row) => {
-          const attemptId = String(row.mission_attempt_id ?? "");
-          return {
-            key: `mission-${row.id}`,
-            id: String(row.id),
-            source: "mission",
-            discoverPostId: null,
-            title: missionTitleByAttemptId.get(attemptId) ?? "미션 기록",
-            content: String(row.content ?? ""),
-            placeName:
-              String(row.location_name ?? "").trim() ||
-              (row.location_type === "home" ? "내 방" : "장소 정보 없음"),
-            emotion:
-              EMOTION_LABEL[String(row.emotion ?? "")] ??
-              String(row.emotion ?? ""),
-            category: "미션 기록",
-            visibility: String(row.visibility ?? "private"),
-            createdAt: String(row.recorded_at ?? row.created_at ?? ""),
-            likes: 0,
-            lat: Number.isFinite(Number(row.location_latitude))
-              ? Number(row.location_latitude)
-              : null,
-            lng: Number.isFinite(Number(row.location_longitude))
-              ? Number(row.location_longitude)
-              : null,
-          };
-        },
+            return {
+              key: `mission-${row.id}`,
+              id: String(row.id),
+              source: "mission",
+              discoverPostId: null,
+              title,
+              content,
+              placeName:
+                String(row.location_name ?? "").trim() ||
+                (row.location_type === "home"
+                  ? "내 방"
+                  : "장소 정보 없음"),
+              emotion:
+                EMOTION_LABEL[String(row.emotion ?? "")] ??
+                String(row.emotion ?? ""),
+              category:
+                metadata?.category ??
+                inferRecordCategory(`${title} ${content}`),
+              visibility: normalizeRecordVisibility(row.visibility),
+              createdAt: String(row.recorded_at ?? row.created_at ?? ""),
+              likes: 0,
+              lat: Number.isFinite(Number(row.location_latitude))
+                ? Number(row.location_latitude)
+                : null,
+              lng: Number.isFinite(Number(row.location_longitude))
+                ? Number(row.location_longitude)
+                : null,
+              photo: await resolveRecordCoverPhoto(row),
+            };
+          },
+        ),
       );
 
       setMyRecords(
@@ -1104,10 +1496,13 @@ export default function DiscoverScreen() {
       if (user) {
         const { data: profileData } = await supabase
           .from("profiles")
-          .select("interests")
+          .select("interests, nickname")
           .eq("id", user.id)
           .maybeSingle();
         setMyInterests(normalizeInterests(profileData?.interests));
+        setCurrentNickname(
+          String(profileData?.nickname ?? "").trim() || "나",
+        );
         await Promise.all([
           loadHomeRecords(user.id),
           loadMyRecords(user.id),
@@ -1332,6 +1727,135 @@ export default function DiscoverScreen() {
     })
   ).current;
 
+  const openHomeSheet = () => {
+    homeSheetTranslateY.stopAnimation();
+    Animated.spring(homeSheetTranslateY, {
+      toValue: 0,
+      useNativeDriver: true,
+      damping: 22,
+      stiffness: 180,
+    }).start();
+  };
+
+  const closeHomeSheet = (nextFilter = "가까운 기록") => {
+    homeSheetTranslateY.stopAnimation();
+    Animated.timing(homeSheetTranslateY, {
+      toValue: HOME_SHEET_CLOSE_POSITION,
+      duration: 220,
+      useNativeDriver: true,
+    }).start(() => {
+      setActiveFilter(nextFilter);
+    });
+  };
+
+  useEffect(() => {
+    if (activeFilter === "방 안 기록") {
+      openHomeSheet();
+    }
+  }, [activeFilter]);
+
+  const homePanResponder = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: (_e, g) => Math.abs(g.dy) > 2,
+      onPanResponderGrant: () => {
+        homeSheetTranslateY.stopAnimation(
+          (value) => (homeDragStart.current = value),
+        );
+      },
+      onPanResponderMove: (_e, g) => {
+        homeSheetTranslateY.setValue(
+          Math.max(0, homeDragStart.current + g.dy),
+        );
+      },
+      onPanResponderRelease: (_e, g) => {
+        const current = Math.max(0, homeDragStart.current + g.dy);
+
+        if (current > 120 || g.vy > 0.6) {
+          closeHomeSheet();
+          return;
+        }
+
+        Animated.spring(homeSheetTranslateY, {
+          toValue: 0,
+          useNativeDriver: true,
+          damping: 22,
+          stiffness: 180,
+        }).start();
+      },
+      onPanResponderTerminationRequest: () => false,
+    }),
+  ).current;
+
+  const openMyRecordsSheet = (expanded = false) => {
+    mySheetTranslateY.stopAnimation();
+    Animated.spring(mySheetTranslateY, {
+      toValue: expanded ? 0 : MY_SHEET_COLLAPSED_POSITION,
+      useNativeDriver: true,
+      damping: 22,
+      stiffness: 180,
+    }).start();
+  };
+
+  const closeMyRecordsSheet = (callback?: () => void) => {
+    mySheetTranslateY.stopAnimation();
+    Animated.timing(mySheetTranslateY, {
+      toValue: MY_SHEET_CLOSE_POSITION,
+      duration: 220,
+      useNativeDriver: true,
+    }).start(callback);
+  };
+
+  useEffect(() => {
+    if (activeFilter === "내 기록") {
+      openMyRecordsSheet(false);
+    }
+  }, [activeFilter]);
+
+  const mySheetPanResponder = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: (_e, g) => Math.abs(g.dy) > 2,
+      onPanResponderGrant: () => {
+        mySheetTranslateY.stopAnimation(
+          (value) => (mySheetDragStart.current = value),
+        );
+      },
+      onPanResponderMove: (_e, g) => {
+        mySheetTranslateY.setValue(
+          Math.max(
+            0,
+            Math.min(
+              MY_SHEET_COLLAPSED_POSITION,
+              mySheetDragStart.current + g.dy,
+            ),
+          ),
+        );
+      },
+      onPanResponderRelease: (_e, g) => {
+        const current = Math.max(
+          0,
+          Math.min(
+            MY_SHEET_COLLAPSED_POSITION,
+            mySheetDragStart.current + g.dy,
+          ),
+        );
+
+        const shouldCollapse =
+          g.vy > 0.45 ||
+          (g.vy >= -0.45 && current > MY_SHEET_COLLAPSED_POSITION / 2);
+
+        Animated.spring(mySheetTranslateY, {
+          toValue: shouldCollapse ? MY_SHEET_COLLAPSED_POSITION : 0,
+          useNativeDriver: true,
+          damping: 22,
+          stiffness: 180,
+        }).start();
+      },
+      onPanResponderTerminationRequest: () => false,
+    }),
+  ).current;
+
   // React Native 버전에 따라 웹 전용 CSS 속성이 ViewStyle 타입에
   // 포함되지 않을 수 있으므로 웹에서만 명시적으로 타입을 우회합니다.
   const webDragStyle =
@@ -1418,9 +1942,90 @@ export default function DiscoverScreen() {
     }
   }, [mapRecordsLoading]);
 
+  const visibleMyRecords = useMemo(
+    () =>
+      myRecords.filter((record) => {
+        if (myRecordVisibilityFilter === "all") return true;
+        return record.visibility === myRecordVisibilityFilter;
+      }),
+    [myRecordVisibilityFilter, myRecords],
+  );
+
+  const orderedVisibleMyRecords = useMemo(() => {
+    if (!focusedMyRecordKey) {
+      return visibleMyRecords;
+    }
+
+    const focusedIndex = visibleMyRecords.findIndex(
+      (record) => record.key === focusedMyRecordKey,
+    );
+
+    if (focusedIndex <= 0) {
+      return visibleMyRecords;
+    }
+
+    return [
+      visibleMyRecords[focusedIndex],
+      ...visibleMyRecords.slice(0, focusedIndex),
+      ...visibleMyRecords.slice(focusedIndex + 1),
+    ];
+  }, [focusedMyRecordKey, visibleMyRecords]);
+
+  const myRecordVisibilityCounts = useMemo(
+    () => ({
+      all: myRecords.length,
+      private: myRecords.filter(
+        (record) => record.visibility === "private",
+      ).length,
+      nickname: myRecords.filter(
+        (record) => record.visibility === "nickname",
+      ).length,
+    }),
+    [myRecords],
+  );
+
+  const changeMyRecordVisibilityFilter = useCallback(
+    (nextFilter: MyRecordVisibilityFilter) => {
+      if (nextFilter === myRecordVisibilityFilter) {
+        return;
+      }
+
+      Animated.spring(myRecordFilterIndicator, {
+        toValue: MY_RECORD_FILTER_INDEX[nextFilter],
+        useNativeDriver: true,
+        damping: 22,
+        stiffness: 220,
+        mass: 0.8,
+      }).start();
+
+      Animated.timing(myRecordContentAnimation, {
+        toValue: 0,
+        duration: 90,
+        useNativeDriver: true,
+      }).start(() => {
+        setMyRecordVisibilityFilter(nextFilter);
+        setFocusedMyRecordKey(null);
+        setSelectedMapBubbleId(null);
+        myRecordsListRef.current?.scrollTo({ y: 0, animated: false });
+        myRecordContentAnimation.setValue(0);
+
+        Animated.timing(myRecordContentAnimation, {
+          toValue: 1,
+          duration: 180,
+          useNativeDriver: true,
+        }).start();
+      });
+    },
+    [
+      myRecordContentAnimation,
+      myRecordFilterIndicator,
+      myRecordVisibilityFilter,
+    ],
+  );
+
   const myRecordBubbles = useMemo<DiscoverBubble[]>(
     () =>
-      myRecords.flatMap((record) => {
+      visibleMyRecords.flatMap((record) => {
         if (
           record.placeName === "내 방" ||
           record.lat === null ||
@@ -1439,7 +2044,7 @@ export default function DiscoverScreen() {
             id: discoverPostId ?? `mission-record-${record.id}`,
             discoverPostId,
             canLike:
-              Boolean(discoverPostId) && record.visibility === "anonymous",
+              Boolean(discoverPostId) && record.visibility === "nickname",
             canDelete: Boolean(discoverPostId),
             user_id: currentUserId,
             place: record.placeName,
@@ -1451,17 +2056,61 @@ export default function DiscoverScreen() {
             time: record.createdAt
               ? new Date(record.createdAt).toLocaleDateString("ko-KR")
               : "날짜 정보 없음",
-            nick: "내 기록",
+            nick: currentNickname,
             emotion: record.emotion,
             note: record.content,
             likes: record.likes,
-            category:
-              record.category === "미션 기록" ? "기타" : record.category,
+            category: normalizeRecordCategory(
+              record.category,
+              `${record.title} ${record.content}`,
+            ),
+            photo: record.photo,
             real: Boolean(discoverPostId),
           },
         ];
       }),
-    [currentUserId, myRecords],
+    [currentNickname, currentUserId, visibleMyRecords],
+  );
+
+  const focusMyRecordOnMap = useCallback(
+    (record: MyRecordItem) => {
+      const markerId =
+        record.discoverPostId ?? `mission-record-${record.id}`;
+      const bubble = myRecordBubbles.find(
+        (item) => String(item.id) === String(markerId),
+      );
+
+      if (!bubble) {
+        Alert.alert(
+          "지도 위치가 없어요",
+          "이 기록은 방 안 기록이거나 저장된 위치 정보가 없어 지도에서 볼 수 없어요.",
+        );
+        return;
+      }
+
+      const nextCenter = { lat: bubble.lat, lng: bubble.lng };
+      mapCenterRef.current = nextCenter;
+      setMapCenter(nextCenter);
+      setFocusedMyRecordKey(record.key);
+      setSelectedMapBubbleId(String(bubble.id));
+      setActiveBubble(null);
+      setSheetBubble(null);
+
+      mySheetTranslateY.stopAnimation();
+      Animated.spring(mySheetTranslateY, {
+        toValue: MY_SHEET_COLLAPSED_POSITION,
+        useNativeDriver: true,
+        damping: 22,
+        stiffness: 180,
+      }).start();
+
+      // 선택한 기록을 목록의 첫 번째로 올린 뒤,
+      // 다시 시트를 펼쳤을 때 바로 보이도록 스크롤도 맨 위로 맞춥니다.
+      setTimeout(() => {
+        myRecordsListRef.current?.scrollTo({ y: 0, animated: true });
+      }, 40);
+    },
+    [myRecordBubbles, mySheetTranslateY],
   );
 
   const filteredBubbles = useMemo(() => {
@@ -1573,25 +2222,27 @@ export default function DiscoverScreen() {
     ],
   );
 
-  const handleTryMission = async () => {
-    if (!sheetBubble) return;
+  const handleTryMission = async (targetBubble?: DiscoverBubble) => {
+    const bubble = targetBubble ?? sheetBubble;
+    if (!bubble) return;
 
-    if (!sheetBubble.real) {
+    if (!bubble.real) {
       shareMissionToHome({
-        id: sheetBubble.id,
-        title: sheetBubble.mission,
-        desc: sheetBubble.note,
-        instructions: sheetBubble.note,
-        recommendationReason: `${sheetBubble.nick}님이 "${sheetBubble.emotion}"을 느낀 곳이에요`,
+        id: bubble.id,
+        title: bubble.mission,
+        desc: bubble.note,
+        instructions: bubble.note,
+        recommendationReason: `${bubble.nick}님이 "${bubble.emotion}"을 느낀 곳이에요`,
         time: "20분",
         dist: "-",
         cost: "-",
-        cat: sheetBubble.category,
+        cat: bubble.category,
         requiredItems: [],
-        placeLat: sheetBubble.lat,
-        placeLng: sheetBubble.lng,
-        placeName: sheetBubble.place,
+        placeLat: bubble.lat,
+        placeLng: bubble.lng,
+        placeName: bubble.place,
       });
+      setSelectedMapBubbleId(null);
       closeSheet();
       router.push("/");
       return;
@@ -1600,12 +2251,12 @@ export default function DiscoverScreen() {
     setTryingMission(true);
     try {
       const mission = await generateMissionFromPost({
-        content: sheetBubble.note,
-        emotion: sheetBubble.emotion,
-        category: sheetBubble.category,
-        placeLat: sheetBubble.lat,
-        placeLng: sheetBubble.lng,
-        placeName: sheetBubble.place,
+        content: bubble.note,
+        emotion: bubble.emotion,
+        category: bubble.category,
+        placeLat: bubble.lat,
+        placeLng: bubble.lng,
+        placeName: bubble.place,
       });
 
       shareMissionToHome({
@@ -1619,11 +2270,12 @@ export default function DiscoverScreen() {
         cost: mission.estimated_cost === 0 ? "무료" : `${mission.estimated_cost.toLocaleString()}원`,
         cat: mission.category?.name ?? "기타",
         requiredItems: mission.required_items ?? [],
-        placeLat: mission.place_lat ?? sheetBubble.lat,
-        placeLng: mission.place_lng ?? sheetBubble.lng,
-        placeName: mission.place_name ?? sheetBubble.place,
+        placeLat: mission.place_lat ?? bubble.lat,
+        placeLng: mission.place_lng ?? bubble.lng,
+        placeName: mission.place_name ?? bubble.place,
       });
 
+      setSelectedMapBubbleId(null);
       closeSheet();
       router.push("/");
     } catch (error) {
@@ -1636,8 +2288,10 @@ export default function DiscoverScreen() {
     }
   };
 
-  const handleDeletePost = () => {
-    if (!sheetBubble?.discoverPostId) return;
+  const handleDeletePost = (targetBubble?: DiscoverBubble) => {
+    const bubble = targetBubble ?? sheetBubble;
+    if (!bubble?.discoverPostId) return;
+
     Alert.alert("기록을 삭제할까요?", "삭제하면 되돌릴 수 없어요.", [
       { text: "취소", style: "cancel" },
       {
@@ -1646,7 +2300,8 @@ export default function DiscoverScreen() {
         onPress: async () => {
           setDeleting(true);
           try {
-            await deleteDiscoverPost(sheetBubble.discoverPostId!);
+            await deleteDiscoverPost(bubble.discoverPostId!);
+            setSelectedMapBubbleId(null);
             closeSheet();
             if (currentUserId) {
               await loadMyRecords(currentUserId);
@@ -1896,6 +2551,8 @@ export default function DiscoverScreen() {
     }
 
     const effectiveVisibility: RecordVisibility = visibility;
+    const discoverStorageVisibility =
+      effectiveVisibility === "nickname" ? "anonymous" : "private";
     const effectiveCoordinate =
       locationKind === "home"
         ? { lat: 0, lng: 0 }
@@ -1916,7 +2573,7 @@ export default function DiscoverScreen() {
         category,
         content: content.trim(),
         emotion,
-        visibility: effectiveVisibility,
+        visibility: discoverStorageVisibility as any,
         photos: photos.map((photo) => ({
           uri: photo.uri,
           mimeType: photo.mimeType,
@@ -1924,13 +2581,14 @@ export default function DiscoverScreen() {
       });
 
       const { error: metadataError } = await supabase.rpc(
-        "set_latest_discover_post_metadata",
+        "set_latest_discover_post_metadata_v2",
         {
           p_place_name: effectivePlaceName,
           p_content: content.trim(),
           p_title: recordTitle.trim(),
           p_source_kind: "independent",
           p_source_mission_id: null,
+          p_share_mode: effectiveVisibility,
         },
       );
       if (metadataError) {
@@ -1950,13 +2608,13 @@ export default function DiscoverScreen() {
           ]);
         }
         setHomeArchiveTab(
-          effectiveVisibility === "anonymous" ? "shared" : "mine",
+          effectiveVisibility === "nickname" ? "shared" : "mine",
         );
         setActiveFilter("방 안 기록");
         Alert.alert(
           "저장 완료",
-          effectiveVisibility === "anonymous"
-            ? "방 안 기록 공간에 익명으로 공유했어요. 지도에는 표시되지 않아요."
+          effectiveVisibility === "nickname"
+            ? `${currentNickname} 닉네임으로 방 안 기록 공간에 공유했어요. 지도에는 표시되지 않아요.`
             : "내 방 기록에 저장했어요. 다른 사람에게는 보이지 않아요.",
         );
       } else {
@@ -2013,14 +2671,10 @@ export default function DiscoverScreen() {
     ]);
   };
 
-  const handleFilterPress = (nextFilter: string) => {
-    if (nextFilter === activeFilter) {
-      return;
-    }
-
-    closeSheet();
+  const applyFilter = (nextFilter: string) => {
     setActiveFilter(nextFilter);
-    setMapRefreshAvailable(false);
+    setFocusedMyRecordKey(null);
+    setSelectedMapBubbleId(null);
 
     if (nextFilter === "내 기록" && myRecordBubbles.length > 0) {
       const newestRecord = myRecordBubbles[0];
@@ -2030,7 +2684,109 @@ export default function DiscoverScreen() {
     }
   };
 
+  const handleFilterPress = (nextFilter: string) => {
+    if (nextFilter === activeFilter) {
+      if (nextFilter === "방 안 기록") {
+        openHomeSheet();
+      } else if (nextFilter === "내 기록") {
+        openMyRecordsSheet(false);
+      }
+      return;
+    }
 
+    closeSheet();
+    setMapRefreshAvailable(false);
+
+    if (activeFilter === "방 안 기록") {
+      homeSheetTranslateY.stopAnimation();
+      Animated.timing(homeSheetTranslateY, {
+        toValue: HOME_SHEET_CLOSE_POSITION,
+        duration: 220,
+        useNativeDriver: true,
+      }).start(() => applyFilter(nextFilter));
+      return;
+    }
+
+    if (activeFilter === "내 기록") {
+      closeMyRecordsSheet(() => applyFilter(nextFilter));
+      return;
+    }
+
+    applyFilter(nextFilter);
+  };
+
+
+  const handleDiscoverMarkerPress = useCallback(
+    (id: string | number) => {
+      const bubble = filteredBubbles.find(
+        (item) => String(item.id) === String(id),
+      );
+      if (!bubble) return;
+
+      const nextCenter = { lat: bubble.lat, lng: bubble.lng };
+      mapCenterRef.current = nextCenter;
+      setMapCenter(nextCenter);
+      setSelectedMapBubbleId(String(bubble.id));
+      setActiveBubble(null);
+      setSheetBubble(null);
+
+      if (activeFilter === "내 기록") {
+        const matchingRecord = visibleMyRecords.find((record) => {
+          const markerId =
+            record.discoverPostId ?? `mission-record-${record.id}`;
+          return String(markerId) === String(id);
+        });
+
+        if (matchingRecord) {
+          setFocusedMyRecordKey(matchingRecord.key);
+              myRecordsListRef.current?.scrollTo({ y: 0, animated: true });
+        }
+
+        openMyRecordsSheet(false);
+      }
+    },
+    [activeFilter, filteredBubbles, visibleMyRecords],
+  );
+
+  const handleDiscoverMarkerClose = useCallback(() => {
+    setSelectedMapBubbleId(null);
+  }, []);
+
+  const handleDiscoverMarkerAction = useCallback(
+    (id: string | number) => {
+      const bubble = filteredBubbles.find(
+        (item) => String(item.id) === String(id),
+      );
+      if (bubble) {
+        void handleTryMission(bubble);
+      }
+    },
+    [filteredBubbles],
+  );
+
+  const handleDiscoverMarkerLike = useCallback(
+    (id: string | number) => {
+      const bubble = filteredBubbles.find(
+        (item) => String(item.id) === String(id),
+      );
+      if (bubble?.discoverPostId) {
+        void handleToggleLike(bubble.discoverPostId);
+      }
+    },
+    [filteredBubbles, handleToggleLike],
+  );
+
+  const handleDiscoverMarkerDelete = useCallback(
+    (id: string | number) => {
+      const bubble = filteredBubbles.find(
+        (item) => String(item.id) === String(id),
+      );
+      if (bubble) {
+        handleDeletePost(bubble);
+      }
+    },
+    [filteredBubbles],
+  );
 
   return (
     <View style={styles.container}>
@@ -2038,7 +2794,10 @@ export default function DiscoverScreen() {
         latitude={mapCenter.lat}
         longitude={mapCenter.lng}
         userLocation={userLocation}
-        fitAllMarkers={activeFilter === "내 기록"}
+        fitAllMarkers={
+          activeFilter === "내 기록" && !selectedMapBubbleId
+        }
+        selectedMarkerId={selectedMapBubbleId}
         markers={filteredBubbles.map((b) => ({
           id: b.id,
           lat: b.lat,
@@ -2046,12 +2805,38 @@ export default function DiscoverScreen() {
           photo: b.photo,
           count: b.multi ? b.count : undefined,
           category: b.category,
+          cardVariant: "record" as const,
+          title: b.mission,
+          description: b.note,
+          placeName: b.place,
+          recordTime: b.time,
+          nickname: b.nick,
+          emotion: b.emotion,
+          likes: b.likes,
+          liked: Boolean(
+            b.discoverPostId && likedPostIds.includes(b.discoverPostId),
+          ),
+          canLike: Boolean(
+            b.canLike !== false && b.discoverPostId,
+          ),
+          canDelete: Boolean(
+            b.canDelete !== false &&
+              b.discoverPostId &&
+              b.user_id === currentUserId,
+          ),
+          likeDisabled: Boolean(
+            b.discoverPostId && likeUpdatingIds.includes(b.discoverPostId),
+          ),
+          actionLabel: tryingMission ? "미션 만드는 중..." : "나도 해볼래요",
+          actionVariant: "primary" as const,
+          actionDisabled: tryingMission,
         }))}
         onMapIdle={handleMapIdle}
-        onMarkerPress={(id) => {
-          const bubble = filteredBubbles.find((b) => b.id === id);
-          if (bubble) setActiveBubble(bubble);
-        }}
+        onMarkerPress={handleDiscoverMarkerPress}
+        onMarkerClose={handleDiscoverMarkerClose}
+        onMarkerAction={handleDiscoverMarkerAction}
+        onMarkerLike={handleDiscoverMarkerLike}
+        onMarkerDelete={handleDiscoverMarkerDelete}
       />
 
       <View style={styles.topBar}>
@@ -2156,7 +2941,22 @@ export default function DiscoverScreen() {
       </View>
 
       {activeFilter === "방 안 기록" && (
-        <View style={styles.homeArchive}>
+        <Animated.View
+          style={[
+            styles.homeArchiveSheet,
+            {
+              height: HOME_SHEET_HEIGHT,
+              transform: [{ translateY: homeSheetTranslateY }],
+            },
+          ]}
+        >
+          <View
+            style={[styles.homeArchiveDragArea, webDragStyle]}
+            {...homePanResponder.panHandlers}
+          >
+            <View style={styles.handle} />
+          </View>
+          <View style={styles.homeArchiveContent}>
           <View style={styles.homeArchiveHeader}>
             <View>
               <Text style={styles.homeArchiveCaption}>
@@ -2186,7 +2986,7 @@ export default function DiscoverScreen() {
                     styles.homeArchiveTabTextActive,
                 ]}
               >
-                모두의 익명 기록
+                모두의 기록
               </Text>
             </Pressable>
             <Pressable
@@ -2210,8 +3010,8 @@ export default function DiscoverScreen() {
 
           <Text style={styles.homeArchiveGuide}>
             {homeArchiveTab === "shared"
-              ? "익명 공유를 선택한 방 안 기록을 함께 볼 수 있어요."
-              : "나만 보기와 내가 익명으로 공유한 기록을 모아봐요."}
+              ? "닉네임과 함께 공유된 방 안 기록을 볼 수 있어요."
+              : "나만 보기와 내가 닉네임으로 공유한 기록을 모아봐요."}
           </Text>
 
           {homeRecordsLoading ? (
@@ -2235,6 +3035,7 @@ export default function DiscoverScreen() {
             </View>
           ) : (
             <ScrollView
+              style={styles.homeArchiveScroll}
               showsVerticalScrollIndicator={false}
               contentContainerStyle={styles.homeArchiveList}
             >
@@ -2259,10 +3060,12 @@ export default function DiscoverScreen() {
                         {record.isMine
                           ? record.source === "mission"
                             ? "내 미션 기록"
-                            : record.visibility === "anonymous"
-                              ? "내 익명 공유"
-                              : "나만 보기"
-                          : "익명 기록"}
+                            : record.shareMode === "nickname"
+                              ? "내 닉네임 공유"
+                              : "내 공개 기록"
+                          : record.shareMode === "nickname"
+                            ? `${record.nickname}님의 기록`
+                            : "익명 기록"}
                       </Text>
                     </View>
                     {record.source === "discover" && record.isMine ? (
@@ -2305,7 +3108,7 @@ export default function DiscoverScreen() {
                   </Text>
 
                   {record.source === "discover" &&
-                  record.visibility === "anonymous" ? (
+                  record.visibility !== "private" ? (
                     <Pressable
                       onPress={() => void handleToggleLike(record.id)}
                       disabled={likeUpdatingIds.includes(record.id)}
@@ -2330,21 +3133,232 @@ export default function DiscoverScreen() {
               ))}
             </ScrollView>
           )}
-        </View>
+
+          </View>
+        </Animated.View>
       )}
 
       {activeFilter === "내 기록" && (
-        <View pointerEvents="none" style={styles.myRecordsMapSummary}>
-          <Ionicons name="location-outline" size={15} color={BL} />
-          <Text style={styles.myRecordsMapSummaryText}>
-            지도에 표시 가능한 내 기록 {myRecordBubbles.length}개
-          </Text>
-          {myRecords.length > myRecordBubbles.length ? (
-            <Text style={styles.myRecordsMapSummaryMuted}>
-              · 방 안·위치 없는 기록 {myRecords.length - myRecordBubbles.length}개
-            </Text>
-          ) : null}
-        </View>
+        <Animated.View
+          style={[
+            styles.myRecordsSheet,
+            {
+              height: MY_SHEET_HEIGHT,
+              transform: [{ translateY: mySheetTranslateY }],
+            },
+          ]}
+        >
+          <View
+            style={[styles.myRecordsSheetDragArea, webDragStyle]}
+            {...mySheetPanResponder.panHandlers}
+          >
+            <View style={styles.handle} />
+          </View>
+
+          <View style={styles.myRecordsSheetHeader}>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.myRecordsSheetCaption}>지도와 목록으로 모아보기</Text>
+              <Text style={styles.myRecordsSheetTitle}>내 기록</Text>
+            </View>
+            <View style={styles.myRecordsCountBadge}>
+              <Text style={styles.myRecordsCountText}>{visibleMyRecords.length}</Text>
+            </View>
+          </View>
+
+          <View pointerEvents="none" style={styles.myRecordsMapSummary}>
+            {myRecordsLoading ? (
+              <ActivityIndicator size="small" color={BL} />
+            ) : (
+              <>
+                <Ionicons name="location-outline" size={15} color={BL} />
+                <Text style={styles.myRecordsMapSummaryText}>
+                  지도에 표시 가능한 내 기록 {myRecordBubbles.length}개
+                </Text>
+                {visibleMyRecords.length > myRecordBubbles.length ? (
+                  <Text style={styles.myRecordsMapSummaryMuted}>
+                    · 위치 없는 기록 {visibleMyRecords.length - myRecordBubbles.length}개
+                  </Text>
+                ) : null}
+              </>
+            )}
+          </View>
+
+          <View style={styles.myRecordsSectionTabs}>
+            <Animated.View
+              pointerEvents="none"
+              style={[
+                styles.myRecordsSectionIndicator,
+                {
+                  width: MY_RECORD_TAB_INDICATOR_WIDTH,
+                  transform: [
+                    {
+                      translateX: myRecordFilterIndicator.interpolate({
+                        inputRange: [0, 1, 2],
+                        outputRange: [
+                          0,
+                          MY_RECORD_TAB_INDICATOR_WIDTH,
+                          MY_RECORD_TAB_INDICATOR_WIDTH * 2,
+                        ],
+                      }),
+                    },
+                  ],
+                },
+              ]}
+            />
+
+            {([
+              { value: "all" as const, label: "전체", count: myRecordVisibilityCounts.all },
+              { value: "private" as const, label: "나만 보기", count: myRecordVisibilityCounts.private },
+              { value: "nickname" as const, label: "닉네임 공유", count: myRecordVisibilityCounts.nickname },
+            ]).map((option) => {
+              const selected = myRecordVisibilityFilter === option.value;
+
+              return (
+                <Pressable
+                  key={option.value}
+                  onPress={() => changeMyRecordVisibilityFilter(option.value)}
+                  style={({ pressed }) => [
+                    styles.myRecordsSectionTab,
+                    pressed && styles.pressed,
+                  ]}
+                >
+                  <Text
+                    style={[
+                      styles.myRecordsSectionTabText,
+                      selected && styles.myRecordsSectionTabTextSelected,
+                    ]}
+                  >
+                    {option.label}
+                  </Text>
+                  <Text
+                    style={[
+                      styles.myRecordsSectionCount,
+                      selected && styles.myRecordsSectionCountSelected,
+                    ]}
+                  >
+                    {option.count}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </View>
+
+          <Animated.View
+            style={[
+              styles.myRecordsSectionContent,
+              {
+                opacity: myRecordContentAnimation,
+                transform: [
+                  {
+                    translateX: myRecordContentAnimation.interpolate({
+                      inputRange: [0, 1],
+                      outputRange: [10, 0],
+                    }),
+                  },
+                ],
+              },
+            ]}
+          >
+          {myRecordsLoading ? (
+            <View style={styles.myRecordsEmpty}>
+              <ActivityIndicator color={BL} />
+              <Text style={styles.myRecordsEmptyText}>내 기록을 불러오는 중...</Text>
+            </View>
+          ) : visibleMyRecords.length === 0 ? (
+            <View style={styles.myRecordsEmpty}>
+              <Text style={styles.myRecordsEmptyEmoji}>🗺️</Text>
+              <Text style={styles.myRecordsEmptyTitle}>이 분류의 기록이 없어요</Text>
+              <Text style={styles.myRecordsEmptyText}>
+                아래 + 버튼이나 홈의 미션 기록하기에서 경험을 남겨보세요.
+              </Text>
+            </View>
+          ) : (
+            <ScrollView
+              ref={myRecordsListRef}
+              style={styles.myRecordsListScroll}
+              showsVerticalScrollIndicator={false}
+              contentContainerStyle={styles.myRecordsList}
+            >
+              {orderedVisibleMyRecords.map((record) => (
+                <View key={record.key} style={styles.myRecordCard}>
+                  <View style={styles.myRecordCardHeader}>
+                    {record.photo ? (
+                      <Image source={{ uri: record.photo }} style={styles.myRecordCardPhoto} />
+                    ) : (
+                      <View style={styles.myRecordCardIcon}>
+                        <Text style={styles.myRecordCardIconText}>
+                          {getCategoryEmoji(record.category)}
+                        </Text>
+                      </View>
+                    )}
+                    <View style={styles.myRecordCardHeaderText}>
+                      <Text style={styles.myRecordCardDate}>
+                        {record.createdAt
+                          ? new Date(record.createdAt).toLocaleDateString("ko-KR")
+                          : "날짜 정보 없음"}
+                      </Text>
+                      <Text style={styles.myRecordCardVisibility}>
+                        {record.visibility === "nickname"
+                          ? `${currentNickname} · 닉네임 공유`
+                          : "나만 보기"}
+                      </Text>
+                    </View>
+                    {record.placeName !== "내 방" &&
+                    record.lat !== null &&
+                    record.lng !== null &&
+                    Number.isFinite(record.lat) &&
+                    Number.isFinite(record.lng) &&
+                    !(record.lat === 0 && record.lng === 0) ? (
+                      <Pressable
+                        hitSlop={8}
+                        accessibilityRole="button"
+                        accessibilityLabel={`${record.title} 위치를 지도에서 보기`}
+                        onPress={() => focusMyRecordOnMap(record)}
+                        style={({ pressed }) => [
+                          styles.myRecordCardOpen,
+                          focusedMyRecordKey === record.key &&
+                            styles.myRecordCardOpenFocused,
+                          pressed && styles.pressed,
+                        ]}
+                      >
+                        <Ionicons
+                          name={
+                            focusedMyRecordKey === record.key
+                              ? "locate"
+                              : "locate-outline"
+                          }
+                          size={17}
+                          color={
+                            focusedMyRecordKey === record.key ? WH : BL
+                          }
+                        />
+                      </Pressable>
+                    ) : null}
+                  </View>
+
+                  <Text style={styles.myRecordCardTitle}>{record.title}</Text>
+                  <Text style={styles.myRecordCardPlace}>📍 {record.placeName}</Text>
+
+                  <View style={styles.homeRecordTags}>
+                    <View style={styles.homeRecordTag}>
+                      <Text style={styles.homeRecordTagText}>{record.category}</Text>
+                    </View>
+                    {record.emotion ? (
+                      <View style={styles.homeRecordEmotionTag}>
+                        <Text style={styles.homeRecordEmotionText}>{record.emotion}</Text>
+                      </View>
+                    ) : null}
+                  </View>
+
+                  <Text style={styles.homeRecordContent}>
+                    {record.content || "작성한 내용이 없어요."}
+                  </Text>
+                </View>
+              ))}
+            </ScrollView>
+          )}
+          </Animated.View>
+        </Animated.View>
       )}
 
       {sheetBubble && (
@@ -2392,7 +3406,7 @@ export default function DiscoverScreen() {
             <View style={{ flexDirection: "row", gap: 8, marginTop: 8 }}>
               <Pressable
                 style={[styles.primaryBtn, tryingMission && { opacity: 0.6 }]}
-                onPress={handleTryMission}
+                onPress={() => void handleTryMission()}
                 disabled={tryingMission}
               >
                 <Text style={{ color: WH, fontSize: 13, fontWeight: "700" }}>
@@ -2404,7 +3418,7 @@ export default function DiscoverScreen() {
               sheetBubble.user_id === currentUserId ? (
                 <Pressable
                   style={[styles.deleteBtn, deleting && { opacity: 0.6 }]}
-                  onPress={handleDeletePost}
+                  onPress={() => handleDeletePost()}
                   disabled={deleting}
                 >
                   <Text style={{ color: "#EF4444", fontSize: 13, fontWeight: "700" }}>
@@ -2804,7 +3818,7 @@ export default function DiscoverScreen() {
                       내 방의 실제 위치는 저장하지 않아요
                     </Text>
                     <Text style={styles.homePrivacyDesc}>
-                      익명 공유를 선택하면 지도 대신 ‘방 안 기록’ 공간에서
+                      닉네임 공유를 선택하면 지도 대신 ‘방 안 기록’ 공간에서
                       다른 사람에게 보여요.
                     </Text>
                   </View>
@@ -2816,12 +3830,12 @@ export default function DiscoverScreen() {
                   <Text style={[styles.visibilityOptionTitle, visibility === "private" && styles.visibilityOptionTitleSelected]}>나만 보기</Text>
                   <Text style={styles.visibilityOptionDesc}>내 기록에서만 확인해요</Text>
                 </Pressable>
-                <Pressable onPress={() => setVisibility("anonymous")} style={[styles.visibilityOption, visibility === "anonymous" && styles.visibilityOptionSelected]}>
-                  <Text style={[styles.visibilityOptionTitle, visibility === "anonymous" && styles.visibilityOptionTitleSelected]}>익명 공유</Text>
+                <Pressable onPress={() => setVisibility("nickname")} style={[styles.visibilityOption, visibility === "nickname" && styles.visibilityOptionSelected]}>
+                  <Text style={[styles.visibilityOptionTitle, visibility === "nickname" && styles.visibilityOptionTitleSelected]}>닉네임 공유</Text>
                   <Text style={styles.visibilityOptionDesc}>
                     {locationKind === "home"
-                      ? "방 안 기록 공간에 익명으로 공유해요"
-                      : "이름 없이 발견 탭에 공유해요"}
+                      ? "내 닉네임과 함께 방 안 기록 공간에 공유해요"
+                      : "내 닉네임과 함께 발견 탭에 공유해요"}
                   </Text>
                 </Pressable>
               </View>
@@ -2897,7 +3911,33 @@ const styles = StyleSheet.create({
   locationTypeOptionTitle: { marginBottom: 3, fontSize: 14, fontWeight: "800", color: T0 },
   locationTypeOptionDesc: { fontSize: 11, lineHeight: 16, color: T1 },
 
-  homeArchive: { position: "absolute", top: 132, right: 12, bottom: 88, left: 12, zIndex: 8, overflow: "hidden", backgroundColor: "rgba(247,248,250,0.98)", borderRadius: 20, borderWidth: 1, borderColor: "rgba(0,0,0,0.05)" },
+  homeArchiveSheet: {
+    position: "absolute",
+    right: 0,
+    bottom: 0,
+    left: 0,
+    zIndex: 8,
+    elevation: 8,
+    overflow: "hidden",
+    paddingBottom: 88,
+    backgroundColor: "rgba(247,248,250,0.99)",
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    borderWidth: 1,
+    borderBottomWidth: 0,
+    borderColor: "rgba(0,0,0,0.06)",
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: -4 },
+    shadowOpacity: 0.12,
+    shadowRadius: 12,
+  },
+  homeArchiveDragArea: {
+    height: 34,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  homeArchiveContent: { flex: 1 },
+  homeArchiveScroll: { flex: 1 },
   homeArchiveHeader: { paddingHorizontal: 18, paddingTop: 18, paddingBottom: 12, flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
   homeArchiveTabs: { marginHorizontal: 14, padding: 4, flexDirection: "row", backgroundColor: "#ECEEF2", borderRadius: 12 },
   homeArchiveTab: { flex: 1, minHeight: 36, alignItems: "center", justifyContent: "center", borderRadius: 9 },
@@ -3014,23 +4054,56 @@ const styles = StyleSheet.create({
   homeRecordTitle: { marginTop: 2, marginBottom: 8, fontSize: 16, lineHeight: 22, fontWeight: "800", color: T0 },
   archiveLikeButton: { alignSelf: "flex-end", minWidth: 52, minHeight: 34, marginTop: 12, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 5, paddingHorizontal: 11, backgroundColor: PINK_LIGHT, borderRadius: 17 },
   archiveLikeText: { fontSize: 11, fontWeight: "800", color: PINK },
-  myRecordsMapSummary: {
+  myRecordsSheet: {
     position: "absolute",
-    top: 154,
-    left: 16,
-    zIndex: 7,
-    minHeight: 34,
-    maxWidth: "88%",
-    paddingHorizontal: 12,
+    top: MY_SHEET_TOP,
+    right: 0,
+    left: 0,
+    zIndex: 9,
+    overflow: "hidden",
+    backgroundColor: "rgba(247,248,250,0.99)",
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    borderWidth: 1,
+    borderColor: "rgba(0,0,0,0.05)",
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: -3 },
+    shadowOpacity: 0.12,
+    shadowRadius: 12,
+    elevation: 18,
+  },
+  myRecordsSheetDragArea: {
+    height: 36,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  myRecordsSheetHeader: {
+    paddingHorizontal: 18,
+    paddingBottom: 8,
     flexDirection: "row",
     alignItems: "center",
+  },
+  myRecordsSheetCaption: { marginBottom: 2, fontSize: 10, color: T2 },
+  myRecordsSheetTitle: { fontSize: 20, fontWeight: "800", color: T0 },
+  myRecordsCountBadge: {
+    minWidth: 32,
+    height: 32,
+    paddingHorizontal: 8,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: BLL,
+    borderRadius: 16,
+  },
+  myRecordsCountText: { fontSize: 13, fontWeight: "800", color: BL },
+  myRecordsMapSummary: {
+    minHeight: 32,
+    marginHorizontal: 18,
+    paddingHorizontal: 11,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
     backgroundColor: "rgba(255,255,255,0.94)",
-    borderRadius: 17,
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 8,
-    elevation: 3,
+    borderRadius: 16,
   },
   myRecordsMapSummaryText: {
     marginLeft: 5,
@@ -3038,10 +4111,75 @@ const styles = StyleSheet.create({
     fontWeight: "700",
     color: BL,
   },
-  myRecordsMapSummaryMuted: {
-    fontSize: 10,
+  myRecordsMapSummaryMuted: { fontSize: 10, color: T2 },
+  myRecordsSectionTabs: {
+    position: "relative",
+    height: 58,
+    marginTop: 8,
+    marginHorizontal: MY_RECORD_TAB_HORIZONTAL_MARGIN,
+    marginBottom: 8,
+    flexDirection: "row",
+    borderBottomWidth: 1,
+    borderBottomColor: "#ECEEF2",
+  },
+  myRecordsSectionIndicator: {
+    position: "absolute",
+    left: 0,
+    bottom: -1,
+    height: 3,
+    backgroundColor: BL,
+    borderRadius: 2,
+  },
+  myRecordsSectionTab: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  myRecordsSectionTabText: {
+    fontSize: 12,
+    fontWeight: "700",
     color: T2,
   },
+  myRecordsSectionTabTextSelected: { color: BL },
+  myRecordsSectionCount: {
+    marginTop: 3,
+    fontSize: 10,
+    fontWeight: "700",
+    color: T2,
+  },
+  myRecordsSectionCountSelected: { color: BL },
+  myRecordsSectionContent: { flex: 1 },
+  myRecordsListScroll: { flex: 1 },
+  myRecordsList: { paddingHorizontal: 14, paddingBottom: 120 },
+  myRecordsEmpty: {
+    flex: 1,
+    minHeight: 250,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 30,
+  },
+  myRecordsEmptyEmoji: { marginBottom: 10, fontSize: 40 },
+  myRecordsEmptyTitle: { marginBottom: 5, fontSize: 15, fontWeight: "800", color: T0 },
+  myRecordsEmptyText: { marginTop: 8, textAlign: "center", fontSize: 12, lineHeight: 18, color: T2 },
+  myRecordCard: {
+    marginBottom: 11,
+    padding: 15,
+    backgroundColor: WH,
+    borderWidth: 1,
+    borderColor: "rgba(0,0,0,0.06)",
+    borderRadius: 16,
+  },
+  myRecordCardHeader: { marginBottom: 11, flexDirection: "row", alignItems: "center" },
+  myRecordCardPhoto: { width: 42, height: 42, marginRight: 10, borderRadius: 12, backgroundColor: T3 },
+  myRecordCardIcon: { width: 42, height: 42, marginRight: 10, alignItems: "center", justifyContent: "center", backgroundColor: BLL, borderRadius: 12 },
+  myRecordCardIconText: { fontSize: 21 },
+  myRecordCardHeaderText: { flex: 1 },
+  myRecordCardDate: { marginBottom: 2, fontSize: 10, color: T2 },
+  myRecordCardVisibility: { fontSize: 12, fontWeight: "700", color: T0 },
+  myRecordCardOpen: { width: 34, height: 34, alignItems: "center", justifyContent: "center", backgroundColor: BLL, borderRadius: 17 },
+  myRecordCardOpenFocused: { backgroundColor: BL },
+  myRecordCardTitle: { marginBottom: 5, fontSize: 16, lineHeight: 22, fontWeight: "800", color: T0 },
+  myRecordCardPlace: { marginBottom: 9, fontSize: 11, color: T1 },
   myRecordIcon: { width: 36, height: 36, alignItems: "center", justifyContent: "center", backgroundColor: BLL, borderRadius: 12 },
   myRecordPlace: { marginBottom: 10, fontSize: 11, color: T1 },
 

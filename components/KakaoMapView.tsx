@@ -24,6 +24,15 @@ type MapMarker = {
   actionLabel?: string;
   actionVariant?: "primary" | "pink" | "green";
   actionDisabled?: boolean;
+  cardVariant?: "mission" | "record";
+  nickname?: string;
+  emotion?: string;
+  recordTime?: string;
+  likes?: number;
+  liked?: boolean;
+  canLike?: boolean;
+  canDelete?: boolean;
+  likeDisabled?: boolean;
 };
 
 type UserLocation = { lat: number; lng: number } | null;
@@ -43,6 +52,8 @@ type Props = {
   onMarkerPress?: (id: string | number) => void;
   onMarkerClose?: () => void;
   onMarkerAction?: (id: string | number) => void;
+  onMarkerLike?: (id: string | number) => void;
+  onMarkerDelete?: (id: string | number) => void;
   onMapPress?: (lat: number, lng: number) => void;
   onMapIdle?: (lat: number, lng: number, level: number) => void;
   style?: any;
@@ -60,6 +71,8 @@ export function KakaoMapView({
   onMarkerPress,
   onMarkerClose,
   onMarkerAction,
+  onMarkerLike,
+  onMarkerDelete,
   onMapPress,
   onMapIdle,
   style,
@@ -69,7 +82,25 @@ export function KakaoMapView({
   const selectedMarkerKey =
     selectedMarkerId == null ? null : String(selectedMarkerId);
 
-  const markersJson = JSON.stringify(markers);
+  // 좋아요 수/상태는 지도 구조와 분리합니다.
+  // 이 값들까지 HTML source에 포함하면 좋아요를 누를 때마다
+  // WebView가 새 문서로 판단해 지도를 통째로 다시 로드합니다.
+  const markersJson = JSON.stringify(
+    markers.map((marker) => ({
+      ...marker,
+      likes: undefined,
+      liked: undefined,
+      likeDisabled: undefined,
+    })),
+  );
+  const markerStateJson = JSON.stringify(
+    markers.map((marker) => ({
+      id: String(marker.id),
+      likes: Number(marker.likes ?? 0),
+      liked: Boolean(marker.liked),
+      likeDisabled: Boolean(marker.likeDisabled),
+    })),
+  );
   const userLocationJson = JSON.stringify(userLocation);
   const pickedLocationJson = JSON.stringify(pickedLocation);
 
@@ -94,6 +125,21 @@ export function KakaoMapView({
       focusMap();
     }
   }, [focusMap]);
+
+  const syncMarkerStates = useCallback(() => {
+    webViewRef.current?.injectJavaScript(`
+      if (window.updateMarkerStates) {
+        window.updateMarkerStates(${markerStateJson});
+      }
+      true;
+    `);
+  }, [markerStateJson]);
+
+  useEffect(() => {
+    if (mapReadyRef.current) {
+      syncMarkerStates();
+    }
+  }, [syncMarkerStates]);
 
   const html = useMemo(
     () => `
@@ -142,6 +188,7 @@ export function KakaoMapView({
               box-shadow 220ms ease,
               transform 260ms ease;
             will-change: width, min-height, transform;
+            transform: translateX(-50%);
           }
           .mission-marker.photo-marker {
             width: 48px;
@@ -221,7 +268,7 @@ export function KakaoMapView({
             background: #ffffff;
             box-shadow: 0 14px 34px rgba(15,23,42,0.24);
             cursor: default;
-            transform: translateY(50%);
+            transform: translate(-50%, 50%);
             transform-origin: 50% 50%;
           }
 
@@ -388,6 +435,82 @@ export function KakaoMapView({
           .card-action.pink { background: #ec4899; }
           .card-action.green { background: #10b981; }
           .card-action:disabled { opacity: 0.55; cursor: default; }
+          .record-card-photo {
+            width: 100%;
+            height: 138px;
+            margin-top: 10px;
+            object-fit: cover;
+            border-radius: 13px;
+            background: #e4e6ea;
+          }
+          .record-card-meta {
+            margin-top: 6px;
+            color: #9ea3ae;
+            font-size: 10px;
+            line-height: 15px;
+            white-space: normal;
+            overflow-wrap: anywhere;
+          }
+          .record-card-emotion {
+            display: inline-flex;
+            align-items: center;
+            align-self: flex-start;
+            margin-top: 9px;
+            padding: 4px 9px;
+            border-radius: 8px;
+            background: #eef1ff;
+            color: #3d5afe;
+            font-size: 10px;
+            line-height: 14px;
+            font-weight: 800;
+          }
+          .record-card-note {
+            margin-top: 10px;
+            color: #5c5f6a;
+            font-size: 12px;
+            line-height: 19px;
+            white-space: normal;
+            overflow-wrap: anywhere;
+          }
+          .record-card-footer {
+            display: flex;
+            align-items: stretch;
+            gap: 7px;
+            margin-top: 12px;
+          }
+          .record-card-footer .card-action {
+            flex: 1 1 auto;
+            width: auto;
+            margin-top: 0;
+          }
+          .record-card-like,
+          .record-card-delete {
+            min-width: 46px;
+            min-height: 42px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 4px;
+            padding: 0 10px;
+            border: 0;
+            border-radius: 12px;
+            cursor: pointer;
+            -webkit-tap-highlight-color: transparent;
+          }
+          .record-card-like {
+            background: #fce7f3;
+            color: #ec4899;
+            font-size: 12px;
+            font-weight: 850;
+          }
+          .record-card-like:disabled { opacity: 0.55; cursor: default; }
+          .record-card-like-icon { font-size: 16px; line-height: 1; }
+          .record-card-delete {
+            background: #fef2f2;
+            color: #ef4444;
+            font-size: 11px;
+            font-weight: 850;
+          }
         </style>
       </head>
       <body>
@@ -432,6 +555,28 @@ export function KakaoMapView({
 
               const markerEntries = {};
               let selectedMarkerKey = null;
+              let focusSettleTimer = null;
+
+              window.updateMarkerStates = function (states) {
+                const nextStates = Array.isArray(states) ? states : [];
+
+                nextStates.forEach(function (state) {
+                  const entry = markerEntries[String(state.id)];
+                  if (!entry) return;
+
+                  if (entry.likeIcon) {
+                    entry.likeIcon.textContent = state.liked ? '♥' : '♡';
+                  }
+                  if (entry.likeCount) {
+                    entry.likeCount.textContent = String(
+                      Math.max(0, Number(state.likes || 0))
+                    );
+                  }
+                  if (entry.likeButton) {
+                    entry.likeButton.disabled = Boolean(state.likeDisabled);
+                  }
+                });
+              };
 
               const refreshOverlayAnchor = function (entry) {
                 if (!entry) return;
@@ -455,29 +600,51 @@ export function KakaoMapView({
                   return;
                 }
 
-                const numericLat = Number(lat);
-                const numericLng = Number(lng);
-                if (!Number.isFinite(numericLat) || !Number.isFinite(numericLng)) {
-                  return;
-                }
-
-                const target = new kakao.maps.LatLng(numericLat, numericLng);
-
-                if (selectedMarkerKey && map.getLevel() > 4) {
-                  map.setLevel(4, { animate: { duration: 260 } });
-                }
-
-                map.panTo(target);
-
-                // 줌 애니메이션이 끝난 뒤에도 선택 장소 좌표가
-                // 화면의 정확한 중심에 남도록 한 번 더 고정한다.
-                window.setTimeout(function () {
-                  map.setCenter(target);
-                }, 300);
-
                 const selectedEntry = selectedMarkerKey
                   ? markerEntries[selectedMarkerKey]
                   : null;
+                const numericLat = Number(lat);
+                const numericLng = Number(lng);
+
+                // React Native 쪽 mapCenter는 지도 idle 이벤트마다 갱신됩니다.
+                // 카드가 열리는 도중 전달된 중간 중심 좌표를 다시 목표로 사용하면
+                // focus 호출이 연쇄적으로 발생해 지도가 한쪽으로 조금씩 밀릴 수 있습니다.
+                // 선택된 마커가 있으면 항상 마커 자체 좌표를 최종 목표로 사용합니다.
+                const target = selectedEntry
+                  ? selectedEntry.position
+                  : Number.isFinite(numericLat) && Number.isFinite(numericLng)
+                    ? new kakao.maps.LatLng(numericLat, numericLng)
+                    : null;
+
+                if (!target) {
+                  return;
+                }
+
+                if (focusSettleTimer) {
+                  window.clearTimeout(focusSettleTimer);
+                  focusSettleTimer = null;
+                }
+
+                if (map.getLevel() > 4) {
+                  map.setLevel(4, { animate: { duration: 260 } });
+                }
+
+                const currentCenter = map.getCenter();
+                const alreadyCentered =
+                  Math.abs(currentCenter.getLat() - target.getLat()) < 0.0000001 &&
+                  Math.abs(currentCenter.getLng() - target.getLng()) < 0.0000001;
+
+                if (!alreadyCentered) {
+                  map.panTo(target);
+                }
+
+                // 이전 선택에서 예약된 setCenter가 새 선택을 덮어쓰지 않도록
+                // 타이머를 하나만 유지하고, 항상 현재 선택 마커 좌표로 고정합니다.
+                focusSettleTimer = window.setTimeout(function () {
+                  map.setCenter(target);
+                  focusSettleTimer = null;
+                }, 300);
+
                 if (selectedEntry) {
                   selectedEntry.content.classList.remove('selected-marker');
                   void selectedEntry.content.offsetWidth;
@@ -569,6 +736,9 @@ export function KakaoMapView({
 
                 const card = document.createElement('div');
                 card.className = 'marker-card-content';
+                let likeButton = null;
+                let likeIcon = null;
+                let likeCount = null;
 
                 const header = document.createElement('div');
                 header.className = 'card-header';
@@ -585,56 +755,145 @@ export function KakaoMapView({
                 header.appendChild(closeButton);
                 card.appendChild(header);
 
-                appendText(card, 'card-title', m.title || m.label || '미션');
+                if (m.cardVariant === 'record') {
+                  if (m.photo) {
+                    const photo = document.createElement('img');
+                    photo.className = 'record-card-photo';
+                    photo.src = m.photo;
+                    photo.alt = '';
+                    card.appendChild(photo);
+                  }
 
-                if (m.description) {
-                  appendText(card, 'card-description', m.description);
-                }
+                  appendText(card, 'card-title', m.title || m.label || '기록');
 
-                if (m.placeName) {
+                  const recordMeta = [
+                    m.placeName || '장소 정보 없음',
+                    m.recordTime || m.time || '',
+                    m.nickname || ''
+                  ].filter(Boolean).join(' · ');
+                  if (recordMeta) {
+                    appendText(card, 'record-card-meta', recordMeta);
+                  }
+
+                  if (m.emotion) {
+                    appendText(card, 'record-card-emotion', m.emotion);
+                  }
+
                   appendText(
                     card,
-                    'card-place',
-                    (m.locationFlexible ? '✨ ' : '📍 ') + m.placeName
+                    'record-card-note',
+                    m.description || '작성한 내용이 없어요.'
                   );
-                }
 
-                const metrics = document.createElement('div');
-                metrics.className = 'card-metrics';
+                  const footer = document.createElement('div');
+                  footer.className = 'record-card-footer';
 
-                const metricValues = [
-                  ['예상 시간', m.time || '시간 자유'],
-                  ['준비물', m.preparation || '별도 준비물 없음'],
-                  ['비용', m.cost || '정보 없음']
-                ];
-                metricValues.forEach(function (pair) {
-                  const metric = document.createElement('div');
-                  metric.className = 'card-metric';
-                  appendText(metric, 'metric-label', pair[0]);
-                  appendText(metric, 'metric-value', pair[1]);
-                  metrics.appendChild(metric);
-                });
-                card.appendChild(metrics);
+                  if (m.canLike) {
+                    likeButton = document.createElement('button');
+                    likeButton.type = 'button';
+                    likeButton.className = 'record-card-like';
+                    likeButton.disabled = Boolean(m.likeDisabled);
 
-                const reason = document.createElement('div');
-                reason.className = 'card-reason';
-                appendText(reason, 'reason-label', '추천 이유');
-                appendText(reason, 'reason-value', m.recommendationReason || '지금의 취향과 상황에 잘 맞는 경험이에요.');
-                card.appendChild(reason);
+                    likeIcon = document.createElement('span');
+                    likeIcon.className = 'record-card-like-icon';
+                    likeIcon.textContent = m.liked ? '♥' : '♡';
+                    likeButton.appendChild(likeIcon);
 
-                if (m.actionLabel) {
-                  const action = document.createElement('button');
-                  action.type = 'button';
-                  action.className = 'card-action ' + (m.actionVariant || 'primary');
-                  action.textContent = m.actionLabel;
-                  action.disabled = Boolean(m.actionDisabled);
-                  action.addEventListener('click', function (event) {
-                    event.stopPropagation();
-                    if (!action.disabled) {
-                      post({ type: 'markerAction', id: m.id });
-                    }
+                    likeCount = document.createElement('span');
+                    likeCount.textContent = String(Number(m.likes || 0));
+                    likeButton.appendChild(likeCount);
+
+                    likeButton.addEventListener('click', function (event) {
+                      event.stopPropagation();
+                      if (!likeButton.disabled) {
+                        post({ type: 'markerLike', id: m.id });
+                      }
+                    });
+                    footer.appendChild(likeButton);
+                  }
+
+                  if (m.actionLabel) {
+                    const action = document.createElement('button');
+                    action.type = 'button';
+                    action.className = 'card-action ' + (m.actionVariant || 'primary');
+                    action.textContent = m.actionLabel;
+                    action.disabled = Boolean(m.actionDisabled);
+                    action.addEventListener('click', function (event) {
+                      event.stopPropagation();
+                      if (!action.disabled) {
+                        post({ type: 'markerAction', id: m.id });
+                      }
+                    });
+                    footer.appendChild(action);
+                  }
+
+                  if (m.canDelete) {
+                    const deleteButton = document.createElement('button');
+                    deleteButton.type = 'button';
+                    deleteButton.className = 'record-card-delete';
+                    deleteButton.textContent = '삭제';
+                    deleteButton.addEventListener('click', function (event) {
+                      event.stopPropagation();
+                      post({ type: 'markerDelete', id: m.id });
+                    });
+                    footer.appendChild(deleteButton);
+                  }
+
+                  if (footer.childNodes.length > 0) {
+                    card.appendChild(footer);
+                  }
+                } else {
+                  appendText(card, 'card-title', m.title || m.label || '미션');
+
+                  if (m.description) {
+                    appendText(card, 'card-description', m.description);
+                  }
+
+                  if (m.placeName) {
+                    appendText(
+                      card,
+                      'card-place',
+                      (m.locationFlexible ? '✨ ' : '📍 ') + m.placeName
+                    );
+                  }
+
+                  const metrics = document.createElement('div');
+                  metrics.className = 'card-metrics';
+
+                  const metricValues = [
+                    ['예상 시간', m.time || '시간 자유'],
+                    ['준비물', m.preparation || '별도 준비물 없음'],
+                    ['비용', m.cost || '정보 없음']
+                  ];
+                  metricValues.forEach(function (pair) {
+                    const metric = document.createElement('div');
+                    metric.className = 'card-metric';
+                    appendText(metric, 'metric-label', pair[0]);
+                    appendText(metric, 'metric-value', pair[1]);
+                    metrics.appendChild(metric);
                   });
-                  card.appendChild(action);
+                  card.appendChild(metrics);
+
+                  const reason = document.createElement('div');
+                  reason.className = 'card-reason';
+                  appendText(reason, 'reason-label', '추천 이유');
+                  appendText(reason, 'reason-value', m.recommendationReason || '지금의 취향과 상황에 잘 맞는 경험이에요.');
+                  card.appendChild(reason);
+
+                  if (m.actionLabel) {
+                    const action = document.createElement('button');
+                    action.type = 'button';
+                    action.className = 'card-action ' + (m.actionVariant || 'primary');
+                    action.textContent = m.actionLabel;
+                    action.disabled = Boolean(m.actionDisabled);
+                    action.addEventListener('click', function (event) {
+                      event.stopPropagation();
+                      if (!action.disabled) {
+                        post({ type: 'markerAction', id: m.id });
+                      }
+                    });
+                    card.appendChild(action);
+                  }
                 }
 
                 content.appendChild(card);
@@ -651,7 +910,10 @@ export function KakaoMapView({
                   map: map,
                   position: markerPosition,
                   content: content,
-                  xAnchor: 0.5,
+                  // 카드가 34px 아이콘에서 320px 카드로 커질 때 Kakao의
+                  // xAnchor가 이전 너비를 기준으로 계산하지 않도록, 가로 중심은
+                  // CSS translateX(-50%)로 직접 고정합니다.
+                  xAnchor: 0,
                   yAnchor: 1,
                   zIndex: 5,
                 });
@@ -660,6 +922,9 @@ export function KakaoMapView({
                   content: content,
                   overlay: overlay,
                   position: markerPosition,
+                  likeButton: likeButton,
+                  likeIcon: likeIcon,
+                  likeCount: likeCount,
                 };
               });
 
@@ -750,6 +1015,7 @@ export function KakaoMapView({
       }}
       onLoadEnd={() => {
         setTimeout(() => {
+          syncMarkerStates();
           focusMap();
         }, 80);
       }}
@@ -759,6 +1025,7 @@ export function KakaoMapView({
 
           if (data.type === "mapReady") {
             mapReadyRef.current = true;
+            syncMarkerStates();
             focusMap();
           }
           if (data.type === "markerPress" && onMarkerPress) {
@@ -769,6 +1036,12 @@ export function KakaoMapView({
           }
           if (data.type === "markerAction" && onMarkerAction) {
             onMarkerAction(data.id);
+          }
+          if (data.type === "markerLike" && onMarkerLike) {
+            onMarkerLike(data.id);
+          }
+          if (data.type === "markerDelete" && onMarkerDelete) {
+            onMarkerDelete(data.id);
           }
           if (data.type === "mapClick" && onMapPress) {
             onMapPress(data.lat, data.lng);

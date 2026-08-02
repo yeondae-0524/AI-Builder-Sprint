@@ -78,6 +78,7 @@ type MyRecord = {
   content: string | null;
   emotion: string | null;
   recorded_at: string;
+  location_type: "place" | "map" | "home" | null;
 };
 
 type AiKeywordResponse = {
@@ -418,6 +419,7 @@ export default function MyScreen() {
             completedMissionsResult,
             recordsResult,
             completedEssaysResult,
+            discoverPostsResult,
             badgesResult,
             journeyResult,
           ] = await Promise.all([
@@ -439,7 +441,8 @@ export default function MyScreen() {
                 journey_id,
                 content,
                 emotion,
-                recorded_at
+                recorded_at,
+                location_type
                 `,
               )
               .eq("user_id", user.id)
@@ -453,6 +456,11 @@ export default function MyScreen() {
               })
               .eq("user_id", user.id)
               .eq("status", "completed"),
+
+            supabase
+              .from("discover_posts")
+              .select("likes_count, source_kind, source_mission_id")
+              .eq("user_id", user.id),
 
             getMyBadges()
               .then((data) => ({ data, error: null as null }))
@@ -487,6 +495,7 @@ export default function MyScreen() {
             completedMissionsResult.error,
             recordsResult.error,
             completedEssaysResult.error,
+            discoverPostsResult.error,
             badgesResult.error,
             journeyResult.error,
           ].filter(Boolean);
@@ -544,30 +553,34 @@ export default function MyScreen() {
 
           setEarnedBadges(earnedBadgeList);
 
-          const recordIds = records.map((record) => record.id);
-          const discoveredPlaceCount = new Set(
-            records
-              .map((record) => record.place_id)
-              .filter((placeId): placeId is string => Boolean(placeId)),
-          ).size;
+          // 실제 장소에서 완료한 미션 기록의 개수입니다.
+          // 최신 기록은 location_type으로, 이전 기록은 place_id로 보완해 셉니다.
+          const discoveredPlaceCount = records.filter(
+            (record) =>
+              record.location_type === "place" || Boolean(record.place_id),
+          ).length;
 
-          let receivedLikesCount = 0;
+          const myDiscoverPosts = discoverPostsResult.data ?? [];
 
-          if (recordIds.length > 0) {
-            const { count, error: likesError } = await supabase
-              .from("record_likes")
-              .select("id", {
-                count: "exact",
-                head: true,
-              })
-              .in("record_id", recordIds);
+          // records에는 홈에서 완료한 미션 기록이 들어갑니다.
+          // 여기에 발견 탭에서 미션 없이 직접 작성한 독립 기록을 더해
+          // MY의 ‘기록 경험’에 사용자의 모든 기록 개수를 표시합니다.
+          // source_kind가 없는 예전 독립 기록도 source_mission_id가 없다면 포함합니다.
+          const independentDiscoverRecordCount = myDiscoverPosts.filter(
+            (post) =>
+              post.source_kind !== "mission" &&
+              !post.source_mission_id,
+          ).length;
+          const totalExperienceRecordCount =
+            records.length + independentDiscoverRecordCount;
 
-            if (likesError) {
-              console.error("받은 좋아요 조회 실패:", likesError.message);
-            } else {
-              receivedLikesCount = count ?? 0;
-            }
-          }
+          // 발견 탭에 작성한 내 기록들이 받은 좋아요를 모두 합산합니다.
+          // discover_post_likes 트리거가 유지하는 likes_count를 사용하므로
+          // 방 안 기록과 지도 기록을 포함한 실제 표시값과 동일합니다.
+          const receivedLikesCount = myDiscoverPosts.reduce(
+            (sum, post) => sum + Math.max(0, Number(post.likes_count ?? 0)),
+            0,
+          );
 
           if (!isMounted) {
             return;
@@ -580,7 +593,7 @@ export default function MyScreen() {
             },
             {
               label: "기록 경험",
-              value: String(records.length),
+              value: String(totalExperienceRecordCount),
             },
             {
               label: "발견 장소",
