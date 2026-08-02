@@ -264,6 +264,7 @@ export default function EssayScreen() {
                   title: "",
                   content: "",
                   summary: "",
+                  aiSummary: "",
                   verdict: "",
                   insights: [],
                   aiRecommendation: "",
