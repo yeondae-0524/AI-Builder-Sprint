@@ -538,10 +538,27 @@ export default function EssayScreen() {
     }, [loadData]),
   );
 
+  // 여정 기간에 따라 책등 폭을 3단계로 나눈다.
+  // 1주 여정 < 2주 여정 < 한 달 여정 순으로 두꺼워진다.
   const getBookSpineWidth = (durationDays: number) => {
     if (durationDays >= 30) return 68;
-    if (durationDays >= 14) return 54;
+    if (durationDays >= 14) return 56;
     return 44;
+  };
+
+  // 렌더링할 때마다 높이가 바뀌지 않도록 essay id를 이용해
+  // 152~178px 범위 안에서 책마다 고정된 높이를 만든다.
+  const getStableBookSpineHeight = (essayId: string) => {
+    let hash = 0;
+
+    for (let index = 0; index < essayId.length; index += 1) {
+      hash = (hash * 31 + essayId.charCodeAt(index)) | 0;
+    }
+
+    const MIN_HEIGHT = 152;
+    const HEIGHT_RANGE = 27;
+
+    return MIN_HEIGHT + (Math.abs(hash) % HEIGHT_RANGE);
   };
 
   const shelves = useMemo<CompletedEssay[][]>(() => {
@@ -1179,6 +1196,7 @@ export default function EssayScreen() {
                   <View style={styles.shelfBookRow}>
                     {shelfItems.map((item: CompletedEssay) => {
                       const width = getBookSpineWidth(item.durationDays);
+                      const height = getStableBookSpineHeight(item.id);
                       const theme = COLORS.bookThemes[item.themeIndex];
 
                       return (
@@ -1189,6 +1207,7 @@ export default function EssayScreen() {
                             styles.bookSpine,
                             {
                               width,
+                              height,
                               backgroundColor: theme.bg,
                               borderColor: theme.line,
                             },
@@ -1774,7 +1793,6 @@ const styles = StyleSheet.create({
   },
 
   bookSpine: {
-    height: 165,
     borderRadius: 4,
     borderWidth: 1.5,
     paddingVertical: 10,

@@ -28,9 +28,9 @@ import { supabase } from "../../lib/supabase";
 import {
   createDiscoverPost,
   deleteDiscoverPost,
-  generateMissionFromPost,
   getDiscoverPhotoUrl,
   getNearbyDiscoverPosts,
+  getOriginalMissionFromDiscoverPost,
 } from "../../services/service_missons";
 
 const BL = "#315C4A";
@@ -185,6 +185,7 @@ type DiscoverBubble = {
   lng: number;
   mission: string;
   sourceKind: "independent" | "mission";
+  sourceMissionId?: string | null;
   time: string;
   nick: string;
   emotion: string;
@@ -338,7 +339,13 @@ async function buildBubbleList(posts: any[]): Promise<DiscoverBubble[]> {
   }
 
   const postIds = mapPosts.map((post) => String(post?.id ?? "")).filter(Boolean);
-  const metadataById = new Map<string, { title: string; sourceKind: "independent" | "mission"; authorNickname: string; shareMode: "anonymous" | "nickname" }>();
+  const metadataById = new Map<string, {
+    title: string;
+    sourceKind: "independent" | "mission";
+    sourceMissionId: string | null;
+    authorNickname: string;
+    shareMode: "anonymous" | "nickname";
+  }>();
 
   if (postIds.length > 0) {
     const { data: metadataRows, error: metadataError } = await supabase.rpc("get_discover_post_display_metadata", { p_post_ids: postIds });
@@ -347,6 +354,10 @@ async function buildBubbleList(posts: any[]): Promise<DiscoverBubble[]> {
         metadataById.set(String(row.id), {
           title: String(row.title ?? "").trim(),
           sourceKind: row.source_kind === "mission" ? "mission" : "independent",
+          sourceMissionId:
+            row.source_mission_id
+              ? String(row.source_mission_id)
+              : null,
           authorNickname: String(row.author_nickname ?? "").trim() || "사용자",
           shareMode: row.share_mode === "nickname" ? "nickname" : "anonymous",
         });
@@ -383,6 +394,9 @@ async function buildBubbleList(posts: any[]): Promise<DiscoverBubble[]> {
         lng: Number(p.lng),
         mission: title,
         sourceKind: metadata?.sourceKind || (p.source_kind === "mission" ? "mission" : "independent"),
+        sourceMissionId:
+          metadata?.sourceMissionId ??
+          (p.source_mission_id ? String(p.source_mission_id) : null),
         time: new Date(p.created_at).toLocaleDateString("ko-KR"),
         nick: metadata?.shareMode === "nickname" ? metadata.authorNickname : "익명",
         emotion: EMOTION_LABEL[p.emotion] ?? String(p.emotion ?? ""),
@@ -1250,35 +1264,95 @@ export default function DiscoverScreen() {
     const bubble = targetBubble ?? sheetBubble;
     if (!bubble) return;
 
-    if (!bubble.real) {
-      shareMissionToHome({
-        id: bubble.id, title: bubble.mission, desc: bubble.note, instructions: bubble.note,
-        recommendationReason: `${bubble.nick}님이 "${bubble.emotion}"을 느낀 곳이에요`,
-        time: "20분", dist: "-", cost: "-", cat: bubble.category, requiredItems: [],
-        placeLat: bubble.lat, placeLng: bubble.lng, placeName: bubble.place,
-      });
-      setSelectedMapBubbleId(null); closeSheet(); router.push("/"); return;
+    if (
+      !bubble.real ||
+      !bubble.discoverPostId ||
+      bubble.sourceKind !== "mission" ||
+      !bubble.sourceMissionId
+    ) {
+      Alert.alert(
+        "가져올 미션이 없어요",
+        "이 기록은 원본 미션과 연결되어 있지 않아 홈으로 가져올 수 없어요.",
+      );
+      return;
     }
 
     setTryingMission(true);
     try {
-      const mission = await generateMissionFromPost({
-        content: bubble.note, emotion: bubble.emotion, category: bubble.category,
-        placeLat: bubble.lat, placeLng: bubble.lng, placeName: bubble.place,
-      });
+      const mission = await getOriginalMissionFromDiscoverPost(
+        bubble.discoverPostId,
+      );
+
+      const normalizedPlaceName = String(
+        mission.place_name ?? "",
+      )
+        .replace(/\s+/g, "")
+        .toLowerCase();
+      const isAtHome = normalizedPlaceName === "내방";
+      const isLocationFlexible =
+        !isAtHome &&
+        (normalizedPlaceName === "어디서나가능" ||
+          (mission.requires_place === false &&
+            !mission.place_name &&
+            mission.place_lat == null &&
+            mission.place_lng == null));
+      const fixedPlaceName =
+        mission.place_name ?? bubble.place;
+      const placeLat =
+        mission.place_lat ??
+        (!isAtHome && !isLocationFlexible ? bubble.lat : null);
+      const placeLng =
+        mission.place_lng ??
+        (!isAtHome && !isLocationFlexible ? bubble.lng : null);
 
       shareMissionToHome({
-        id: mission.id, title: mission.title, desc: mission.short_description, instructions: mission.instructions,
-        recommendationReason: mission.recommendation_reason ?? "",
-        time: mission.estimated_duration_min ? `${mission.estimated_duration_min}분` : "-", dist: "-",
-        cost: mission.estimated_cost === 0 ? "무료" : `${mission.estimated_cost.toLocaleString()}원`,
-        cat: mission.category?.name ?? "기타", requiredItems: mission.required_items ?? [],
-        placeLat: mission.place_lat ?? bubble.lat, placeLng: mission.place_lng ?? bubble.lng, placeName: mission.place_name ?? bubble.place,
+        id: mission.id,
+        title: mission.title,
+        desc: mission.short_description,
+        instructions: mission.instructions,
+        recommendationReason:
+          mission.recommendation_reason ?? "",
+        durationMinutes: mission.estimated_duration_min,
+        time: mission.estimated_duration_min
+          ? `${mission.estimated_duration_min}분`
+          : "시간 자유",
+        dist: isAtHome
+          ? "내 방"
+          : isLocationFlexible
+            ? "어디서나 가능"
+            : "거리 정보 없음",
+        cost:
+          mission.estimated_cost === 0
+            ? "무료"
+            : "유료",
+        cat: mission.category?.name ?? bubble.category ?? "기타",
+        requiredItems: mission.required_items ?? [],
+        placeId: mission.place_id ?? undefined,
+        placeLat:
+          placeLat == null ? undefined : placeLat,
+        placeLng:
+          placeLng == null ? undefined : placeLng,
+        placeName: isAtHome
+          ? "내 방"
+          : isLocationFlexible
+            ? "어디서나 가능"
+            : fixedPlaceName,
+        placeAddress: mission.place_address ?? undefined,
+        requiresPlace: mission.requires_place ?? undefined,
+        isAtHome,
+        isLocationFlexible,
       });
 
-      setSelectedMapBubbleId(null); closeSheet(); router.push("/");
+      setSelectedMapBubbleId(null);
+      closeSheet();
+      router.push("/");
     } catch (error) {
-      Alert.alert("미션 생성 실패", error instanceof Error ? error.message : "");
+      Alert.alert(
+        "미션 가져오기 실패",
+        error instanceof Error
+          ? error.message
+          : "원본 미션을 불러오지 못했어요.",
+      );
     } finally {
       setTryingMission(false);
     }
@@ -1561,7 +1635,14 @@ export default function DiscoverScreen() {
           canLike: Boolean(b.canLike !== false && b.discoverPostId),
           canDelete: Boolean(b.canDelete !== false && b.discoverPostId && b.user_id === currentUserId),
           likeDisabled: Boolean(b.discoverPostId && likeUpdatingIds.includes(b.discoverPostId)),
-          actionLabel: tryingMission ? "미션 만드는 중..." : "나도 해볼래요", actionVariant: "primary" as const, actionDisabled: tryingMission,
+          actionLabel:
+            b.sourceKind === "mission" && b.sourceMissionId
+              ? tryingMission
+                ? "미션 가져오는 중..."
+                : "나도 해볼래요"
+              : undefined,
+          actionVariant: "primary" as const,
+          actionDisabled: tryingMission,
         }))}
         onMapIdle={handleMapIdle}
         onMarkerPress={handleDiscoverMarkerPress}
@@ -1866,11 +1947,29 @@ export default function DiscoverScreen() {
             <Text style={styles.note}>{sheetBubble.note}</Text>
 
             <View style={{ flexDirection: "row", gap: 8, marginTop: 8 }}>
-              <Pressable style={[styles.primaryBtn, tryingMission && { opacity: 0.6 }]} onPress={() => void handleTryMission()} disabled={tryingMission}>
-                <Text style={{ color: T0, fontSize: 13, fontWeight: "800" }}>
-                  {tryingMission ? "미션 만드는 중..." : "나도 해볼래요"}
-                </Text>
-              </Pressable>
+              {sheetBubble.sourceKind === "mission" &&
+              sheetBubble.sourceMissionId ? (
+                <Pressable
+                  style={[
+                    styles.primaryBtn,
+                    tryingMission && { opacity: 0.6 },
+                  ]}
+                  onPress={() => void handleTryMission()}
+                  disabled={tryingMission}
+                >
+                  <Text
+                    style={{
+                      color: T0,
+                      fontSize: 13,
+                      fontWeight: "800",
+                    }}
+                  >
+                    {tryingMission
+                      ? "미션 가져오는 중..."
+                      : "나도 해볼래요"}
+                  </Text>
+                </Pressable>
+              ) : null}
               {sheetBubble.canDelete !== false && sheetBubble.discoverPostId && sheetBubble.user_id === currentUserId ? (
                 <Pressable style={[styles.deleteBtn, deleting && { opacity: 0.6 }]} onPress={() => handleDeletePost()} disabled={deleting}>
                   <Text style={{ color: "#D43B30", fontSize: 13, fontWeight: "800" }}>
