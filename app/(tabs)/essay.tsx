@@ -60,7 +60,7 @@ type PersonaType =
   | "record_detective"
   | "entertainment_pd";
 
-type PersonaPickerMode = "start" | "regenerate" | "restart" | null;
+type PersonaPickerMode = "start" | "regenerate" | null;
 
 type JourneyStatus = "active" | "completed_pending_essay" | "completed" | "finished" | "cancelled";
 
@@ -85,6 +85,7 @@ type JourneyRecordItem = {
   emotion: string;
   content: string;
   photoUrls: string[];
+  photoPaths: string[];
 };
 
 type ComicPanel = {
@@ -104,6 +105,7 @@ type DraftEssay = {
   dateRangeText: string;
   durationDays: number;
   coverImage: string | null;
+  coverSourcePath: string | null;
   title: string;
   content: string;
   summary: string;
@@ -244,7 +246,6 @@ export default function EssayScreen() {
   const [finishing, setFinishing] = useState(false);
 
   const [writerModalVisible, setPersonaWriterModalVisible] = useState(false);
-  const [editingEssayId, setEditingEssayId] = useState<string | null>(null);
   const [personaPickerVisible, setPersonaPickerVisible] = useState(false);
   const [personaPickerMode, setPersonaPickerMode] =
     useState<PersonaPickerMode>(null);
@@ -316,11 +317,12 @@ export default function EssayScreen() {
                 return Number(a.sort_order ?? 0) - Number(b.sort_order ?? 0);
               });
 
+            const photoPaths = photos
+              .map((photo: any) => String(photo.storage_path ?? "").trim())
+              .filter(Boolean);
             const photoUrls = (
               await Promise.all(
-                photos.map(async (photo: any) => {
-                  const path = String(photo.storage_path ?? "");
-                  if (!path) return null;
+                photoPaths.map(async (path: string) => {
                   const { data, error } = await supabase.storage
                     .from("record-photos")
                     .createSignedUrl(path, 3600);
@@ -340,26 +342,41 @@ export default function EssayScreen() {
               emotion: r.emotion ?? "",
               content: r.content ?? "",
               photoUrls,
+              photoPaths,
             };
           }),
         );
 
         setRawRecords(items);
 
-        if ((j.status === "completed_pending_essay" || j.status === "completed") && items.length > 0) {
+        const canCreateEssay =
+          j.target_record_count > 0 && uniqueDays >= j.target_record_count;
+
+        if (canCreateEssay && items.length > 0) {
+          const firstPhotoRecord = items.find(
+            (item) => item.photoUrls.length > 0 && item.photoPaths.length > 0,
+          );
+
           setDraftEssay((prev) =>
             prev && prev.journeyTitle === j.title
-              ? prev
+              ? {
+                  ...prev,
+                  records: items,
+                  coverImage:
+                    prev.coverImage ?? firstPhotoRecord?.photoUrls[0] ?? null,
+                  coverSourcePath:
+                    prev.coverSourcePath ?? firstPhotoRecord?.photoPaths[0] ?? null,
+                }
               : {
                   journeyTitle: j.title,
                   goal: j.goal ?? undefined,
                   dateRangeText: `${j.start_date} ~ ${j.end_date}`,
                   durationDays: j.duration_days,
-                  coverImage: null,
+                  coverImage: firstPhotoRecord?.photoUrls[0] ?? null,
+                  coverSourcePath: firstPhotoRecord?.photoPaths[0] ?? null,
                   title: "",
                   content: "",
                   summary: "",
-                  aiSummary: "",
                   verdict: "",
                   insights: [],
                   aiRecommendation: "",
@@ -368,29 +385,45 @@ export default function EssayScreen() {
                   records: items,
                 },
           );
-        } else if (j.status !== "completed_pending_essay" && j.status !== "completed") {
+        } else {
           setDraftEssay(null);
         }
       }
 
       const { data: essayRows } = await supabase
         .from("essays")
-        .select("id, title, content, created_at, journey_id, cover_photo_path, selected_payload, generation_count")
+        .select("id, title, content, created_at, journey_id, cover_photo_path, selected_payload, generation_count, status")
         .eq("user_id", user.id)
         .order("created_at", { ascending: false });
 
-      setEssayJourneyIds(new Set((essayRows ?? []).map((row: any) => row.journey_id)));
+      const completedEssayRows = (essayRows ?? []).filter(
+        (row: any) =>
+          row.status === "completed" &&
+          String(row.content ?? "").trim().length > 0,
+      );
+
+      setEssayJourneyIds(
+        new Set(completedEssayRows.map((row: any) => row.journey_id)),
+      );
 
       const parsed: CompletedEssay[] = await Promise.all(
-        (essayRows ?? []).map(async (row: any, idx: number) => {
+        completedEssayRows.map(async (row: any, idx: number) => {
           const payload = row.selected_payload ?? {};
           let coverImage: string | null = null;
 
           if (row.cover_photo_path) {
-            const { data } = supabase.storage
+            const { data: signedCover } = await supabase.storage
               .from("essay-covers")
-              .getPublicUrl(row.cover_photo_path);
-            coverImage = data.publicUrl;
+              .createSignedUrl(String(row.cover_photo_path), 3600);
+
+            if (signedCover?.signedUrl) {
+              coverImage = signedCover.signedUrl;
+            } else {
+              const { data: publicCover } = supabase.storage
+                .from("essay-covers")
+                .getPublicUrl(String(row.cover_photo_path));
+              coverImage = publicCover.publicUrl;
+            }
           }
 
           const parsedInsights = Array.isArray(payload.insights)
@@ -648,7 +681,7 @@ export default function EssayScreen() {
 
   const openWriter = () => {
     if (!draftEssay) {
-      Alert.alert("에세이 준비 실패", "집필할 여정 정보를 불러오지 못했습니다.");
+      Alert.alert("에세이 준비 실패", "목표 기록 수를 채운 여정 정보를 불러오지 못했습니다.");
       return;
     }
 
@@ -657,51 +690,15 @@ export default function EssayScreen() {
       return;
     }
 
-    setEditingEssayId(null);
     setPersonaPickerMode("start");
     setPersonaPickerVisible(true);
   };
 
-  const openCompletedEssayRegeneration = () => {
-    if (!journey) {
-      Alert.alert("에세이 준비 실패", "완료한 여정 정보를 찾지 못했습니다.");
-      return;
-    }
-
-    const existingEssay = essays.find(
-      (essay) => essay.journeyId === journey.id,
-    );
-
-    if (!existingEssay) {
-      Alert.alert("에세이 준비 실패", "다시 만들 에세이를 찾지 못했습니다.");
-      return;
-    }
-
-    if (rawRecords.length === 0) {
-      Alert.alert("에세이 준비 실패", "에세이에 담을 기록이 없습니다.");
-      return;
-    }
-
-    setEditingEssayId(existingEssay.id);
-    setDraftEssay({
-      journeyTitle: journey.title,
-      goal: journey.goal ?? existingEssay.journeyGoal,
-      dateRangeText:
-        existingEssay.dateRangeText || `${journey.start_date} ~ ${journey.end_date}`,
-      durationDays: existingEssay.durationDays || journey.duration_days,
-      coverImage: existingEssay.coverImage ?? null,
-      title: existingEssay.title,
-      content: existingEssay.content,
-      summary: existingEssay.summary,
-      verdict: existingEssay.verdict,
-      insights: existingEssay.insights,
-      aiRecommendation: existingEssay.aiRecommendation,
-      comic: existingEssay.comic,
-      persona: existingEssay.persona,
-      records: rawRecords,
-    });
-    setPersonaPickerMode("restart");
-    setPersonaPickerVisible(true);
+  const closeWriter = () => {
+    if (finishing) return;
+    setPersonaPickerVisible(false);
+    setPersonaPickerMode(null);
+    setPersonaWriterModalVisible(false);
   };
 
   const handleSelectPersona = async (persona: PersonaType) => {
@@ -711,7 +708,7 @@ export default function EssayScreen() {
     setPersonaPickerVisible(false);
     setPersonaPickerMode(null);
 
-    if (mode === "start" || mode === "restart") {
+    if (mode === "start") {
       setPersonaWriterModalVisible(true);
     }
 
@@ -750,8 +747,18 @@ export default function EssayScreen() {
 
       if (uploadError) throw uploadError;
 
-      const { data: publicUrlData } = supabase.storage.from("essay-covers").getPublicUrl(path);
-      setDraftEssay({ ...draftEssay, coverImage: publicUrlData.publicUrl });
+      const { data: signedCover } = await supabase.storage
+        .from("essay-covers")
+        .createSignedUrl(path, 3600);
+      const fallbackPublicUrl = supabase.storage
+        .from("essay-covers")
+        .getPublicUrl(path).data.publicUrl;
+
+      setDraftEssay({
+        ...draftEssay,
+        coverImage: signedCover?.signedUrl ?? fallbackPublicUrl,
+        coverSourcePath: null,
+      });
     } catch (error) {
       Alert.alert("사진 저장 실패", error instanceof Error ? error.message : "");
     } finally {
@@ -761,7 +768,45 @@ export default function EssayScreen() {
 
   const handleRemoveCoverPhoto = () => {
     if (!draftEssay) return;
-    setDraftEssay({ ...draftEssay, coverImage: null });
+    setDraftEssay({
+      ...draftEssay,
+      coverImage: null,
+      coverSourcePath: null,
+    });
+  };
+
+  const resolveEssayCoverPath = async (userId: string) => {
+    if (!draftEssay?.coverImage) return null;
+
+    const existingEssayCoverPath =
+      draftEssay.coverImage.split("/essay-covers/")[1]?.split("?")[0] ?? null;
+    if (existingEssayCoverPath) return decodeURIComponent(existingEssayCoverPath);
+
+    if (!draftEssay.coverSourcePath) return null;
+
+    const response = await fetch(draftEssay.coverImage);
+    if (!response.ok) {
+      throw new Error("기록 사진을 에세이 표지로 불러오지 못했습니다.");
+    }
+
+    const arrayBuffer = await response.arrayBuffer();
+    const extension =
+      draftEssay.coverSourcePath.split(".").pop()?.toLowerCase() || "jpg";
+    const safeExtension = extension === "jpeg" ? "jpg" : extension;
+    const path = `${userId}/${journey?.id ?? "journey"}-${Date.now()}.${safeExtension}`;
+    const contentType = safeExtension === "jpg"
+      ? "image/jpeg"
+      : `image/${safeExtension}`;
+
+    const { error } = await supabase.storage
+      .from("essay-covers")
+      .upload(path, arrayBuffer, {
+        contentType,
+        upsert: true,
+      });
+
+    if (error) throw error;
+    return path;
   };
 
   // 🚀 에세이 집필 완료 → 실제 DB 저장
@@ -769,13 +814,13 @@ export default function EssayScreen() {
     if (!draftEssay || !journey) return;
 
     if (!draftEssay.title || !draftEssay.content) {
-      Alert.alert("아직 완성되지 않았어요", "먼저 AI 역할을 선택해 에세이를 생성해주세요.");
+      Alert.alert("아직 완성되지 않았어요", "먼저 AI 역할을 선택해 분석 글을 생성해주세요.");
       return;
     }
 
     Alert.alert(
       "에세이 집필 완료",
-      "완료 후에는 더 이상 에세이를 수정할 수 없습니다.\n집필을 완료하고 책장에 꽂으시겠습니까?",
+      "책장에 꽂은 뒤에는 같은 여정으로 다시 만들 수 없습니다.\n현재 분석 결과로 완료하시겠습니까?",
       [
         { text: "취소", style: "cancel" },
         {
@@ -786,10 +831,7 @@ export default function EssayScreen() {
               const { data: { user } } = await supabase.auth.getUser();
               if (!user) throw new Error("로그인이 필요합니다.");
 
-              const coverPath = draftEssay.coverImage
-                ? draftEssay.coverImage.split("/essay-covers/")[1] ?? null
-                : null;
-
+              const coverPath = await resolveEssayCoverPath(user.id);
               const selectedPayload = {
                 persona: draftEssay.persona,
                 summary: draftEssay.summary,
@@ -800,82 +842,86 @@ export default function EssayScreen() {
                 goal: draftEssay.goal ?? null,
                 dateRangeText: draftEssay.dateRangeText,
                 durationDays: draftEssay.durationDays,
+                sourcePhotoCount: draftEssay.records.reduce(
+                  (count, record) => count + record.photoUrls.length,
+                  0,
+                ),
               };
 
-              if (editingEssayId) {
-                const previousGenerationCount =
-                  essays.find((essay) => essay.id === editingEssayId)
-                    ?.generationCount ?? 1;
+              const { data: insertedEssay, error: insertError } = await supabase
+                .from("essays")
+                .insert({
+                  user_id: user.id,
+                  journey_id: journey.id,
+                  title: draftEssay.title,
+                  content: draftEssay.content,
+                  cover_photo_path: coverPath,
+                  visibility: "private",
+                  status: "completed",
+                  essay_type: "taste_report",
+                  generation_count: 1,
+                  selected_version_no: 1,
+                  generation_state: "idle",
+                  published_at: null,
+                  selected_payload: selectedPayload,
+                })
+                .select("id")
+                .single();
 
-                const { error: updateError } = await supabase
-                  .from("essays")
-                  .update({
-                    title: draftEssay.title,
-                    content: draftEssay.content,
-                    cover_photo_path: coverPath,
-                    visibility: "private",
-                    status: "completed",
-                    essay_type: "taste_report",
-                    generation_count: previousGenerationCount + 1,
-                    selected_version_no: 1,
-                    generation_state: "idle",
-                    generation_started_at: null,
-                    published_at: null,
-                    selected_payload: selectedPayload,
-                  })
-                  .eq("id", editingEssayId)
-                  .eq("user_id", user.id);
+              if (insertError) throw insertError;
 
-                if (updateError) throw updateError;
-              } else {
-                const { error: insertError } = await supabase
-                  .from("essays")
-                  .insert({
-                    user_id: user.id,
-                    journey_id: journey.id,
-                    title: draftEssay.title,
-                    content: draftEssay.content,
-                    cover_photo_path: coverPath,
-                    visibility: "private",
-                    status: "completed",
-                    essay_type: "taste_report",
-                    generation_count: 1,
-                    selected_version_no: 1,
-                    generation_state: "idle",
-                    published_at: null,
-                    selected_payload: selectedPayload,
-                  });
+              const { error: essayItemsError } = await supabase
+                .from("essay_items")
+                .insert(
+                  draftEssay.records.map((record, index) => ({
+                    essay_id: insertedEssay.id,
+                    record_id: record.id,
+                    sort_order: index,
+                    ai_bridge_text: "",
+                  })),
+                );
 
-                if (insertError) throw insertError;
+              if (essayItemsError) {
+                await supabase.from("essays").delete().eq("id", insertedEssay.id);
+                throw new Error(
+                  `에세이와 원본 기록을 연결하지 못했습니다: ${essayItemsError.message}`,
+                );
               }
 
-              const wasRegenerated = Boolean(editingEssayId);
+              const { error: journeyCompleteError } = await supabase.rpc(
+                "complete_journey_after_essay",
+                {
+                  p_journey_id: journey.id,
+                  p_essay_id: insertedEssay.id,
+                },
+              );
+
+              if (journeyCompleteError) {
+                throw new Error(
+                  `에세이는 저장됐지만 여정 종료에 실패했습니다: ${journeyCompleteError.message}`,
+                );
+              }
+
               setPersonaWriterModalVisible(false);
-              setEditingEssayId(null);
+              setPersonaPickerVisible(false);
+              setPersonaPickerMode(null);
               setDraftEssay(null);
               await loadData();
 
               Alert.alert(
-                wasRegenerated ? "에세이를 다시 만들었어요!" : "집필 완료!",
-                wasRegenerated
-                  ? "새로 선택한 AI의 관점으로 기존 에세이를 교체했어요."
-                  : "완결된 에세이가 서재 책꽂이 맨 앞자리에 들어갔습니다. 📚",
+                "집필 완료!",
+                "선택한 분석 결과가 서재에 저장되고 여정이 종료됐습니다. 📚",
               );
-              } catch (error) {
-                const message =
-                  error instanceof Error
-                    ? error.message
-                    : typeof error === "object" && error !== null && "message" in error
-                      ? String((error as any).message)
-                      : JSON.stringify(error);
-                console.error("에세이 저장 실패 상세:", error);
-                Alert.alert("저장 실패", message);
-              } finally {
-                setFinishing(false);
-              }
+            } catch (error) {
+              const message = getErrorMessage(error, "에세이를 저장하지 못했습니다.");
+              console.error("에세이 저장 실패 상세:", error);
+              Alert.alert("저장 실패", message);
+            } finally {
+              setFinishing(false);
+            }
           },
         },
-      ]
+      ],
     );
   };
 
@@ -894,13 +940,89 @@ export default function EssayScreen() {
   const progressPercent = Math.min(Math.round((completedDayCount / targetCount) * 100), 100);
 
   const hasEssayForJourney = journey ? essayJourneyIds.has(journey.id) : false;
-  const isPendingEssay =
-    (journey?.status === "completed_pending_essay" || journey?.status === "completed") &&
-    !hasEssayForJourney;
-  const isFinished =
-    (journey?.status === "completed_pending_essay" || journey?.status === "completed") &&
-    hasEssayForJourney;
-  const isJourneyActive = journey?.status === "active";
+  const hasReachedEssayTarget =
+    Boolean(journey) && targetCount > 0 && completedDayCount >= targetCount;
+  const isPendingEssay = hasReachedEssayTarget && !hasEssayForJourney;
+  const isFinished = hasEssayForJourney;
+  const isJourneyActive = journey?.status === "active" && !hasReachedEssayTarget;
+
+  const renderPersonaPickerCard = () => (
+    <View style={styles.personaPopupCard}>
+      <View style={styles.personaPopupHeader}>
+        <View style={styles.personaPopupHeaderText}>
+          <Text style={styles.personaPopupTitle}>
+            {personaPickerMode === "start"
+              ? "내 기록을 누구에게 맡길까요?"
+              : "이번에는 누가 다시 분석할까요?"}
+          </Text>
+          <Text style={styles.personaPopupSub}>
+            같은 기록도 AI의 관점에 따라 서로 다른 성향 분석이 나와요.
+          </Text>
+        </View>
+        <Pressable onPress={closePersonaPicker} hitSlop={10} disabled={generating}>
+          <Ionicons name="close" size={22} color={COLORS.textMain} />
+        </Pressable>
+      </View>
+
+      <View style={{ gap: 10 }}>
+        <Pressable
+          style={styles.personaSelectItem}
+          onPress={() => void handleSelectPersona("emotion_interpreter")}
+        >
+          <View style={styles.personaIconCircle}>
+            <Ionicons name="chatbubble-ellipses-outline" size={20} color={COLORS.primary} />
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.personaSelectTitle}>감정 통역사</Text>
+            <Text style={styles.personaSelectSub}>감정이 편안해지거나 움츠러드는 조건을 분석해요.</Text>
+          </View>
+          <Ionicons name="chevron-forward" size={18} color={COLORS.textMuted} />
+        </Pressable>
+
+        <Pressable
+          style={styles.personaSelectItem}
+          onPress={() => void handleSelectPersona("strict_teacher")}
+        >
+          <View style={styles.personaIconCircle}>
+            <Ionicons name="school-outline" size={20} color={COLORS.primary} />
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.personaSelectTitle}>팩트 폭격 담임</Text>
+            <Text style={styles.personaSelectSub}>목표와 실제 행동의 차이를 근거로 짚어요.</Text>
+          </View>
+          <Ionicons name="chevron-forward" size={18} color={COLORS.textMuted} />
+        </Pressable>
+
+        <Pressable
+          style={styles.personaSelectItem}
+          onPress={() => void handleSelectPersona("record_detective")}
+        >
+          <View style={styles.personaIconCircle}>
+            <Ionicons name="finger-print-outline" size={20} color={COLORS.primary} />
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.personaSelectTitle}>기록 탐정</Text>
+            <Text style={styles.personaSelectSub}>여러 기록을 연결해 반복되는 선택 패턴을 추리해요.</Text>
+          </View>
+          <Ionicons name="chevron-forward" size={18} color={COLORS.textMuted} />
+        </Pressable>
+
+        <Pressable
+          style={styles.personaSelectItem}
+          onPress={() => void handleSelectPersona("entertainment_pd")}
+        >
+          <View style={styles.personaIconCircle}>
+            <Ionicons name="videocam-outline" size={20} color={COLORS.primary} />
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.personaSelectTitle}>인생 예능 PD</Text>
+            <Text style={styles.personaSelectSub}>행동 성향을 분석하고 웃픈 장면은 4컷으로 편집해요.</Text>
+          </View>
+          <Ionicons name="chevron-forward" size={18} color={COLORS.textMuted} />
+        </Pressable>
+      </View>
+    </View>
+  );
 
   return (
     <SafeAreaView style={styles.safeArea} edges={["top"]}>
@@ -925,19 +1047,11 @@ export default function EssayScreen() {
             <Text style={styles.journeyLabel}>✨ 에세이가 완성되었습니다!</Text>
             <Text style={styles.journeyTitle}>완성된 분석이 서재에 저장됐어요 🌿</Text>
             <Text style={[styles.progressDescription, { marginTop: 6, marginBottom: 16 }]}>
-              결과가 마음에 들지 않으면 같은 기록을 다른 AI의 관점으로 다시 분석할 수 있어요.
+              이 여정의 에세이는 확정됐어요. 새로운 분석은 다음 여정에서 만들 수 있어요.
             </Text>
 
             <Pressable
               style={styles.startWritingBtn}
-              onPress={openCompletedEssayRegeneration}
-            >
-              <Ionicons name="sparkles-outline" size={18} color={COLORS.primary} />
-              <Text style={styles.startWritingBtnText}>다른 AI로 다시 분석하기</Text>
-            </Pressable>
-
-            <Pressable
-              style={[styles.startWritingBtn, styles.secondaryJourneyButton]}
               onPress={() => router.push("/(tabs)/calendar")}
             >
               <Ionicons name="calendar-outline" size={18} color={COLORS.primary} />
@@ -946,10 +1060,10 @@ export default function EssayScreen() {
           </View>
         ) : isPendingEssay ? (
           <View style={[styles.journeyCard, { backgroundColor: COLORS.woodMain }]}>
-            <Text style={styles.journeyLabel}>🎉 여정이 정상적으로 끝났습니다!</Text>
+            <Text style={styles.journeyLabel}>🎉 목표 기록 수를 모두 채웠습니다!</Text>
             <Text style={styles.journeyTitle}>에세이 집필하기</Text>
             <Text style={[styles.progressDescription, { marginTop: 4, marginBottom: 14 }]}>
-              수집된 기록을 바탕으로 AI가 나의 감정과 행동 성향을 분석해요.
+              여정은 아직 진행 중이며, 에세이를 책장에 꽂는 순간 종료돼요. 저장 전에는 다른 AI로 다시 분석할 수 있어요.
             </Text>
 
             <Pressable
@@ -1070,15 +1184,20 @@ export default function EssayScreen() {
       <Modal
         visible={writerModalVisible}
         animationType="slide"
-        onRequestClose={() => setPersonaWriterModalVisible(false)}
+        presentationStyle="fullScreen"
+        statusBarTranslucent={false}
+        onRequestClose={closeWriter}
       >
-        <SafeAreaView style={{ flex: 1, backgroundColor: "#F9F7F1" }}>
+        <SafeAreaView
+          style={styles.writerSafeArea}
+          edges={["top", "bottom"]}
+        >
           {draftEssay && (
             <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 60 }}>
               
               <View style={styles.screenHeaderBar}>
                 <Pressable
-                  onPress={() => setPersonaWriterModalVisible(false)}
+                  onPress={closeWriter}
                   hitSlop={20}
                   style={styles.backButtonTouch}
                 >
@@ -1095,7 +1214,7 @@ export default function EssayScreen() {
                   <View style={[styles.editorCoverImage, styles.editorCoverPlaceholder]}>
                     <Ionicons name="image-outline" size={30} color={COLORS.textMuted} />
                     <Text style={{ color: COLORS.textMuted, fontSize: 12, marginTop: 6 }}>
-                      사진이나 동영상을 추가해주세요
+                      기록 사진이 있으면 자동으로 대표 사진이 들어가요
                     </Text>
                   </View>
                 )}
@@ -1121,6 +1240,15 @@ export default function EssayScreen() {
                   </Pressable>
                 )}
               </View>
+
+              {draftEssay.records.some((record) => record.photoUrls.length > 0) ? (
+                <Text style={styles.sourcePhotoNotice}>
+                  기록에 담긴 사진 {draftEssay.records.reduce(
+                    (count, record) => count + record.photoUrls.length,
+                    0,
+                  )}장이 에세이 원본 자료에 포함돼요.
+                </Text>
+              ) : null}
 
               <View style={{ paddingHorizontal: 20, paddingTop: 16 }}>
                 <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
@@ -1265,73 +1393,29 @@ export default function EssayScreen() {
               </View>
             </ScrollView>
           )}
+
+          {personaPickerVisible ? (
+            <View style={styles.writerPersonaOverlay}>
+              <Pressable
+                style={styles.modalBackdrop}
+                onPress={closePersonaPicker}
+              />
+              {renderPersonaPickerCard()}
+            </View>
+          ) : null}
         </SafeAreaView>
       </Modal>
 
-      {/* 🎭 이번에는 누가 읽어볼까요? */}
+      {/* 🎭 집필 시작 전 AI 선택 */}
       <Modal
-        visible={personaPickerVisible}
+        visible={personaPickerVisible && !writerModalVisible}
         transparent
         animationType="fade"
         onRequestClose={closePersonaPicker}
       >
         <View style={styles.modalOverlay}>
           <Pressable style={styles.modalBackdrop} onPress={closePersonaPicker} />
-          <View style={styles.personaPopupCard}>
-            <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 16 }}>
-              <View>
-                <Text style={styles.personaPopupTitle}>
-                  {personaPickerMode === "start"
-                    ? "내 기록을 누구에게 맡길까요?"
-                    : personaPickerMode === "restart"
-                      ? "어떤 AI로 다시 분석할까요?"
-                      : "이번에는 누가 읽어볼까요?"}
-                </Text>
-                <Text style={styles.personaPopupSub}>같은 기록도 AI의 관점에 따라 서로 다른 성향 분석이 나와요.</Text>
-              </View>
-              <Pressable onPress={closePersonaPicker} hitSlop={10} disabled={generating}>
-                <Ionicons name="close" size={22} color={COLORS.textMain} />
-              </Pressable>
-            </View>
-
-            <View style={{ gap: 10 }}>
-              <Pressable style={styles.personaSelectItem} onPress={() => void handleSelectPersona("emotion_interpreter")}>
-                <View style={styles.personaIconCircle}><Ionicons name="chatbubble-ellipses-outline" size={20} color={COLORS.primary} /></View>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.personaSelectTitle}>감정 통역사</Text>
-                  <Text style={styles.personaSelectSub}>기록 속 마음의 움직임을 다정한 언어로 정리해요.</Text>
-                </View>
-                <Ionicons name="chevron-forward" size={18} color={COLORS.textMuted} />
-              </Pressable>
-
-              <Pressable style={styles.personaSelectItem} onPress={() => void handleSelectPersona("strict_teacher")}>
-                <View style={styles.personaIconCircle}><Ionicons name="school-outline" size={20} color={COLORS.primary} /></View>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.personaSelectTitle}>팩트 폭격 담임</Text>
-                  <Text style={styles.personaSelectSub}>목표와 실제 행동이 어긋난 부분을 솔직하게 짚어요.</Text>
-                </View>
-                <Ionicons name="chevron-forward" size={18} color={COLORS.textMuted} />
-              </Pressable>
-
-              <Pressable style={styles.personaSelectItem} onPress={() => void handleSelectPersona("record_detective")}>
-                <View style={styles.personaIconCircle}><Ionicons name="finger-print-outline" size={20} color={COLORS.primary} /></View>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.personaSelectTitle}>기록 탐정</Text>
-                  <Text style={styles.personaSelectSub}>기록 속 단서를 연결해 숨은 행동 패턴을 추리해요.</Text>
-                </View>
-                <Ionicons name="chevron-forward" size={18} color={COLORS.textMuted} />
-              </Pressable>
-
-              <Pressable style={styles.personaSelectItem} onPress={() => void handleSelectPersona("entertainment_pd")}>
-                <View style={styles.personaIconCircle}><Ionicons name="videocam-outline" size={20} color={COLORS.primary} /></View>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.personaSelectTitle}>인생 예능 PD</Text>
-                  <Text style={styles.personaSelectSub}>여정의 웃픈 명장면을 4컷 웹툰으로 편집해요.</Text>
-                </View>
-                <Ionicons name="chevron-forward" size={18} color={COLORS.textMuted} />
-              </Pressable>
-            </View>
-          </View>
+          {renderPersonaPickerCard()}
         </View>
       </Modal>
 
@@ -1416,8 +1500,10 @@ const styles = StyleSheet.create({
   },
 
   header: {
+    width: "100%",
     flexDirection: "row",
     alignItems: "center",
+    justifyContent: "space-between",
     marginBottom: 22,
   },
   headerTextArea: {
@@ -1439,14 +1525,17 @@ const styles = StyleSheet.create({
     letterSpacing: -0.8,
   },
   headerDescription: {
+    flexShrink: 1,
     color: COLORS.textSub,
     fontSize: 14,
+    lineHeight: 20,
     marginTop: 7,
   },
   headerIcon: {
     flexShrink: 0,
     width: 54,
     height: 54,
+    marginLeft: 10,
     borderRadius: 18,
     backgroundColor: "#E1E9E3",
     alignItems: "center",
@@ -1683,6 +1772,10 @@ const styles = StyleSheet.create({
     textAlign: "center",
   },
 
+  writerSafeArea: {
+    flex: 1,
+    backgroundColor: "#F9F7F1",
+  },
   screenHeaderBar: {
     minHeight: 56,
     paddingHorizontal: 16,
@@ -1742,6 +1835,13 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: "700",
     color: "#DC2626",
+  },
+  sourcePhotoNotice: {
+    marginTop: 8,
+    paddingHorizontal: 20,
+    fontSize: 11,
+    lineHeight: 16,
+    color: COLORS.textMuted,
   },
   personaBadgeTag: {
     flexDirection: "row",
@@ -1927,12 +2027,32 @@ const styles = StyleSheet.create({
   modalBackdrop: {
     ...StyleSheet.absoluteFillObject,
   },
+  writerPersonaOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 50,
+    elevation: 50,
+    paddingHorizontal: 20,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(38, 55, 46, 0.55)",
+  },
   personaPopupCard: {
     width: "100%",
     maxWidth: 420,
     backgroundColor: "#FBF9F3",
     borderRadius: 22,
     padding: 20,
+  },
+  personaPopupHeader: {
+    marginBottom: 16,
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "flex-start",
+  },
+  personaPopupHeaderText: {
+    flex: 1,
+    minWidth: 0,
+    paddingRight: 12,
   },
   personaPopupTitle: {
     fontSize: 18,

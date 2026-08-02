@@ -39,6 +39,7 @@ import {
   getMissionById,
   getRecommendedMissions,
 } from "../../services/challenge.service";
+import { createDiscoverPost } from "../../services/service_missons";
 
 const BL = "#315C4A";
 const BLL = "#E5EEE8";
@@ -94,7 +95,7 @@ type CategoryName = (typeof CATEGORIES)[number];
 type CostStatus = "무료" | "유료" | "유료/무료";
 type SheetSection = "active" | "recommended" | "records";
 type ListKind = "active" | "recommended" | "record";
-type RecordVisibility = "private" | "anonymous";
+type RecordVisibility = "private" | "nickname";
 type EmotionValue =
   | "comfortable"
   | "joyful"
@@ -132,6 +133,8 @@ type Coordinate = {
   lat: number;
   lng: number;
 };
+
+type RecordLocationKind = "place" | "map" | "home";
 
 type LngLat = [number, number];
 type DistrictPolygon = LngLat[][];
@@ -231,7 +234,7 @@ type CompletedRecord = {
   missionId: string;
   content: string;
   emotion: EmotionValue;
-  visibility: RecordVisibility | "nickname";
+  visibility: RecordVisibility;
   recordedAt: string;
   photoUrls: string[];
   locationLat: number | null;
@@ -3022,6 +3025,16 @@ export default function HomeScreen() {
   >([]);
   const [recordLocation, setRecordLocation] =
     useState<Coordinate | null>(null);
+  const [recordLocationKind, setRecordLocationKind] =
+    useState<RecordLocationKind | null>(null);
+  const [recordPlaceCandidates, setRecordPlaceCandidates] =
+    useState<PlaceCandidate[]>([]);
+  const [recordSelectedPlace, setRecordSelectedPlace] =
+    useState<PlaceCandidate | null>(null);
+  const [recordPlaceSearch, setRecordPlaceSearch] =
+    useState("");
+  const [recordPlacesLoading, setRecordPlacesLoading] =
+    useState(false);
   const [recordSaving, setRecordSaving] =
     useState(false);
   const [recordDetail, setRecordDetail] =
@@ -3031,6 +3044,22 @@ export default function HomeScreen() {
     pendingSharedMission,
     clearPendingSharedMission,
   } = useMission();
+
+  const visibleRecordPlaceCandidates = useMemo(() => {
+    const query = normalizeComparableText(recordPlaceSearch);
+
+    if (!query) {
+      return recordPlaceCandidates.slice(0, 30);
+    }
+
+    return recordPlaceCandidates
+      .filter((place) =>
+        normalizeComparableText(
+          `${place.name} ${place.address ?? ""} ${place.districtName ?? ""}`,
+        ).includes(query),
+      )
+      .slice(0, 30);
+  }, [recordPlaceCandidates, recordPlaceSearch]);
 
   const locationRequested = useRef(false);
   const recommendationsInitialized = useRef(false);
@@ -3495,7 +3524,6 @@ export default function HomeScreen() {
         .eq("user_id", user.id)
         .eq("status", "active")
         .lte("start_date", todayKey)
-        .gte("end_date", todayKey)
         .order("created_at", { ascending: false })
         .limit(1)
         .maybeSingle());
@@ -3750,9 +3778,8 @@ export default function HomeScreen() {
             missionId,
             content: String(record.content ?? ""),
             emotion: record.emotion as EmotionValue,
-            visibility: record.visibility as
-              | RecordVisibility
-              | "nickname",
+            visibility:
+              record.visibility === "private" ? "private" : "nickname",
             recordedAt: String(record.recorded_at),
             photoUrls,
             locationLat: toFiniteNumber(record.location_latitude),
@@ -4560,6 +4587,11 @@ export default function HomeScreen() {
     setRecordDate(latestDate);
     setRecordPhotos([]);
     setRecordLocation(null);
+    setRecordLocationKind(null);
+    setRecordPlaceCandidates([]);
+    setRecordSelectedPlace(null);
+    setRecordPlaceSearch("");
+    setRecordPlacesLoading(false);
   };
 
   const closeRecordModal = (force = false) => {
@@ -4574,6 +4606,64 @@ export default function HomeScreen() {
     setRecordDate(toDateKey(new Date()));
     setRecordPhotos([]);
     setRecordLocation(null);
+    setRecordLocationKind(null);
+    setRecordPlaceCandidates([]);
+    setRecordSelectedPlace(null);
+    setRecordPlaceSearch("");
+    setRecordPlacesLoading(false);
+  };
+
+  const loadRecordPlaceCandidates = async () => {
+    if (recordPlacesLoading) return;
+
+    try {
+      setRecordPlacesLoading(true);
+      const center =
+        userLocation ?? recommendationCenter ?? DEFAULT_CENTER;
+      const places = await fetchPlaceCandidates({
+        // 과거에 방문한 장소도 찾을 수 있도록 현재 반경으로 제한하지 않는다.
+        center: null,
+        radiusKm: 10,
+        district: null,
+        districtPolygons: [],
+      });
+
+      const sorted = [...places].sort((left, right) => {
+        const leftDistance = haversineDistanceKm(center, {
+          lat: left.latitude,
+          lng: left.longitude,
+        });
+        const rightDistance = haversineDistanceKm(center, {
+          lat: right.latitude,
+          lng: right.longitude,
+        });
+        return leftDistance - rightDistance;
+      });
+
+      setRecordPlaceCandidates(sorted);
+    } catch (error) {
+      console.error("기록 장소 목록 조회 실패:", error);
+      Alert.alert(
+        "장소를 불러오지 못했어요",
+        getErrorMessage(
+          error,
+          "잠시 후 다시 시도하거나 ‘길 위·야외’를 선택해주세요.",
+        ),
+      );
+    } finally {
+      setRecordPlacesLoading(false);
+    }
+  };
+
+  const chooseRecordLocationKind = (kind: RecordLocationKind) => {
+    setRecordLocationKind(kind);
+    setRecordLocation(null);
+    setRecordSelectedPlace(null);
+    setRecordPlaceSearch("");
+
+    if (kind === "place" && recordPlaceCandidates.length === 0) {
+      void loadRecordPlaceCandidates();
+    }
   };
 
   const addRecordPhotos = (
@@ -4804,13 +4894,71 @@ export default function HomeScreen() {
       return;
     }
 
-    if (recordMission.isLocationFlexible && !recordLocation) {
+    if (recordMission.isLocationFlexible && !recordLocationKind) {
       Alert.alert(
         "수행 위치를 선택해주세요",
+        "실제 장소, 길 위·야외, 내 방 중 하나를 골라주세요.",
+      );
+      return;
+    }
+
+    if (
+      recordMission.isLocationFlexible &&
+      recordLocationKind === "place" &&
+      !recordSelectedPlace
+    ) {
+      Alert.alert(
+        "장소를 선택해주세요",
+        "목록에서 실제로 미션을 수행한 장소를 골라주세요.",
+      );
+      return;
+    }
+
+    if (
+      recordMission.isLocationFlexible &&
+      recordLocationKind === "map" &&
+      !recordLocation
+    ) {
+      Alert.alert(
+        "위치를 선택해주세요",
         "지도에서 미션을 수행한 위치를 한 번 눌러주세요.",
       );
       return;
     }
+
+    const selectedPlaceId = recordMission.isLocationFlexible
+      ? recordLocationKind === "place" &&
+        recordSelectedPlace &&
+        isUuid(recordSelectedPlace.id)
+        ? recordSelectedPlace.id
+        : null
+      : attempt.placeId;
+
+    const selectedCoordinate: Coordinate | null =
+      recordMission.isLocationFlexible
+        ? recordLocationKind === "place" && recordSelectedPlace
+          ? {
+              lat: recordSelectedPlace.latitude,
+              lng: recordSelectedPlace.longitude,
+            }
+          : recordLocationKind === "map"
+            ? recordLocation
+            : null
+        : isFiniteNumber(recordMission.placeLat) &&
+            isFiniteNumber(recordMission.placeLng)
+          ? {
+              lat: recordMission.placeLat,
+              lng: recordMission.placeLng,
+            }
+          : null;
+
+    const selectedPlaceName = recordMission.isLocationFlexible
+      ? recordLocationKind === "place"
+        ? recordSelectedPlace?.name ?? "선택한 장소"
+        : recordLocationKind === "map"
+          ? "길 위의 기록"
+          : "내 방"
+      : recordMission.placeName ?? "미션 수행 장소";
 
     try {
       setRecordSaving(true);
@@ -4836,16 +4984,10 @@ export default function HomeScreen() {
           p_emotion: recordEmotion,
           p_content: recordContent.trim(),
           p_visibility: recordVisibility,
-          p_place_id: attempt.placeId,
+          p_place_id: selectedPlaceId,
           p_recorded_at: recordDate,
-          p_location_latitude:
-            recordMission.isLocationFlexible
-              ? recordLocation?.lat ?? null
-              : null,
-          p_location_longitude:
-            recordMission.isLocationFlexible
-              ? recordLocation?.lng ?? null
-              : null,
+          p_location_latitude: selectedCoordinate?.lat ?? null,
+          p_location_longitude: selectedCoordinate?.lng ?? null,
         },
       ));
 
@@ -4855,6 +4997,34 @@ export default function HomeScreen() {
       if (!createdRecordId) {
         throw new Error(
           "생성된 기록 ID를 확인하지 못했습니다.",
+        );
+      }
+
+      const savedLocationType: RecordLocationKind =
+        recordMission.isLocationFlexible
+          ? (recordLocationKind as RecordLocationKind)
+          : recordMission.isAtHome
+            ? "home"
+            : "place";
+      const savedLocationName =
+        savedLocationType === "map"
+          ? "거리"
+          : savedLocationType === "home"
+            ? "내 방"
+            : selectedPlaceName;
+
+      const { error: locationMetadataError } =
+        await retrySupabaseResultOnJwt(() =>
+          supabase.rpc("set_record_location_metadata", {
+            p_record_id: String(createdRecordId),
+            p_location_type: savedLocationType,
+            p_location_name: savedLocationName,
+          }),
+        );
+
+      if (locationMetadataError) {
+        throw new Error(
+          `수행 위치 정보를 저장하지 못했습니다: ${getErrorMessage(locationMetadataError, "알 수 없는 오류")}`,
         );
       }
 
@@ -4874,13 +5044,59 @@ export default function HomeScreen() {
         }
       }
 
+      let discoverWarning = "";
+
+      if (recordVisibility === "nickname") {
+        try {
+          await createDiscoverPost({
+            placeName: savedLocationName,
+            lat: selectedCoordinate?.lat ?? 0,
+            lng: selectedCoordinate?.lng ?? 0,
+            category: recordMission.cat,
+            content: recordContent.trim(),
+            emotion: recordEmotion as EmotionValue,
+            // 주변 공개 조회는 기존 anonymous 값을 사용하고,
+            // 실제 표시 방식은 share_mode=nickname 메타데이터로 구분한다.
+            visibility: "anonymous",
+            photos: recordPhotos.map((photo) => ({
+              uri: photo.uri,
+              mimeType: photo.mimeType,
+            })),
+          });
+
+          const { error: discoverMetadataError } =
+            await retrySupabaseResultOnJwt(() =>
+              supabase.rpc("set_latest_discover_post_metadata_v2", {
+                p_place_name: savedLocationName,
+                p_content: recordContent.trim(),
+                p_title: recordMission.title,
+                p_source_kind: "mission",
+                p_source_mission_id: isUuid(recordMission.id)
+                  ? recordMission.id
+                  : null,
+                p_share_mode: "nickname",
+              }),
+            );
+
+          if (discoverMetadataError) {
+            throw new Error(
+              `발견 기록의 미션 정보를 저장하지 못했습니다: ${getErrorMessage(discoverMetadataError, "알 수 없는 오류")}`,
+            );
+          }
+        } catch (discoverError) {
+          console.error("발견 탭 닉네임 공유 실패:", discoverError);
+          discoverWarning =
+            "\n\n기록은 저장됐지만 발견 탭 닉네임 공유에는 실패했어요.";
+        }
+      }
+
       closeRecordModal(true);
       await loadJourneyAndAttempts();
       changeSection("records");
 
       Alert.alert(
         "기록 완료",
-        `${formatDateKeyKorean(recordDate)}의 경험이 여정에 저장됐어요.${photoWarning}`,
+        `${formatDateKeyKorean(recordDate)}의 경험이 여정에 저장됐어요.${photoWarning}${discoverWarning}`,
       );
     } catch (error) {
       console.error("기록 저장 실패:", error);
@@ -6009,60 +6225,243 @@ export default function HomeScreen() {
                 </Pressable>
               </View>
 
-              {recordMission?.isLocationFlexible ? (
-                <View style={styles.recordLocationSection}>
-                  <View style={styles.recordLocationHeader}>
-                    <View style={styles.recordLocationHeaderText}>
-                      <Text style={styles.recordFieldLabel}>
-                        미션 수행 위치
-                      </Text>
-                      <Text style={styles.recordLocationHelp}>
-                        지도의 원하는 곳을 누르면 그 위치가 기록에 저장돼요.
+              {recordMission ? (
+                <View style={styles.recordMissionReminder}>
+                  <View style={styles.recordMissionReminderTop}>
+                    <View style={styles.recordMissionReminderIcon}>
+                      <Text style={styles.recordMissionReminderEmoji}>
+                        {getCategoryEmoji(recordMission.cat)}
                       </Text>
                     </View>
-                    <Pressable
-                      onPress={() => {
-                        if (userLocation) {
-                          setRecordLocation(userLocation);
-                        } else {
-                          Alert.alert(
-                            "현재 위치를 확인할 수 없어요",
-                            "위치 권한을 허용한 뒤 다시 시도해주세요.",
-                          );
-                        }
-                      }}
-                      style={styles.recordCurrentLocationButton}
-                    >
-                      <Text style={styles.recordCurrentLocationButtonText}>
-                        현재 위치 찍기
+                    <View style={styles.recordMissionReminderText}>
+                      <Text style={styles.recordMissionReminderLabel}>
+                        지금 기록하는 미션
                       </Text>
-                    </Pressable>
+                      <Text style={styles.recordMissionReminderTitle}>
+                        {recordMission.title}
+                      </Text>
+                    </View>
                   </View>
-
-                  <View style={styles.recordLocationMapWrapper}>
-                    <RecordLocationPickerMap
-                      center={
-                        recordLocation ??
-                        userLocation ??
-                        recommendationCenter ??
-                        DEFAULT_CENTER
-                      }
-                      pickedLocation={recordLocation}
-                      onSelect={setRecordLocation}
-                    />
-                  </View>
-
-                  <Text
-                    style={[
-                      styles.recordLocationStatus,
-                      recordLocation &&
-                        styles.recordLocationStatusSelected,
-                    ]}
-                  >
-                    {recordLocation
-                      ? `선택 완료 · ${recordLocation.lat.toFixed(5)}, ${recordLocation.lng.toFixed(5)}`
-                      : "아직 위치를 선택하지 않았어요."}
+                  <Text style={styles.recordMissionReminderDescription}>
+                    {recordMission.instructions ||
+                      recordMission.desc ||
+                      "미션 안내에 따라 경험을 돌아보며 기록해주세요."}
                   </Text>
+                  <View style={styles.recordMissionReminderMetaRow}>
+                    <Text style={styles.recordMissionReminderMeta}>
+                      ⏱ {recordMission.time}
+                    </Text>
+                    <Text style={styles.recordMissionReminderMeta}>
+                      🎒 {getPreparationText(recordMission)}
+                    </Text>
+                  </View>
+                </View>
+              ) : null}
+
+              {recordMission?.isLocationFlexible ? (
+                <View style={styles.recordLocationSection}>
+                  <Text style={styles.recordFieldLabel}>
+                    미션 수행 위치
+                  </Text>
+                  <Text style={styles.recordLocationHelp}>
+                    실제 장소, 길 위·야외, 내 방 중 어디에서 했는지 선택해주세요.
+                  </Text>
+
+                  <View style={styles.recordLocationKindRow}>
+                    {[
+                      { value: "place" as const, emoji: "📍", label: "실제 장소" },
+                      { value: "map" as const, emoji: "🗺️", label: "길 위·야외" },
+                      { value: "home" as const, emoji: "🏠", label: "내 방" },
+                    ].map((option, index) => {
+                      const selected = recordLocationKind === option.value;
+                      return (
+                        <Pressable
+                          key={option.value}
+                          onPress={() => chooseRecordLocationKind(option.value)}
+                          style={[
+                            styles.recordLocationKindButton,
+                            index < 2 && styles.recordLocationKindButtonSpaced,
+                            selected && styles.recordLocationKindButtonSelected,
+                          ]}
+                        >
+                          <Text style={styles.recordLocationKindEmoji}>
+                            {option.emoji}
+                          </Text>
+                          <Text
+                            style={[
+                              styles.recordLocationKindLabel,
+                              selected && styles.recordLocationKindLabelSelected,
+                            ]}
+                          >
+                            {option.label}
+                          </Text>
+                        </Pressable>
+                      );
+                    })}
+                  </View>
+
+                  {recordLocationKind === "place" ? (
+                    <View style={styles.recordPlacePickerBox}>
+                      <TextInput
+                        value={recordPlaceSearch}
+                        onChangeText={setRecordPlaceSearch}
+                        placeholder="장소 이름이나 주소 검색"
+                        placeholderTextColor={T2}
+                        style={styles.recordPlaceSearchInput}
+                      />
+
+                      {recordPlacesLoading ? (
+                        <View style={styles.recordPlaceLoading}>
+                          <ActivityIndicator color={BL} />
+                          <Text style={styles.recordPlaceLoadingText}>
+                            실제 장소를 불러오는 중이에요...
+                          </Text>
+                        </View>
+                      ) : visibleRecordPlaceCandidates.length > 0 ? (
+                        <ScrollView
+                          nestedScrollEnabled
+                          style={styles.recordPlaceList}
+                          keyboardShouldPersistTaps="handled"
+                        >
+                          {visibleRecordPlaceCandidates.map((place) => {
+                            const selected = recordSelectedPlace?.id === place.id;
+                            const distance = userLocation
+                              ? haversineDistanceKm(userLocation, {
+                                  lat: place.latitude,
+                                  lng: place.longitude,
+                                })
+                              : null;
+
+                            return (
+                              <Pressable
+                                key={place.id}
+                                onPress={() => {
+                                  setRecordSelectedPlace(place);
+                                  setRecordPlaceSearch("");
+                                }}
+                                style={[
+                                  styles.recordPlaceOption,
+                                  selected && styles.recordPlaceOptionSelected,
+                                ]}
+                              >
+                                <View style={styles.recordPlaceOptionText}>
+                                  <Text
+                                    numberOfLines={1}
+                                    style={[
+                                      styles.recordPlaceOptionName,
+                                      selected && styles.recordPlaceOptionNameSelected,
+                                    ]}
+                                  >
+                                    {place.name}
+                                  </Text>
+                                  <Text
+                                    numberOfLines={1}
+                                    style={styles.recordPlaceOptionAddress}
+                                  >
+                                    {place.address ?? place.districtName ?? "주소 정보 없음"}
+                                  </Text>
+                                </View>
+                                <Text style={styles.recordPlaceOptionDistance}>
+                                  {selected
+                                    ? "선택됨"
+                                    : distance !== null
+                                      ? `${distance.toFixed(1)}km`
+                                      : "선택"}
+                                </Text>
+                              </Pressable>
+                            );
+                          })}
+                        </ScrollView>
+                      ) : (
+                        <View style={styles.recordPlaceEmpty}>
+                          <Text style={styles.recordPlaceEmptyText}>
+                            장소가 없거나 검색 결과가 없어요.
+                          </Text>
+                          <Pressable
+                            onPress={() => void loadRecordPlaceCandidates()}
+                            style={styles.recordPlaceReloadButton}
+                          >
+                            <Text style={styles.recordPlaceReloadButtonText}>
+                              다시 불러오기
+                            </Text>
+                          </Pressable>
+                        </View>
+                      )}
+
+                      {recordSelectedPlace ? (
+                        <View style={styles.recordSelectedPlaceBox}>
+                          <Text style={styles.recordSelectedPlaceLabel}>선택한 장소</Text>
+                          <Text style={styles.recordSelectedPlaceName}>
+                            📍 {recordSelectedPlace.name}
+                          </Text>
+                        </View>
+                      ) : null}
+                    </View>
+                  ) : null}
+
+                  {recordLocationKind === "map" ? (
+                    <>
+                      <View style={styles.recordLocationHeader}>
+                        <View style={styles.recordLocationHeaderText}>
+                          <Text style={styles.recordLocationHelp}>
+                            장소명이 없는 길이나 공원, 야외라면 지도에서 정확한 위치를 찍어주세요.
+                          </Text>
+                        </View>
+                        <Pressable
+                          onPress={() => {
+                            if (userLocation) {
+                              setRecordLocation(userLocation);
+                            } else {
+                              Alert.alert(
+                                "현재 위치를 확인할 수 없어요",
+                                "위치 권한을 허용한 뒤 다시 시도해주세요.",
+                              );
+                            }
+                          }}
+                          style={styles.recordCurrentLocationButton}
+                        >
+                          <Text style={styles.recordCurrentLocationButtonText}>
+                            현재 위치 찍기
+                          </Text>
+                        </Pressable>
+                      </View>
+
+                      <View style={styles.recordLocationMapWrapper}>
+                        <RecordLocationPickerMap
+                          center={
+                            recordLocation ??
+                            userLocation ??
+                            recommendationCenter ??
+                            DEFAULT_CENTER
+                          }
+                          pickedLocation={recordLocation}
+                          onSelect={setRecordLocation}
+                        />
+                      </View>
+
+                      <Text
+                        style={[
+                          styles.recordLocationStatus,
+                          recordLocation && styles.recordLocationStatusSelected,
+                        ]}
+                      >
+                        {recordLocation
+                          ? `선택 완료 · ${recordLocation.lat.toFixed(5)}, ${recordLocation.lng.toFixed(5)}`
+                          : "아직 위치를 선택하지 않았어요."}
+                      </Text>
+                    </>
+                  ) : null}
+
+                  {recordLocationKind === "home" ? (
+                    <View style={styles.recordHomeLocationBox}>
+                      <Text style={styles.recordHomeLocationTitle}>
+                        🏠 내 방에서 한 미션
+                      </Text>
+                      <Text style={styles.recordHomeLocationDesc}>
+                        집 주소나 좌표는 저장하지 않아요. 닉네임 공유를 선택하면 방 안 기록 목록에는 보이지만 지도에는 표시되지 않아요.
+                      </Text>
+                    </View>
+                  ) : null}
                 </View>
               ) : recordMission?.placeName ? (
                 <View style={styles.recordPlaceBox}>
@@ -6322,26 +6721,29 @@ export default function HomeScreen() {
                 </Pressable>
                 <Pressable
                   onPress={() =>
-                    setRecordVisibility("anonymous")
+                    setRecordVisibility("nickname")
                   }
                   style={[
                     styles.visibilityOption,
                     styles.visibilityOptionLast,
-                    recordVisibility === "anonymous" &&
+                    recordVisibility === "nickname" &&
                       styles.visibilityOptionSelected,
                   ]}
                 >
                   <Text
                     style={[
                       styles.visibilityOptionTitle,
-                      recordVisibility === "anonymous" &&
+                      recordVisibility === "nickname" &&
                         styles.visibilityOptionTitleSelected,
                     ]}
                   >
-                    익명 공유
+                    닉네임 공유
                   </Text>
                   <Text style={styles.visibilityOptionDesc}>
-                    이름 없이 발견 탭에 공유해요
+                    {recordMission?.isLocationFlexible &&
+                    recordLocationKind === "home"
+                      ? "방 안 기록 목록에 닉네임으로 공유해요"
+                      : "내 닉네임과 함께 발견 탭에 공유해요"}
                   </Text>
                 </Pressable>
               </View>
@@ -6423,9 +6825,7 @@ export default function HomeScreen() {
                       <Text style={styles.recordDetailVisibilityText}>
                         {recordDetail.visibility === "private"
                           ? "나만 보기"
-                          : recordDetail.visibility === "anonymous"
-                            ? "익명 공유"
-                            : "닉네임 공유"}
+                          : "닉네임 공유"}
                       </Text>
                     </View>
                   </View>
@@ -7622,6 +8022,62 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: T1,
   },
+  recordMissionReminder: {
+    marginBottom: 18,
+    padding: 14,
+    backgroundColor: BLL,
+    borderWidth: 1,
+    borderColor: "#C8D8CF",
+    borderRadius: 16,
+  },
+  recordMissionReminderTop: {
+    flexDirection: "row",
+    alignItems: "center",
+  },
+  recordMissionReminderIcon: {
+    width: 40,
+    height: 40,
+    marginRight: 10,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: WH,
+    borderRadius: 12,
+  },
+  recordMissionReminderEmoji: {
+    fontSize: 20,
+  },
+  recordMissionReminderText: {
+    flex: 1,
+    minWidth: 0,
+  },
+  recordMissionReminderLabel: {
+    marginBottom: 2,
+    fontSize: 10,
+    fontWeight: "800",
+    color: BL,
+  },
+  recordMissionReminderTitle: {
+    fontSize: 15,
+    fontWeight: "800",
+    color: T0,
+  },
+  recordMissionReminderDescription: {
+    marginTop: 10,
+    fontSize: 12,
+    lineHeight: 18,
+    color: T1,
+  },
+  recordMissionReminderMetaRow: {
+    marginTop: 10,
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+  },
+  recordMissionReminderMeta: {
+    fontSize: 10,
+    fontWeight: "700",
+    color: BL,
+  },
   recordDateScroll: {
     marginBottom: 8,
   },
@@ -7676,6 +8132,166 @@ const styles = StyleSheet.create({
   recordLocationSection: {
     marginBottom: 18,
   },
+  recordLocationKindRow: {
+    marginTop: 10,
+    marginBottom: 12,
+    flexDirection: "row",
+  },
+  recordLocationKindButton: {
+    flex: 1,
+    minHeight: 72,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: BG,
+    borderWidth: 1,
+    borderColor: T3,
+    borderRadius: 14,
+  },
+  recordLocationKindButtonSpaced: {
+    marginRight: 8,
+  },
+  recordLocationKindButtonSelected: {
+    backgroundColor: BLL,
+    borderColor: BL,
+  },
+  recordLocationKindEmoji: {
+    marginBottom: 5,
+    fontSize: 20,
+  },
+  recordLocationKindLabel: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: T1,
+  },
+  recordLocationKindLabelSelected: {
+    color: BL,
+  },
+  recordPlacePickerBox: {
+    padding: 12,
+    backgroundColor: "#FAF9F5",
+    borderWidth: 1,
+    borderColor: T3,
+    borderRadius: 14,
+  },
+  recordPlaceSearchInput: {
+    height: 42,
+    paddingHorizontal: 12,
+    fontSize: 12,
+    color: T0,
+    backgroundColor: WH,
+    borderWidth: 1,
+    borderColor: T3,
+    borderRadius: 10,
+  },
+  recordPlaceLoading: {
+    minHeight: 110,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  recordPlaceLoadingText: {
+    marginTop: 8,
+    fontSize: 11,
+    color: T1,
+  },
+  recordPlaceList: {
+    maxHeight: 245,
+    marginTop: 10,
+  },
+  recordPlaceOption: {
+    minHeight: 58,
+    marginBottom: 7,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: WH,
+    borderWidth: 1,
+    borderColor: T3,
+    borderRadius: 11,
+  },
+  recordPlaceOptionSelected: {
+    backgroundColor: BLL,
+    borderColor: BL,
+  },
+  recordPlaceOptionText: {
+    flex: 1,
+    minWidth: 0,
+    marginRight: 8,
+  },
+  recordPlaceOptionName: {
+    fontSize: 12,
+    fontWeight: "700",
+    color: T0,
+  },
+  recordPlaceOptionNameSelected: {
+    color: BL,
+  },
+  recordPlaceOptionAddress: {
+    marginTop: 3,
+    fontSize: 10,
+    color: T2,
+  },
+  recordPlaceOptionDistance: {
+    fontSize: 10,
+    fontWeight: "700",
+    color: BL,
+  },
+  recordPlaceEmpty: {
+    minHeight: 120,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  recordPlaceEmptyText: {
+    marginBottom: 9,
+    fontSize: 11,
+    color: T2,
+  },
+  recordPlaceReloadButton: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    backgroundColor: BLL,
+    borderRadius: 9,
+  },
+  recordPlaceReloadButtonText: {
+    fontSize: 10,
+    fontWeight: "800",
+    color: BL,
+  },
+  recordSelectedPlaceBox: {
+    marginTop: 8,
+    padding: 10,
+    backgroundColor: BLL,
+    borderRadius: 10,
+  },
+  recordSelectedPlaceLabel: {
+    marginBottom: 3,
+    fontSize: 9,
+    fontWeight: "700",
+    color: BL,
+  },
+  recordSelectedPlaceName: {
+    fontSize: 12,
+    fontWeight: "800",
+    color: T0,
+  },
+  recordHomeLocationBox: {
+    padding: 14,
+    backgroundColor: PINK_LIGHT,
+    borderWidth: 1,
+    borderColor: "#E9D6CB",
+    borderRadius: 14,
+  },
+  recordHomeLocationTitle: {
+    marginBottom: 5,
+    fontSize: 13,
+    fontWeight: "800",
+    color: T0,
+  },
+  recordHomeLocationDesc: {
+    fontSize: 10,
+    lineHeight: 16,
+    color: T1,
+  },
   recordLocationHeader: {
     marginBottom: 10,
     flexDirection: "row",
@@ -7686,7 +8302,7 @@ const styles = StyleSheet.create({
     marginRight: 10,
   },
   recordLocationHelp: {
-    marginTop: -4,
+    marginTop: 0,
     fontSize: 10,
     lineHeight: 16,
     color: T2,

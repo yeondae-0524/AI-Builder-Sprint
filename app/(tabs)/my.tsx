@@ -472,7 +472,6 @@ export default function MyScreen() {
           const todayKey = toDateKey(todayStart);
 
           const [
-            completedMissionsResult,
             recordsResult,
             completedEssaysResult,
             discoverPostsResult,
@@ -1062,6 +1061,7 @@ ${experienceText}
           showsVerticalScrollIndicator={false}
           contentContainerStyle={styles.badgeDetailContent}
         >
+          {/* ✅ 뒤로가기 버튼 복구 */}
           <Pressable
             onPress={() => setSelectedBadge(null)}
             style={({ pressed }) => [
@@ -1069,7 +1069,7 @@ ${experienceText}
               pressed && styles.pressed,
             ]}
           >
-            <Ionicons name="arrow-back" size={20} color={COLORS.textMain} />
+            <Ionicons name="arrow-back" size={22} color={COLORS.textMain} />
             <Text style={styles.backButtonText}>뱃지 보관함</Text>
           </Pressable>
 
@@ -1460,7 +1460,16 @@ ${experienceText}
               keyboardShouldPersistTaps="handled"
               contentContainerStyle={styles.profileModalContent}
             >
-              <Text style={styles.profileModalTitle}>프로필 수정</Text>
+              <View style={styles.modalHeaderRow}>
+                <Text style={styles.profileModalTitle}>프로필 수정</Text>
+                {/* ✅ 프로필 수정 모달 닫기 버튼 복구 */}
+                <Pressable
+                  onPress={() => setProfileModalVisible(false)}
+                  style={styles.modalCloseBtn}
+                >
+                  <Ionicons name="close" size={22} color={COLORS.textMain} />
+                </Pressable>
+              </View>
 
               <Pressable onPress={handlePickAvatar} style={styles.avatarPickerWrapper}>
                 <View style={styles.avatarPicker}>
@@ -2303,12 +2312,19 @@ const styles = StyleSheet.create({
     alignItems: "center",
   },
 
-  profileModalTitle: {
-    alignSelf: "flex-start",
+  modalHeaderRow: {
+    width: "100%",
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
     marginBottom: 18,
     fontSize: 18,
     fontWeight: "800",
     color: COLORS.textMain,
+  },
+
+  modalCloseBtn: {
+    padding: 4,
   },
 
   avatarPickerWrapper: {
