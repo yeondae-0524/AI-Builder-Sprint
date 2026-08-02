@@ -85,6 +85,7 @@ type DraftEssay = {
   content: string;
   persona: PersonaType;
   records: JourneyRecordItem[];
+  aiSummary: string;
 };
 
 type CompletedEssay = {
@@ -150,7 +151,6 @@ export default function EssayScreen() {
             const uniqueDays = new Set((journeyRecords ?? []).map((r) => r.recorded_at?.slice(0, 10))).size;
             setCompletedDayCount(uniqueDays);
 
-            // 여정이 종료되어 에세이 집필 대기 상태인 경우
             const sampleRecords: JourneyRecordItem[] = (journeyRecords ?? []).map((r, idx) => ({
               id: r.id ?? `rec-${idx}`,
               indexNum: idx + 1,
@@ -181,6 +181,7 @@ export default function EssayScreen() {
               title: "7월 31일의 일상 기록",
               content: "오늘은 스페로스페라 근처 골목을 걸으며 아기자기한 벽화와 작은 가게들을 사진으로 담았다. 발걸음이 닿는 곳마다 예상치 못한 아름다움이 숨어 있어 산책이 마치 숨은 이야기를 찾는 듯한 기분이었다. 같은 날 오후에는 노스커피 6호점에서 아늑한 분위기에 앉아 따뜻한 커피 향을 맡았다. 10분간 눈을 감고 마음의 소리를 들어보며 여유로운 시간을 가졌고, 이어 킹스네일커피까지 걸어가는 길에서는 또 다른 카페의 정취를 비교해보았다.",
               persona: "emotional",
+              aiSummary: "스페로스페라 주변 골목과 카페에서 찾은 작은 아름다움과 명상의 시간을 통해 일상의 여유를 깨달은 여정",
               records: sampleRecords,
             });
           }
@@ -278,30 +279,43 @@ export default function EssayScreen() {
     return shelfList;
   }, [essays]);
 
-  // 🚀 집필 중 AI 페르소나 변경 (다른 AI에게 다시 맡기기)
+  // 🚀 핵심: '이번에는 누가 읽어볼까요?' 모달에서 AI 페르소나 선택 시 에세이 즉시 재작성!
   const handleSelectPersona = (persona: PersonaType) => {
     if (!draftEssay) return;
-    setPersonaPickerVisible(false);
+    setPersonaPickerVisible(false); // 팝업 모달 닫기
 
     let newTitle = draftEssay.title;
     let newContent = draftEssay.content;
+    let newSummary = draftEssay.aiSummary;
 
     if (persona === "emotional") {
-      newTitle = "7월 31일의 감성 일상 기록";
-      newContent = "바람과 커피 향이 닿는 골목길에서 발견한 마음의 평온. 지친 하루 속에서 오롯이 나와 마주했던 따뜻한 순간이었습니다.";
+      newTitle = "7월 31일의 따뜻한 감성 기록";
+      newContent = "골목길을 천천히 거닐며 모아둔 순간들이 마음에 따스한 온기를 전해줍니다. 카페에서 흘러나오는 재즈 음악과 커피 향 속에서 잠시 멈추어 오롯이 나와 마주했던 시간들. 그 작은 여유가 오늘 하루를 온전히 채워주었습니다.";
+      newSummary = "골목길 카페와 고요한 명상의 시간을 통해 다정한 언어로 풀어낸 감성 여정";
     } else if (persona === "fact_teacher") {
-      newTitle = "여정 행동 분석 및 피드백 보고서";
-      newContent = "목표 달성율 80% 달성. 카페 및 명상 활동 위주의 휴식 패턴을 보였으며, 고른 스케줄 안배가 돋보였습니다.";
+      newTitle = "휴식 행동 패턴 및 실행력 평가 분석";
+      newContent = "이번 여정 동안 기록된 미션 수행 수치 분석 결과: 카페 방문 및 명상 미션 비중이 80% 이상을 차지함. 초반 설정했던 '디지털 디톡스' 목표에 충실했으며, 10분간의 짧은 멈춤 습관이 스트레스 지수를 크게 완화시켰음이 확인됨.";
+      newSummary = "목표 대비 행동 결과와 시간 활용 습관을 객관적인 시각에서 분석한 데이터 보고";
     } else if (persona === "detective") {
-      newTitle = "일상 속 숨은 감정 패턴 추리서";
-      newContent = "기록 단서 추적 결과: 사용자는 소음에서 벗어나 빗소리와 백색소음을 들을 때 깊은 안정을 느끼는 패턴을 포착했습니다.";
+      newTitle = "사건명: 골목길과 커피 향 속 감정 단서 추적기";
+      newContent = "기록에 남겨진 주요 단서들을 종합한 결과: 사용자는 소음에서 벗어나 커피 향과 잔잔한 백색소음을 접할 때 'joyful' 및 'comfortable' 감정이 극대화되는 패턴을 포착함. 의도적인 명상 시간이 핵심 스위치 역할을 한 것으로 추리됨.";
+      newSummary = "5개의 미션 기록 속 단서를 추적하여 사용자 본인도 몰랐던 휴식 취향 패턴 발굴";
     } else if (persona === "comic_pd") {
-      newTitle = "우당탕탕 2주간의 예능 탐험기";
-      newContent = "거창하게 시작한 걷기 미션! 하지만 결말은 디저트 맛집 도장깨기? 예능감 넘치는 4컷 명장면 대공개!";
+      newTitle = "우당탕탕 2주간의 예능 탐험기 - 커피 도장깨기편";
+      newContent = "시작은 거창하게 '소소한 산책'을 선언했으나 10분 만에 카페로 직행! 노스커피 6호점부터 킹스네일커피까지... 예능감 넘치게 디저트와 커피 향을 도장깨기 한 반전 만발의 4컷 예능 에피소드!";
+      newSummary = "웃픈 명장면과 의외의 반전 순간들을 유쾌하고 재치 넘치게 각색한 비주얼 스토리";
     }
 
-    setDraftEssay({ ...draftEssay, persona, title: newTitle, content: newContent });
-    Alert.alert("AI 에세이 변환 완료", "선택하신 AI 역할로 에세이가 다시 재구성되었습니다.");
+    // 에세이 내용을 즉시 덮어씌워서 다시 써짐!
+    setDraftEssay({
+      ...draftEssay,
+      persona,
+      title: newTitle,
+      content: newContent,
+      aiSummary: newSummary,
+    });
+
+    Alert.alert("에세이 다시 써짐 ✨", `선택하신 [${persona === "emotional" ? "감정 통역사" : persona === "fact_teacher" ? "팩트 폭격 담임" : persona === "detective" ? "기록 탐정" : "인생 예능 PD"}] 톤으로 에세이가 새롭게 작성되었습니다!`);
   };
 
   // 🚀 에세이 집필 완료
@@ -383,7 +397,7 @@ export default function EssayScreen() {
 
         {/* 🌿 상태별 상단 카드 (1.여정 중 / 2.집필 대기 / 3.집필 완결) */}
         {isFinished ? (
-          /* 3. 에세이 집필이 완료된 후 */
+          /* 3. 에세이 집필 완료 후 모드 */
           <View style={[styles.journeyCard, { backgroundColor: COLORS.primary }]}>
             <Text style={styles.journeyLabel}>✨ 에세이가 완성되었습니다!</Text>
             <Text style={styles.journeyTitle}>새로운 여정을 다시 떠나보아요~ 🌿</Text>
@@ -479,7 +493,7 @@ export default function EssayScreen() {
                         >
                           <View style={[styles.bookGoldLine, { backgroundColor: theme.line }]} />
 
-                          {/* 📖 90도 회전된 제목 + 날짜 각인 */}
+                          {/* 📖 90도 회전 제목 + 날짜 각인 */}
                           <View style={styles.rotatedTitleContainer}>
                             <Text numberOfLines={2} style={[styles.rotatedTitleText, { color: theme.text }]}>
                               {item.title}
@@ -520,7 +534,7 @@ export default function EssayScreen() {
         <View style={{ height: 120 }} />
       </ScrollView>
 
-      {/* 🌟 ✍️ [에세이 집필하기 편집 모달] - 뒤로가기 위치 상단 여백 보정 및 터치 영역 확대 */}
+      {/* 🌟 ✍️ [에세이 집필하기 편집 모달] - 뒤로가기 터치 영역 보정 */}
       <Modal
         visible={writerModalVisible}
         animationType="slide"
@@ -530,7 +544,7 @@ export default function EssayScreen() {
           {draftEssay && (
             <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 60 }}>
               
-              {/* 🌟 상단 뒤로가기 헤더 Bar (위치 아래로 보정) */}
+              {/* 상단 뒤로가기 Bar (위치 아래로 보정) */}
               <View style={styles.screenHeaderBar}>
                 <Pressable
                   onPress={() => setPersonaWriterModalVisible(false)}
@@ -548,7 +562,7 @@ export default function EssayScreen() {
                 </Pressable>
               </View>
 
-              {/* 대표 이미지 */}
+              {/* 대표 커버 이미지 */}
               <View style={styles.editorImageFrame}>
                 <Image source={{ uri: draftEssay.coverImage }} style={styles.editorCoverImage} />
               </View>
@@ -564,7 +578,7 @@ export default function EssayScreen() {
                   <Text style={{ fontSize: 12, color: COLORS.textMuted }}>{draftEssay.dateRangeText}</Text>
                 </View>
 
-                {/* 🔄 [다른 AI에게 다시 맡기기] 버튼 클릭 시 페르소나 선택 팝업 오픈! */}
+                {/* 🌟 🔄 [다른 AI에게 다시 맡기기] 누르면 > '이번에는 누가 읽어볼까요?' 팝업 모달이 뜸! */}
                 <Pressable
                   style={styles.reAiCard}
                   onPress={() => setPersonaPickerVisible(true)}
@@ -594,7 +608,7 @@ export default function EssayScreen() {
                 {/* AI가 읽은 이번 여정 */}
                 <View style={styles.aiInsightBox}>
                   <Text style={styles.aiInsightTitle}>AI가 읽은 이번 여정</Text>
-                  <Text style={styles.aiInsightSub}>스페로스페라 주변 골목과 카페에서 찾은 작은 아름다움과 명상의 시간을 통해 일상의 여유를 깨달은 여정</Text>
+                  <Text style={styles.aiInsightSub}>{draftEssay.aiSummary}</Text>
 
                   <View style={styles.insightCardItem}>
                     <Text style={styles.insightCardTitle}>골목 탐험</Text>
@@ -652,7 +666,7 @@ export default function EssayScreen() {
         </SafeAreaView>
       </Modal>
 
-      {/* 🎭 [이번에는 누가 읽어볼까요?] - 집필 중 다른 AI 다시 맡기기 클릭 시만 노출 */}
+      {/* 🎭 🌟 [이번에는 누가 읽어볼까요?] - 스크린샷 5번 100% 동일 팝업 모달 */}
       <Modal
         visible={personaPickerVisible}
         transparent
@@ -1052,7 +1066,7 @@ const styles = StyleSheet.create({
     textAlign: "center",
   },
 
-  // ✍️ 에세이 집필 편집 모달 스타일 (상단 뒤로가기 위치 및 터치 보정)
+  // ✍️ 에세이 집필 모달 헤더 (상단 여백 보정)
   screenHeaderBar: {
     minHeight: 56,
     paddingHorizontal: 16,
@@ -1258,7 +1272,7 @@ const styles = StyleSheet.create({
     color: COLORS.white,
   },
 
-  // 🎭 페르소나 선택 팝업
+  // 🎭 페르소나 선택 팝업 모달
   modalOverlay: {
     flex: 1,
     backgroundColor: "rgba(38, 55, 46, 0.55)",
