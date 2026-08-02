@@ -218,10 +218,9 @@ const LEVEL_LABEL: Record<BadgeLevel, string> = {
 };
 
 const SETTINGS: SettingItem[] = [
-  
   {
     label: "계정 및 개인정보",
-    description: "로그인 정보 · 기록 내보내기",
+    description: "로그인 정보 · 기록 내보내기 · 회원관리",
   }
 ];
 
@@ -397,7 +396,6 @@ export default function MyScreen() {
           const todayKey = toDateKey(todayStart);
 
           const [
-            completedMissionsResult,
             recordsResult,
             completedEssaysResult,
             discoverPostsResult,
@@ -405,14 +403,6 @@ export default function MyScreen() {
             badgesResult,
             journeyResult,
           ] = await Promise.all([
-
-            
-            supabase
-              .from("mission_attempts")
-              .select("id", { count: "exact", head: true })
-              .eq("user_id", user.id)
-              .not("completed_at", "is", null),
-
             supabase
               .from("records")
               .select("id, place_id, journey_id, content, emotion, recorded_at, location_type")
@@ -505,9 +495,6 @@ export default function MyScreen() {
           ).length;
 
           const myDiscoverPosts = discoverPostsResult.data ?? [];
-          const independentDiscoverRecordCount = myDiscoverPosts.filter(
-            (post) => post.source_kind !== "mission" && !post.source_mission_id,
-          ).length;
           const totalExperienceRecordCount = records.length;
           const receivedLikesCount = myDiscoverPosts.reduce(
             (sum, post) => sum + Math.max(0, Number(post.likes_count ?? 0)),
@@ -678,11 +665,11 @@ export default function MyScreen() {
   };
 
   const handleSettingPress = (setting: SettingItem) => {
-  if (setting.label === "계정 및 개인정보") {
-    router.push("/my/account");
-    return;
-  }
-};
+    if (setting.label === "계정 및 개인정보") {
+      router.push("/my/account");
+      return;
+    }
+  };
 
   const handleEquipTitle = async (badge: Badge) => {
     if (!badge.title) {
@@ -704,20 +691,7 @@ export default function MyScreen() {
     }
   };
 
-  const handleLogout = () => {
-    Alert.alert("로그아웃", "정말 로그아웃하시겠어요?", [
-      { text: "취소", style: "cancel" },
-      {
-        text: "로그아웃",
-        style: "destructive",
-        onPress: async () => {
-          const { error } = await supabase.auth.signOut();
-          if (error) Alert.alert("로그아웃 실패", error.message);
-        },
-      },
-    ]);
-  };
-
+  // 🌿 뱃지 상세 모달 (상단에 뒤로가기 버튼 복구)
   if (selectedBadge) {
     const isPrism = selectedBadge.level === "prism";
     const remainingCount = Math.max(selectedBadge.nextAt - selectedBadge.count, 0);
@@ -728,11 +702,12 @@ export default function MyScreen() {
           showsVerticalScrollIndicator={false}
           contentContainerStyle={styles.badgeDetailContent}
         >
+          {/* ✅ 뒤로가기 버튼 복구 */}
           <Pressable
             onPress={() => setSelectedBadge(null)}
             style={({ pressed }) => [styles.backButton, pressed && styles.pressed]}
           >
-            <Ionicons name="arrow-back" size={20} color={COLORS.textMain} />
+            <Ionicons name="arrow-back" size={22} color={COLORS.textMain} />
             <Text style={styles.backButtonText}>뱃지 보관함</Text>
           </Pressable>
 
@@ -875,7 +850,7 @@ export default function MyScreen() {
           </View>
         </View>
 
-        {/* 🌿 진행 중인 여정 카드 (에세이 탭의 journeyCard 스타일 다크 그린 적용) */}
+        {/* 🌿 진행 중인 여정 카드 */}
         <View style={styles.journeyCard}>
           <View style={styles.journeyHeader}>
             <View style={{ flex: 1 }}>
@@ -942,7 +917,6 @@ export default function MyScreen() {
                   case "획득 뱃지":
                     scrollViewRef.current?.scrollTo({ y: 700, animated: true });
                     break;
-                  
                 }
               }}
               style={({ pressed }) => [
@@ -1066,17 +1040,6 @@ export default function MyScreen() {
           ))}
         </View>
 
-        {/* 🌿 로그아웃 */}
-        <Pressable
-          onPress={handleLogout}
-          style={({ pressed }) => [
-            styles.logoutButton,
-            pressed && styles.pressed,
-          ]}
-        >
-          <Text style={styles.logoutText}>로그아웃</Text>
-        </Pressable>
-
         <View style={styles.bottomSpace} />
       </ScrollView>
 
@@ -1105,7 +1068,16 @@ export default function MyScreen() {
               keyboardShouldPersistTaps="handled"
               contentContainerStyle={styles.profileModalContent}
             >
-              <Text style={styles.profileModalTitle}>프로필 수정</Text>
+              <View style={styles.modalHeaderRow}>
+                <Text style={styles.profileModalTitle}>프로필 수정</Text>
+                {/* ✅ 프로필 수정 모달 닫기 버튼 복구 */}
+                <Pressable
+                  onPress={() => setProfileModalVisible(false)}
+                  style={styles.modalCloseBtn}
+                >
+                  <Ionicons name="close" size={22} color={COLORS.textMain} />
+                </Pressable>
+              </View>
 
               <Pressable onPress={handlePickAvatar} style={styles.avatarPickerWrapper}>
                 <View style={styles.avatarPicker}>
@@ -1331,7 +1303,7 @@ const styles = StyleSheet.create({
     fontWeight: "800",
   },
 
-  // 🌿 진행 중인 여정 카드 (에세이 탭 다크 그린 #315C4A 톤앤매너)
+  // 🌿 진행 중인 여정 카드
   journeyCard: {
     marginBottom: 14,
     padding: 20,
@@ -1616,17 +1588,6 @@ const styles = StyleSheet.create({
     color: COLORS.textMuted,
   },
 
-  logoutButton: {
-    alignItems: "center",
-    paddingVertical: 12,
-  },
-
-  logoutText: {
-    fontSize: 13,
-    fontWeight: "700",
-    color: COLORS.textMuted,
-  },
-
   bottomSpace: {
     height: 120,
   },
@@ -1785,12 +1746,22 @@ const styles = StyleSheet.create({
     alignItems: "center",
   },
 
-  profileModalTitle: {
-    alignSelf: "flex-start",
+  modalHeaderRow: {
+    width: "100%",
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
     marginBottom: 18,
+  },
+
+  profileModalTitle: {
     fontSize: 20,
     fontWeight: "800",
     color: COLORS.textMain,
+  },
+
+  modalCloseBtn: {
+    padding: 4,
   },
 
   avatarPickerWrapper: {
