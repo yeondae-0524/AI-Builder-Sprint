@@ -3944,50 +3944,46 @@ export default function HomeScreen() {
     sectionIndicator,
   ]);
 
-  const activeItems = useMemo<MissionListItem[]>(
-    () =>
-      Object.values(startedAttempts)
-        .sort((a, b) =>
-          b.createdAt.localeCompare(a.createdAt),
-        )
-        .map((attempt) => {
-          const mission =
-            attemptMissions[attempt.missionId] ??
-            missions.find(
-              (item) => item.id === attempt.missionId,
-            );
+  const activeItems = useMemo<MissionListItem[]>(() => {
+      const sortedAttempts = Object.values(startedAttempts).sort(
+        (a, b) => b.createdAt.localeCompare(a.createdAt),
+      );
 
-          return mission
-            ? {
-                key: `active:${attempt.id}`,
-                kind: "active" as const,
-                mission,
-                attempt,
-              }
-            : null;
-        })
-        .filter(
-          (item): item is MissionListItem =>
-            item !== null,
-        ),
-    [attemptMissions, missions, startedAttempts],
-  );
+      const items: MissionListItem[] = [];
 
-  const recommendedItemsWithHome = useMemo<MissionListItem[]>(
-    () =>
-      missions
-        .filter(
-          (mission) =>
-            !startedAttempts[mission.id] &&
-            !completedMissionIds.has(mission.id),
-        )
-        .map((mission) => ({
-          key: `recommended:${mission.id}`,
-          kind: "recommended" as const,
-          mission,
-        })),
-    [completedMissionIds, missions, startedAttempts],
-  );
+      for (const attempt of sortedAttempts) {
+        const mission =
+          attemptMissions[attempt.missionId] ??
+          missions.find((item) => item.id === attempt.missionId);
+
+        if (mission) {
+          items.push({
+            key: `active:${attempt.id}`,
+            kind: "active" as const,
+            mission,
+            attempt,
+          });
+        }
+      }
+
+      return items;
+    }, [attemptMissions, missions, startedAttempts]);
+
+    const recommendedItemsWithHome = useMemo<MissionListItem[]>(
+      () =>
+        missions
+          .filter(
+            (mission) =>
+              !startedAttempts[mission.id] &&
+              !completedMissionIds.has(mission.id),
+          )
+          .map((mission) => ({
+            key: `recommended:${mission.id}`,
+            kind: "recommended" as const,
+            mission,
+          })),
+      [completedMissionIds, missions, startedAttempts],
+    );
 
   // 하단 추천 미션 슬라이드에는 "내 방" 미션을 노출하지 않는다.
   // 내 방 미션은 우측 상단 "내 방 미션" 버튼을 눌렀을 때만 보여준다.
@@ -3999,32 +3995,26 @@ export default function HomeScreen() {
     [recommendedItemsWithHome],
   );
 
-  const recordItems = useMemo<MissionListItem[]>(
-    () =>
-      completedRecords
-        .map((record) => {
-          const mission =
-            attemptMissions[record.missionId] ??
-            missions.find(
-              (item) => item.id === record.missionId,
-            );
+  const recordItems = useMemo<MissionListItem[]>(() => {
+      const items: MissionListItem[] = [];
 
-          return mission
-            ? {
-                key: `record:${record.attemptId}`,
-                kind: "record" as const,
-                mission,
-                record,
-              }
-            : null;
-        })
-        .filter(
-          (item): item is MissionListItem =>
-            item !== null,
-        ),
-    [attemptMissions, completedRecords, missions],
-  );
+      for (const record of completedRecords) {
+        const mission =
+          attemptMissions[record.missionId] ??
+          missions.find((item) => item.id === record.missionId);
 
+        if (mission) {
+          items.push({
+            key: `record:${record.attemptId}`,
+            kind: "record" as const,
+            mission,
+            record,
+          });
+        }
+      }
+
+      return items;
+    }, [attemptMissions, completedRecords, missions]);
   const recordDateOptions = useMemo(() => {
     if (!recordMission || !activeJourney) {
       return [];
@@ -5027,7 +5017,8 @@ export default function HomeScreen() {
         ...currentItems.filter((item) => item.key !== selectedItem.key),
       ]
     : currentItems;
-  const homeItems =
+
+  const homeItems: MissionListItem[] =
       sheetSection === "recommended"
         ? recommendedItemsWithHome.filter(
             (item) => item.mission.isAtHome === true,
@@ -5035,11 +5026,13 @@ export default function HomeScreen() {
         : currentItems.filter(
             (item) => item.mission.isAtHome === true,
           );
-  const selectedHomeItem =
-    selectedItem?.mission.isAtHome === true
-      ? selectedItem
-      : null;
-  const homeDockItem = selectedHomeItem ?? homeItems[0] ?? null;
+
+    const selectedHomeItem =
+      selectedItem?.mission.isAtHome === true
+        ? selectedItem
+        : null;
+    const homeDockItem = selectedHomeItem ?? homeItems[0] ?? null;
+
   const orderedHomeItems = selectedHomeItem
     ? [
         selectedHomeItem,
