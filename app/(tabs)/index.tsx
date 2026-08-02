@@ -3973,7 +3973,7 @@ export default function HomeScreen() {
     [attemptMissions, missions, startedAttempts],
   );
 
-  const recommendedItems = useMemo<MissionListItem[]>(
+  const recommendedItemsWithHome = useMemo<MissionListItem[]>(
     () =>
       missions
         .filter(
@@ -3987,6 +3987,16 @@ export default function HomeScreen() {
           mission,
         })),
     [completedMissionIds, missions, startedAttempts],
+  );
+
+  // 하단 추천 미션 슬라이드에는 "내 방" 미션을 노출하지 않는다.
+  // 내 방 미션은 우측 상단 "내 방 미션" 버튼을 눌렀을 때만 보여준다.
+  const recommendedItems = useMemo<MissionListItem[]>(
+    () =>
+      recommendedItemsWithHome.filter(
+        (item) => item.mission.isAtHome !== true,
+      ),
+    [recommendedItemsWithHome],
   );
 
   const recordItems = useMemo<MissionListItem[]>(
@@ -5017,9 +5027,14 @@ export default function HomeScreen() {
         ...currentItems.filter((item) => item.key !== selectedItem.key),
       ]
     : currentItems;
-  const homeItems = currentItems.filter(
-    (item) => item.mission.isAtHome === true,
-  );
+  const homeItems =
+      sheetSection === "recommended"
+        ? recommendedItemsWithHome.filter(
+            (item) => item.mission.isAtHome === true,
+          )
+        : currentItems.filter(
+            (item) => item.mission.isAtHome === true,
+          );
   const selectedHomeItem =
     selectedItem?.mission.isAtHome === true
       ? selectedItem
