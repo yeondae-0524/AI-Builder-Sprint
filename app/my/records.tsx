@@ -2,13 +2,13 @@ import Ionicons from "@expo/vector-icons/Ionicons";
 import { router } from "expo-router";
 import { useEffect, useState } from "react";
 import {
-    ActivityIndicator,
-    FlatList,
-    Image,
-    Pressable,
-    StyleSheet,
-    Text,
-    View,
+  ActivityIndicator,
+  FlatList,
+  Image,
+  Pressable,
+  StyleSheet,
+  Text,
+  View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { supabase } from "../../lib/supabase";
@@ -24,21 +24,33 @@ const COLORS = {
   white: "#FFFFFF",
 };
 
+const EMOTION_LABEL: Record<string, string> = {
+  comfortable: "편안해요",
+  joyful: "즐거워요",
+  new: "새로워요",
+  uncomfortable: "불편해요",
+  unsure: "잘 모르겠어요",
+};
+
 type RecordItem = {
   id: string;
   content: string | null;
   emotion: string | null;
   recorded_at: string;
-  mission_title: string | null; // 임시: 미션 이름
-  keywords: string[]; // 임시: 키워드 배열
-  image_url: string | null; // 임시: 사진
-  likes_count: number; // 임시: 받은 좋아요
+  mission_title: string;
+  image_url: string | null;
+  likes_count: number;
 };
+
+function normalizeRelation<T>(value: T | T[] | null | undefined): T | null {
+  if (!value) return null;
+  return Array.isArray(value) ? value[0] ?? null : value;
+}
 
 export default function RecordsScreen() {
   const [records, setRecords] = useState<RecordItem[]>([]);
   const [isLoading, setIsLoading] = useState(true);
-  const [expandedId, setExpandedId] = useState<string | null>(null); // 👈 더보기(펼침) 상태 관리
+  const [expandedId, setExpandedId] = useState<string | null>(null);
 
   useEffect(() => {
     fetchRecords();
@@ -50,27 +62,74 @@ export default function RecordsScreen() {
       const { data: { user }, error: userError } = await supabase.auth.getUser();
       if (userError || !user) throw new Error("로그인 정보를 확인할 수 없습니다.");
 
-      // TODO: 실제 테이블 구조에 맞게 조인(join)을 수정해야 할 수 있습니다. 
-      // 일단 records 기준으로 가져옵니다.
       const { data, error } = await supabase
         .from("records")
-        .select("*")
+        .select(`
+          id,
+          content,
+          emotion,
+          recorded_at,
+          mission_attempts (
+            missions ( title )
+          ),
+          record_photos (
+            storage_path,
+            sort_order,
+            is_cover
+          )
+        `)
         .eq("user_id", user.id)
         .order("recorded_at", { ascending: false });
 
       if (error) throw error;
 
-      // 백엔드 구조가 아직 완벽히 연결 안 된 데이터(키워드, 사진 등)는 가짜 데이터로 매핑
-      const formattedData = (data || []).map(item => ({
-        id: item.id,
-        content: item.content,
-        emotion: item.emotion,
-        recorded_at: item.recorded_at,
-        mission_title: "테스트 미션 이름", // 연결 필요
-        keywords: ["comfortable", "new", "unsure"], // 연결 필요
-        image_url: null, // 연결 필요
-        likes_count: 5, // 연결 필요
-      }));
+      const recordIds = (data ?? []).map((item: any) => item.id);
+      const likesCountMap: Record<string, number> = {};
+
+      if (recordIds.length > 0) {
+        const { data: likeRows } = await supabase
+          .from("record_likes")
+          .select("record_id")
+          .in("record_id", recordIds);
+
+        for (const row of likeRows ?? []) {
+          likesCountMap[row.record_id] = (likesCountMap[row.record_id] ?? 0) + 1;
+        }
+      }
+
+      const formattedData: RecordItem[] = await Promise.all(
+        (data ?? []).map(async (item: any) => {
+          const attempt = normalizeRelation(item.mission_attempts);
+          const mission = normalizeRelation(attempt?.missions);
+
+          const photos = (Array.isArray(item.record_photos) ? item.record_photos : [])
+            .slice()
+            .sort((a: any, b: any) => {
+              if (Boolean(a.is_cover) !== Boolean(b.is_cover)) return a.is_cover ? -1 : 1;
+              return Number(a.sort_order ?? 0) - Number(b.sort_order ?? 0);
+            });
+
+          let imageUrl: string | null = null;
+          const coverPath = photos[0]?.storage_path;
+
+          if (coverPath) {
+            const { data: signedUrlData } = await supabase.storage
+              .from("record-photos")
+              .createSignedUrl(coverPath, 3600);
+            imageUrl = signedUrlData?.signedUrl ?? null;
+          }
+
+          return {
+            id: item.id,
+            content: item.content,
+            emotion: item.emotion,
+            recorded_at: item.recorded_at,
+            mission_title: mission?.title ?? "기록",
+            image_url: imageUrl,
+            likes_count: likesCountMap[item.id] ?? 0,
+          };
+        }),
+      );
 
       setRecords(formattedData);
     } catch (error) {
@@ -85,44 +144,41 @@ export default function RecordsScreen() {
     return `${date.getFullYear()}. ${String(date.getMonth() + 1).padStart(2, "0")}. ${String(date.getDate()).padStart(2, "0")}`;
   };
 
-  // 더보기 버튼 누르면 열리고 닫히는 함수
   const toggleExpand = (id: string) => {
-    setExpandedId(prev => (prev === id ? null : id));
+    setExpandedId((prev) => (prev === id ? null : id));
   };
 
   const renderItem = ({ item }: { item: RecordItem }) => {
-    const isExpanded = expandedId === item.id; // 현재 이 카드가 열려있는지 확인
+    const isExpanded = expandedId === item.id;
+    const emotionLabel = item.emotion ? EMOTION_LABEL[item.emotion] ?? item.emotion : null;
 
     return (
       <View style={styles.recordCard}>
-        {/* 🟢 항상 보이는 요약 영역 */}
         <Pressable onPress={() => toggleExpand(item.id)} style={styles.summaryArea}>
           <View style={styles.summaryHeader}>
             <Text style={styles.dateText}>{formatDate(item.recorded_at)}</Text>
-            {/* 더보기 화살표 아이콘 */}
             <Ionicons name={isExpanded ? "chevron-up" : "chevron-down"} size={20} color={COLORS.textMuted} />
           </View>
-          
+
           <Text style={styles.missionTitle}>{item.mission_title}</Text>
-          
-          <View style={styles.keywordContainer}>
-            {item.keywords.map((kw, index) => (
-              <View key={index} style={styles.keywordChip}>
-                <Text style={styles.keywordText}>{kw}</Text>
+
+          {emotionLabel && (
+            <View style={styles.keywordContainer}>
+              <View style={styles.keywordChip}>
+                <Text style={styles.keywordText}>{emotionLabel}</Text>
               </View>
-            ))}
-          </View>
+            </View>
+          )}
         </Pressable>
 
-        {/* 🟢 더보기(화살표) 눌렀을 때만 펼쳐지는 상세 영역 */}
         {isExpanded && (
           <View style={styles.detailArea}>
             <View style={styles.divider} />
-            
+
             {item.image_url && (
               <Image source={{ uri: item.image_url }} style={styles.recordImage} />
             )}
-            
+
             <Text style={styles.contentText}>
               {item.content || "작성된 내용이 없습니다."}
             </Text>
@@ -151,6 +207,10 @@ export default function RecordsScreen() {
         <View style={styles.centerContainer}>
           <ActivityIndicator size="large" color={COLORS.primary} />
         </View>
+      ) : records.length === 0 ? (
+        <View style={styles.centerContainer}>
+          <Text style={{ color: COLORS.textMuted, fontSize: 13 }}>아직 남긴 기록이 없어요.</Text>
+        </View>
       ) : (
         <FlatList
           data={records}
@@ -171,8 +231,6 @@ const styles = StyleSheet.create({
   headerTitle: { fontSize: 16, fontWeight: "700", color: COLORS.textMain },
   listContent: { padding: 16, paddingBottom: 40 },
   centerContainer: { flex: 1, justifyContent: "center", alignItems: "center" },
-  
-  // 카드 스타일
   recordCard: { backgroundColor: COLORS.white, borderRadius: 16, padding: 16, marginBottom: 12, borderWidth: 1, borderColor: COLORS.border },
   summaryArea: {},
   summaryHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 8 },
@@ -181,8 +239,6 @@ const styles = StyleSheet.create({
   keywordContainer: { flexDirection: "row", flexWrap: "wrap", gap: 6 },
   keywordChip: { backgroundColor: COLORS.primaryLight, paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6 },
   keywordText: { fontSize: 11, fontWeight: "600", color: COLORS.primary },
-  
-  // 펼침(상세) 영역 스타일
   detailArea: { marginTop: 12 },
   divider: { height: 1, backgroundColor: COLORS.border, marginBottom: 12 },
   recordImage: { width: "100%", height: 200, borderRadius: 12, marginBottom: 12, backgroundColor: "#E5E7EB" },
