@@ -1,4 +1,14 @@
-import "jsr:@supabase/functions-js/edge-runtime.d.ts";
+// Supabase Edge Function은 Deno 런타임에서 실행되지만,
+// Expo 프로젝트의 일반 TypeScript 서버에서도 오류 없이 편집할 수 있도록
+// 필요한 Deno 전역 타입만 이 파일 안에 선언한다.
+declare const Deno: {
+  env: {
+    get(name: string): string | undefined;
+  };
+  serve(
+    handler: (request: Request) => Response | Promise<Response>,
+  ): void;
+};
 
 type EssayPersona =
   | "emotion_interpreter"
@@ -250,28 +260,34 @@ function normalizeRecord(
     ? value as Record<string, unknown>
     : {};
 
-  const userContent = toCleanString(raw.userContent).slice(
-    0,
-    MAX_RECORD_CONTENT_LENGTH,
+  const missionTitle = toCleanString(
+    raw.missionTitle,
+    `기록 ${index + 1}`,
   );
-
-  if (!userContent) {
-    throw new Error(
-      `${index + 1}번째 기록의 내용이 비어 있습니다.`,
-    );
-  }
+  const missionDescription = toCleanString(raw.missionDescription);
+  const emotion = toNullableString(raw.emotion);
+  const placeName = toNullableString(raw.placeName);
+  const fallbackContent = [
+    missionDescription,
+    emotion ? `기록 당시 감정: ${emotion}` : "",
+    placeName ? `기록 장소: ${placeName}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+  const userContent = (
+    toCleanString(raw.userContent) ||
+    fallbackContent ||
+    `${missionTitle} 미션을 완료한 기록입니다.`
+  ).slice(0, MAX_RECORD_CONTENT_LENGTH);
 
   return {
-    missionTitle: toCleanString(
-      raw.missionTitle,
-      `기록 ${index + 1}`,
-    ),
-    missionDescription: toCleanString(raw.missionDescription),
+    missionTitle,
+    missionDescription,
     category: toNullableString(raw.category),
     recordedAt: toCleanString(raw.recordedAt, "날짜 정보 없음"),
     userContent,
-    emotion: toNullableString(raw.emotion),
-    placeName: toNullableString(raw.placeName),
+    emotion,
+    placeName,
     photoUrls: normalizePhotoUrls(raw.photoUrls),
   };
 }
@@ -1224,7 +1240,7 @@ async function callUpstage(
     return content;
   } catch (error) {
     if (
-      error instanceof DOMException &&
+      error instanceof Error &&
       error.name === "AbortError"
     ) {
       throw new Error("Upstage가 90초 안에 응답하지 않았습니다.");

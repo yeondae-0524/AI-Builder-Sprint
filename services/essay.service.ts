@@ -1355,17 +1355,9 @@ export async function createEssayDraft(
   if (existingError) throw existingError;
   if (existing?.id) {
     const existingEssayId = String(existing.id);
-    const { count, error: versionCountError } = await supabase
-      .from("essay_versions")
-      .select("id", { count: "exact", head: true })
-      .eq("essay_id", existingEssayId);
 
-    if (versionCountError) throw versionCountError;
-    if ((count ?? 0) > 0 && String(existing.content ?? "").trim()) {
-      await completeJourneyAfterEssay(journeyId, existingEssayId);
-      return existingEssayId;
-    }
-
+    // 이미 완성된 에세이가 있어도 사용자가 다른 AI를 선택하면
+    // 같은 여정의 기존 에세이를 새 분석 결과로 다시 생성한다.
     await generateEssayVersion(existingEssayId, { persona });
     await completeJourneyAfterEssay(journeyId, existingEssayId);
     return existingEssayId;
@@ -1490,18 +1482,34 @@ export async function createEssayDraft(
 }
 
 function buildRecordPayload(records: EssayRecord[]) {
-  return records.map((record) => ({
-    missionTitle: record.missionTitle,
-    missionDescription: record.missionDescription,
-    category: record.categoryName,
-    recordedAt: record.recordedAt,
-    userContent: record.content,
-    emotion: record.emotion
+  return records.map((record) => {
+    const content = record.content.trim();
+    const missionDescription = record.missionDescription.trim();
+    const normalizedEmotion = record.emotion
       ? EMOTION_LABELS[record.emotion] ?? record.emotion
-      : null,
-    placeName: record.placeName,
-    photoUrls: record.photoUrls,
-  }));
+      : null;
+    const fallbackContent = [
+      missionDescription,
+      normalizedEmotion ? `기록 당시 감정: ${normalizedEmotion}` : "",
+      record.placeName ? `기록 장소: ${record.placeName}` : "",
+    ]
+      .filter(Boolean)
+      .join("\n");
+
+    return {
+      missionTitle: record.missionTitle,
+      missionDescription: record.missionDescription,
+      category: record.categoryName,
+      recordedAt: record.recordedAt,
+      userContent:
+        content ||
+        fallbackContent ||
+        `${record.missionTitle} 미션을 완료한 기록입니다.`,
+      emotion: normalizedEmotion,
+      placeName: record.placeName,
+      photoUrls: record.photoUrls,
+    };
+  });
 }
 
 type EssayAiResult = {
@@ -1641,7 +1649,30 @@ export async function generateEssayVersion(
         ? String(existingVersion.created_at)
         : new Date().toISOString();
 
-    if (!existingVersion?.id) {
+    if (existingVersion?.id) {
+      const { data: updated, error: updateError } =
+        await supabase
+          .from("essay_versions")
+          .update({
+            style: "balanced",
+            essay_type: "taste_report",
+            postcard_format: null,
+            title: generated.title,
+            content: generated.content,
+            payload: generated.meta,
+          })
+          .eq("id", existingVersion.id)
+          .eq("essay_id", essayId)
+          .select("id, version_no, created_at")
+          .single();
+
+      if (updateError) throw updateError;
+
+      versionId = String(updated.id);
+      versionNo =
+        normalizeVersionNo(Number(updated.version_no)) ?? 1;
+      versionCreatedAt = String(updated.created_at);
+    } else {
       const { data: inserted, error: insertError } =
         await supabase
           .from("essay_versions")
