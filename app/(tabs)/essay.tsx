@@ -381,7 +381,7 @@ function getBeginiImage(expression: ComicPanel["expression"]) {
   }
 }
 
-const COMIC_EFFECT_LABELS: Record<ComicPanel["effect"], string> = {
+const COMIC_EFFECT_LABELS: Record<string, string> = {
   none: "",
   sweat: "식은땀",
   shock: "충격",
@@ -578,7 +578,7 @@ function ComicPanelCard({
   const background =
     COMIC_BACKGROUND_META[panel.background] ??
     COMIC_BACKGROUND_META.generic;
-  const effectLabel = COMIC_EFFECT_LABELS[panel.effect];
+  const effectLabel = COMIC_EFFECT_LABELS[(panel as any).effect];
   const memeTag = getComicMemeTag(comedyStyle, panel.panelNumber);
 
   return (
@@ -1017,6 +1017,11 @@ export default function EssayScreen() {
               <View style={styles.journeyTextWrap}>
                 <Text style={styles.journeyLabel}>현재 여정</Text>
                 <Text style={styles.journeyTitle}>{journey.title}</Text>
+                {(journey as any).goal ? (
+                  <View style={styles.activeGoalBadge}>
+                    <Text style={styles.activeGoalText}>🎯 {(journey as any).goal}</Text>
+                  </View>
+                ) : null}
                 <Text style={styles.journeyPeriod}>
                   {journey.durationDays}일 여정 · {journey.completedDayCount}/
                   {journey.targetDayCount}일 기록
@@ -1417,6 +1422,19 @@ const styles = StyleSheet.create({
     color: "#FFFFFF",
     fontSize: 21,
     fontWeight: "800",
+  },
+  activeGoalBadge: {
+    marginTop: 8,
+    alignSelf: "flex-start",
+    backgroundColor: "rgba(255, 255, 255, 0.15)",
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+  },
+  activeGoalText: {
+    color: "#E1E9E3",
+    fontSize: 12,
+    fontWeight: "700",
   },
   journeyPeriod: {
     color: "#D8E2DC",
