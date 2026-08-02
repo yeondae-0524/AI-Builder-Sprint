@@ -177,41 +177,28 @@ export async function removeFriend(relationId: string): Promise<void> {
 }
 
 export async function getFriendPublicProfile(userId: string): Promise<FriendPublicProfile> {
-  const [profileResult, badgesResult, missionsResult, essaysResult] = await Promise.all([
+  const [profileResult, statsResult] = await Promise.all([
     supabase
       .from("profiles")
       .select("id, nickname, avatar_url, selected_title")
       .eq("id", userId)
       .single(),
 
-    supabase
-      .from("user_badges")
-      .select("id", { count: "exact", head: true })
-      .eq("user_id", userId)
-      .neq("tier", "LOCKED"),
-
-    supabase
-      .from("mission_attempts")
-      .select("id", { count: "exact", head: true })
-      .eq("user_id", userId)
-      .not("completed_at", "is", null),
-
-    supabase
-      .from("essays")
-      .select("id", { count: "exact", head: true })
-      .eq("user_id", userId)
-      .eq("status", "completed"),
+    supabase.rpc("get_public_profile_stats", { p_user_id: userId }),
   ]);
 
   if (profileResult.error) throw profileResult.error;
+  if (statsResult.error) throw statsResult.error;
+
+  const stats = Array.isArray(statsResult.data) ? statsResult.data[0] : statsResult.data;
 
   return {
     id: profileResult.data.id,
     nickname: profileResult.data.nickname,
     avatar_url: profileResult.data.avatar_url,
     selected_title: profileResult.data.selected_title,
-    badgeCount: badgesResult.count ?? 0,
-    completedMissionCount: missionsResult.count ?? 0,
-    essayCount: essaysResult.count ?? 0,
+    badgeCount: Number(stats?.badge_count ?? 0),
+    completedMissionCount: Number(stats?.completed_mission_count ?? 0),
+    essayCount: Number(stats?.essay_count ?? 0),
   };
 }
