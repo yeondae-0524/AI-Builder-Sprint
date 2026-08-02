@@ -32,7 +32,6 @@ import { WebView } from "react-native-webview";
 
 import { KakaoMapView } from "../../components/KakaoMapView";
 import { useMission } from "../../contexts/mission-context";
-import { normalizeMissionGuide } from "../../lib/mission-guide-normalizer";
 import { supabase } from "../../lib/supabase";
 import {
   Mission as BackendMission,
@@ -1082,6 +1081,71 @@ function hasUsableMissionLocation(mission: HomeMission) {
   );
 }
 
+function hasUsableDistanceLabel(value: string | null | undefined) {
+  const normalized = String(value ?? "").trim();
+
+  return Boolean(
+    normalized &&
+      normalized !== "거리 정보 없음" &&
+      normalized !== "-"
+  );
+}
+
+function mergeActiveMissionPlaceSnapshot(
+  loadedMission: HomeMission,
+  cachedMission: HomeMission | undefined,
+) {
+  if (!cachedMission) {
+    if (
+      !loadedMission.isAtHome &&
+      !loadedMission.isLocationFlexible &&
+      !hasUsableDistanceLabel(loadedMission.dist) &&
+      loadedMission.placeName
+    ) {
+      return {
+        ...loadedMission,
+        dist: "장소 지정됨",
+      };
+    }
+
+    return loadedMission;
+  }
+
+  const placeId = loadedMission.placeId ?? cachedMission.placeId;
+  const placeLat = loadedMission.placeLat ?? cachedMission.placeLat;
+  const placeLng = loadedMission.placeLng ?? cachedMission.placeLng;
+  const placeName = loadedMission.placeName ?? cachedMission.placeName;
+  const placeAddress =
+    loadedMission.placeAddress ?? cachedMission.placeAddress;
+  const districtName =
+    loadedMission.districtName ?? cachedMission.districtName;
+
+  const hasFixedPlace =
+    loadedMission.isAtHome !== true &&
+    loadedMission.isLocationFlexible !== true &&
+    Boolean(placeName);
+
+  const dist = hasUsableDistanceLabel(loadedMission.dist)
+    ? loadedMission.dist
+    : hasUsableDistanceLabel(cachedMission.dist)
+      ? cachedMission.dist
+      : hasFixedPlace
+        ? "장소 지정됨"
+        : loadedMission.dist;
+
+  return {
+    ...cachedMission,
+    ...loadedMission,
+    placeId,
+    placeLat,
+    placeLng,
+    placeName,
+    placeAddress,
+    districtName,
+    dist,
+  };
+}
+
 function isUsableRecommendation(mission: HomeMission) {
   // 시작할 수 없는 임시 AI 미션과 영어 제목은 추천 목록에서 제외한다.
   return (
@@ -1460,6 +1524,153 @@ function inferPlaceCategory(place: any): CategoryName {
   return normalizeCategory(rawCategory, `${name} ${address}`);
 }
 
+const PLACE_CATEGORY_COMPATIBILITY: Record<
+  CategoryName,
+  CategoryName[]
+> = {
+  음식: ["음식"],
+  "카페 및 디저트": ["카페 및 디저트"],
+  산책: ["산책"],
+  배움: ["배움", "감상"],
+  감상: ["감상", "배움"],
+  활동: ["활동", "산책"],
+  휴식: ["휴식", "산책"],
+  기타: ["기타"],
+};
+
+function isMissionPlaceCategoryCompatible(
+  missionCategory: CategoryName,
+  placeCategory: CategoryName | undefined,
+) {
+  if (!placeCategory) {
+    return false;
+  }
+
+  return PLACE_CATEGORY_COMPATIBILITY[
+    missionCategory
+  ].includes(placeCategory);
+}
+
+function isMissionTextCompatibleWithPlaceCategory(
+  mission: HomeMission,
+  placeCategory: CategoryName,
+) {
+  const text =
+    `${mission.title} ${mission.desc} ${mission.instructions}`
+      .replace(/\s+/g, " ")
+      .toLowerCase();
+
+  if (placeCategory === "카페 및 디저트") {
+    return (
+      /(카페|커피|차|음료|디저트|빵|케이크|메뉴|맛|주문|시그니처|분위기)/u.test(
+        text,
+      ) &&
+      !/(명상|호흡\s*운동|요가|러닝|달리기|낮잠|스트레칭|근력\s*운동)/u.test(
+        text,
+      )
+    );
+  }
+
+  if (placeCategory === "음식") {
+    return (
+      /(음식|식사|메뉴|맛|먹|요리|주문|한\s*끼|시그니처)/u.test(
+        text,
+      ) &&
+      !/(명상|요가|러닝|낮잠|독서|공부)/u.test(text)
+    );
+  }
+
+  if (placeCategory === "산책") {
+    const actionMatches =
+      mission.cat === "활동"
+        ? /(체험|활동|운동|타기|도전|참여|탐방)/u.test(
+            text,
+          )
+        : mission.cat === "휴식"
+          ? /(쉬|휴식|여유|명상|호흡|편안|멍|자연)/u.test(
+              text,
+            )
+          : /(걷|산책|풍경|자연|둘러보|살펴보|사진|관찰|탐방)/u.test(
+              text,
+            );
+
+    return (
+      actionMatches &&
+      !/(메뉴를\s*주문|음식을\s*주문|커피를\s*주문)/u.test(
+        text,
+      )
+    );
+  }
+
+  if (placeCategory === "감상" || placeCategory === "배움") {
+    return /(감상|관람|전시|공연|작품|책|읽|배우|알아보|둘러보|문화|사진)/u.test(
+      text,
+    );
+  }
+
+  if (placeCategory === "활동") {
+    return /(체험|활동|운동|만들|타기|도전|참여|배우)/u.test(
+      text,
+    );
+  }
+
+  if (placeCategory === "휴식") {
+    return /(쉬|휴식|여유|명상|호흡|편안|멍)/u.test(
+      text,
+    );
+  }
+
+  return mission.cat === placeCategory;
+}
+
+function isPlaceCandidateCompatibleWithMission(
+  mission: HomeMission,
+  place: PlaceCandidate,
+) {
+  const placeCategory =
+    place.category ??
+    normalizeCategory(
+      null,
+      `${place.name} ${place.address ?? ""}`,
+    );
+
+  return (
+    isMissionPlaceCategoryCompatible(
+      mission.cat,
+      placeCategory,
+    ) &&
+    isMissionTextCompatibleWithPlaceCategory(
+      mission,
+      placeCategory,
+    )
+  );
+}
+
+function isExistingMissionPlaceObviouslyInvalid(
+  mission: HomeMission,
+) {
+  if (!hasActualPlace(mission)) {
+    return false;
+  }
+
+  const combined =
+    `${mission.placeName ?? ""} ${mission.placeAddress ?? ""} ${mission.title} ${mission.instructions}`
+      .replace(/\s+/g, " ")
+      .toLowerCase();
+
+  const looksLikeCafe =
+    /(카페|커피|디저트|베이커리|빵집|스타벅스|투썸|메가커피|컴포즈|이디야)/u.test(
+      combined,
+    );
+
+  return (
+    looksLikeCafe &&
+    /(명상|호흡\s*운동|요가|러닝|달리기|낮잠|스트레칭|근력\s*운동)/u.test(
+      combined,
+    )
+  );
+}
+
 async function fetchPlaceCandidates({
   center,
   radiusKm,
@@ -1735,36 +1946,36 @@ function assignActualPlaces(
       }
 
       if (hasActualPlace(mission)) {
+        // 서버에 이미 잘못 저장된 대표적 조합도 추천 목록에서 다시 노출하지 않는다.
+        if (isExistingMissionPlaceObviouslyInvalid(mission)) {
+          console.warn(
+            "장소와 맞지 않는 기존 미션을 추천에서 제외합니다:",
+            mission.title,
+            mission.placeName,
+          );
+          return null;
+        }
+
         if (mission.placeId) {
           usedPlaceIds.add(mission.placeId);
         }
+
         return {
           ...mission,
           isLocationFlexible: false,
         };
       }
 
-      const exactCategory = places.find(
-        (place) =>
-          !usedPlaceIds.has(place.id) &&
-          place.category === mission.cat,
+      // 장소가 비어 있는 미션에는 카테고리와 행동이 모두 맞는 장소만 배정한다.
+      // 아무 장소나 붙이는 fallback은 사용하지 않는다.
+      const place = places.find(
+        (candidate) =>
+          !usedPlaceIds.has(candidate.id) &&
+          isPlaceCandidateCompatibleWithMission(
+            mission,
+            candidate,
+          ),
       );
-      const compatibleCategory = places.find(
-        (place) =>
-          !usedPlaceIds.has(place.id) &&
-          (mission.cat === "휴식"
-            ? place.category === "카페 및 디저트" ||
-              place.category === "산책"
-            : mission.cat === "감상"
-              ? place.category === "기타" ||
-                place.category === "배움"
-              : false),
-      );
-      const fallbackPlace = places.find(
-        (place) => !usedPlaceIds.has(place.id),
-      );
-      const place =
-        exactCategory ?? compatibleCategory ?? fallbackPlace;
 
       if (!place) {
         return null;
@@ -1925,14 +2136,11 @@ function mapBackendMission(
       "",
   ).trim();
 
-  const instructionSource = isKoreanMissionText(rawInstructions)
-    ? rawInstructions
-    : desc || "미션 안내에 따라 경험을 진행해보세요.";
-
-  const instructions = normalizeMissionGuide(
-    instructionSource,
-    desc,
-  );
+  // clever-task가 생성해 DB에 저장한 instructions를 그대로 표시한다.
+  // 홈 화면에서는 문장을 보충하거나 description과 섞어 다시 작성하지 않는다.
+  const instructions = isKoreanMissionText(rawInstructions)
+    ? rawInstructions.replace(/\s+/g, " ").trim()
+    : desc || "미션 안내를 확인해주세요.";
 
   const rawRecommendationReasonCandidate = String(
     backendMission.recommendation_reason ??
@@ -2078,10 +2286,7 @@ function mapBackendMission(
     id,
     title,
     desc,
-    instructions:
-      instructions ||
-      desc ||
-      "미션 안내에 따라 경험을 진행해보세요.",
+    instructions,
     recommendationReason,
     durationMinutes,
     time,
@@ -2950,6 +3155,247 @@ function RecordLocationPickerMap({
   );
 }
 
+type ActualPlaceSearchRequest = {
+  coordinate: Coordinate;
+  nonce: number;
+};
+
+function ActualPlacePickerMap({
+  center,
+  selectedPlace,
+  searchRequest,
+  onLoadingChange,
+  onPlaceSelected,
+}: {
+  center: Coordinate;
+  selectedPlace: PlaceCandidate | null;
+  searchRequest: ActualPlaceSearchRequest | null;
+  onLoadingChange: (loading: boolean) => void;
+  onPlaceSelected: (place: PlaceCandidate) => void;
+}) {
+  const webViewRef = useRef<any>(null);
+
+  const html = useMemo(
+    () => `
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <style>
+    * { box-sizing: border-box; }
+    html, body, #map { width: 100%; height: 100%; margin: 0; padding: 0; }
+    body { overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", sans-serif; }
+    #loading {
+      position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+      background: #F5F2E9; color: #65766D; font-size: 13px; z-index: 30;
+    }
+    #status {
+      position: fixed; top: 10px; left: 50%; transform: translateX(-50%);
+      max-width: calc(100vw - 28px); padding: 8px 12px; border-radius: 999px;
+      background: rgba(255,255,255,0.96); color: #315C4A; font-size: 11px;
+      line-height: 15px; font-weight: 800; text-align: center;
+      box-shadow: 0 3px 12px rgba(0,0,0,0.14); z-index: 20; white-space: nowrap;
+    }
+    .place-poi {
+      position: relative; display: flex; flex-direction: column; align-items: center;
+      cursor: pointer; -webkit-tap-highlight-color: transparent;
+    }
+    .place-poi-button {
+      width: 34px; height: 34px; display: flex; align-items: center; justify-content: center;
+      padding: 0; border: 2px solid #fff; border-radius: 17px;
+      background: #315C4A; color: #fff; font-size: 16px;
+      box-shadow: 0 3px 9px rgba(15,23,42,0.28); cursor: pointer;
+    }
+    .place-poi-label {
+      max-width: 116px; margin-top: 3px; padding: 3px 6px;
+      overflow: hidden; border: 1px solid rgba(15,23,42,0.08); border-radius: 7px;
+      background: rgba(255,255,255,0.95); color: #26372E; font-size: 9px;
+      line-height: 12px; font-weight: 750; text-overflow: ellipsis; white-space: nowrap;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.12);
+    }
+    .selected-card {
+      min-width: 190px; max-width: 245px; padding: 9px 11px;
+      border: 2px solid #E07A5F; border-radius: 12px; background: #fff;
+      box-shadow: 0 5px 16px rgba(0,0,0,0.20); transform: translateY(-10px);
+    }
+    .selected-caption { color: #E07A5F; font-size: 10px; font-weight: 850; margin-bottom: 3px; }
+    .selected-name { overflow: hidden; color: #26372E; font-size: 13px; font-weight: 850; text-overflow: ellipsis; white-space: nowrap; }
+    .selected-address { overflow: hidden; margin-top: 3px; color: #65766D; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+  </style>
+</head>
+<body>
+  <div id="loading">지도를 불러오는 중이에요</div>
+  <div id="status">장소 마커를 눌러 실제 장소를 선택해주세요</div>
+  <div id="map"></div>
+  <script src="https://dapi.kakao.com/v2/maps/sdk.js?appkey=${KAKAO_JS_KEY}&autoload=false&libraries=services"></script>
+  <script>
+    kakao.maps.load(function () {
+      document.getElementById('loading').style.display = 'none';
+      const initial = new kakao.maps.LatLng(${center.lat}, ${center.lng});
+      const map = new kakao.maps.Map(document.getElementById('map'), { center: initial, level: 4 });
+      const placesService = new kakao.maps.services.Places();
+      const categoryCodes = ['MT1','CS2','PS3','SC4','AC5','PK6','OL7','SW8','BK9','CT1','AG2','PO3','AT4','AD5','FD6','CE7','HP8','PM9'];
+      const categoryEmoji = { MT1:'🛒',CS2:'🏪',PS3:'👶',SC4:'🏫',AC5:'📚',PK6:'🅿️',OL7:'⛽',SW8:'🚇',BK9:'🏦',CT1:'🎭',AG2:'🏠',PO3:'🏛️',AT4:'📍',AD5:'🏨',FD6:'🍽️',CE7:'☕',HP8:'🏥',PM9:'💊' };
+      let overlays = [];
+      let selectedOverlay = null;
+      let loadSequence = 0;
+      let idleTimer = null;
+      const statusElement = document.getElementById('status');
+      const post = function (payload) { window.ReactNativeWebView.postMessage(JSON.stringify(payload)); };
+      const escapeHtml = function (value) { return String(value || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#039;'); };
+      const clearOverlays = function () { overlays.forEach(function (overlay) { overlay.setMap(null); }); overlays = []; };
+      const normalizePlace = function (raw) { return { id:String(raw.id || ''), name:String(raw.place_name || ''), latitude:Number(raw.y), longitude:Number(raw.x), address:String(raw.road_address_name || raw.address_name || ''), category:String(raw.category_group_name || raw.category_name || ''), categoryCode:String(raw.category_group_code || '') }; };
+      const showSelectedPlace = function (place, shouldPan) {
+        if (selectedOverlay) selectedOverlay.setMap(null);
+        const position = new kakao.maps.LatLng(Number(place.latitude), Number(place.longitude));
+        const content = document.createElement('div');
+        content.className = 'selected-card';
+        content.innerHTML = '<div class="selected-caption">현재 선택된 실제 장소</div><div class="selected-name">' + escapeHtml(place.name) + '</div><div class="selected-address">' + escapeHtml(place.address || '주소 정보 없음') + '</div>';
+        selectedOverlay = new kakao.maps.CustomOverlay({ map:map, position:position, content:content, xAnchor:0.5, yAnchor:1.25, zIndex:50 });
+        if (shouldPan) map.panTo(position);
+      };
+      const selectPlace = function (rawPlace) {
+        const place = normalizePlace(rawPlace);
+        if (!place.id || !place.name || !Number.isFinite(place.latitude) || !Number.isFinite(place.longitude)) return;
+        showSelectedPlace(place, true);
+        statusElement.textContent = '선택됨 · ' + place.name;
+        post({ type:'recordPlaceSelected', place:place });
+      };
+      const searchCategory = function (code, bounds) {
+        return new Promise(function (resolve) {
+          placesService.categorySearch(code, function (data, status) { resolve(status === kakao.maps.services.Status.OK ? data : []); }, { bounds:bounds, sort:kakao.maps.services.SortBy.ACCURACY });
+        });
+      };
+      const renderMarkers = function (places) {
+        clearOverlays();
+        places.forEach(function (rawPlace) {
+          const place = normalizePlace(rawPlace);
+          if (!place.id || !place.name || !Number.isFinite(place.latitude) || !Number.isFinite(place.longitude)) return;
+          const content = document.createElement('div');
+          content.className = 'place-poi';
+          const button = document.createElement('button');
+          button.type = 'button'; button.className = 'place-poi-button'; button.textContent = categoryEmoji[place.categoryCode] || '📍';
+          const label = document.createElement('div'); label.className = 'place-poi-label'; label.textContent = place.name;
+          content.appendChild(button); content.appendChild(label);
+          const choose = function (event) { event.preventDefault(); event.stopPropagation(); selectPlace(rawPlace); };
+          button.addEventListener('click', choose); content.addEventListener('click', choose);
+          overlays.push(new kakao.maps.CustomOverlay({ map:map, position:new kakao.maps.LatLng(place.latitude, place.longitude), content:content, xAnchor:0.5, yAnchor:1, zIndex:10 }));
+        });
+      };
+      const loadVisiblePlaces = async function () {
+        const sequence = ++loadSequence;
+        post({ type:'recordPlaceListLoading' });
+        statusElement.textContent = map.getLevel() > 7 ? '장소를 보려면 지도를 확대해주세요' : '현재 지도에서 실제 장소를 불러오는 중이에요';
+        if (map.getLevel() > 7) { clearOverlays(); post({ type:'recordPlaceListReady' }); return; }
+        try {
+          const groups = await Promise.all(categoryCodes.map(function (code) { return searchCategory(code, map.getBounds()); }));
+          if (sequence !== loadSequence) return;
+          const unique = {};
+          groups.flat().forEach(function (place) { if (place && place.id) unique[place.id] = place; });
+          const results = Object.values(unique).slice(0, 55);
+          renderMarkers(results);
+          statusElement.textContent = results.length ? '장소 마커를 눌러 선택해주세요 · ' + results.length + '곳' : '이 화면에서는 장소를 찾지 못했어요. 지도를 이동하거나 확대해주세요';
+          post({ type:'recordPlaceListReady' });
+        } catch (_) {
+          clearOverlays(); statusElement.textContent = '장소를 불러오지 못했어요. 지도를 다시 움직여주세요'; post({ type:'recordPlaceListReady' });
+        }
+      };
+      const scheduleLoad = function () { if (idleTimer) clearTimeout(idleTimer); idleTimer = setTimeout(loadVisiblePlaces, 260); };
+      window.focusActualPlaceMap = function (lat, lng) { lat=Number(lat); lng=Number(lng); if (!Number.isFinite(lat) || !Number.isFinite(lng)) return; map.panTo(new kakao.maps.LatLng(lat,lng)); setTimeout(loadVisiblePlaces,320); };
+      window.showSelectedActualPlace = function (placeJson) { try { const place = typeof placeJson === 'string' ? JSON.parse(placeJson) : placeJson; showSelectedPlace(place,false); } catch (_) {} };
+      kakao.maps.event.addListener(map, 'idle', scheduleLoad);
+      loadVisiblePlaces();
+    });
+  </script>
+</body>
+</html>`,
+    [center.lat, center.lng],
+  );
+
+  useEffect(() => {
+    if (!searchRequest) return;
+    webViewRef.current?.injectJavaScript(`
+      if (window.focusActualPlaceMap) {
+        window.focusActualPlaceMap(${searchRequest.coordinate.lat}, ${searchRequest.coordinate.lng});
+      }
+      true;
+    `);
+  }, [searchRequest?.nonce]);
+
+  useEffect(() => {
+    if (!selectedPlace) return;
+    const serialized = JSON.stringify(selectedPlace).replace(/</g, "\\u003c");
+    webViewRef.current?.injectJavaScript(`
+      if (window.showSelectedActualPlace) {
+        window.showSelectedActualPlace(${JSON.stringify(serialized)});
+      }
+      true;
+    `);
+  }, [selectedPlace?.id, selectedPlace?.latitude, selectedPlace?.longitude]);
+
+  return (
+    <WebView
+      ref={webViewRef}
+      originWhitelist={["*"]}
+      source={{ html }}
+      javaScriptEnabled
+      domStorageEnabled
+      mixedContentMode="always"
+      onMessage={(event) => {
+        try {
+          const message = JSON.parse(event.nativeEvent.data) as {
+            type?: string;
+            place?: {
+              id?: string;
+              name?: string;
+              latitude?: number;
+              longitude?: number;
+              address?: string;
+              category?: string;
+            };
+          };
+
+          if (message.type === "recordPlaceListLoading") {
+            onLoadingChange(true);
+            return;
+          }
+
+          if (message.type === "recordPlaceListReady") {
+            onLoadingChange(false);
+            return;
+          }
+
+          if (
+            message.type === "recordPlaceSelected" &&
+            message.place &&
+            typeof message.place.id === "string" &&
+            typeof message.place.name === "string" &&
+            isFiniteNumber(message.place.latitude) &&
+            isFiniteNumber(message.place.longitude)
+          ) {
+            onLoadingChange(false);
+            onPlaceSelected({
+              id: message.place.id,
+              name: message.place.name,
+              latitude: message.place.latitude,
+              longitude: message.place.longitude,
+              address: message.place.address || undefined,
+              category: normalizeCategory(
+                message.place.category,
+                `${message.place.name} ${message.place.address ?? ""}`,
+              ),
+            });
+          }
+        } catch {
+          // 지도 내부의 다른 메시지는 무시합니다.
+        }
+      }}
+      style={styles.recordLocationPickerMap}
+    />
+  );
+}
+
 export default function HomeScreen() {
   const [missions, setMissions] =
     useState<HomeMission[]>([]);
@@ -3035,6 +3481,8 @@ export default function HomeScreen() {
     useState("");
   const [recordPlacesLoading, setRecordPlacesLoading] =
     useState(false);
+  const [recordExternalPlaceSearch, setRecordExternalPlaceSearch] =
+    useState<ActualPlaceSearchRequest | null>(null);
   const [recordSaving, setRecordSaving] =
     useState(false);
   const [recordDetail, setRecordDetail] =
@@ -3349,7 +3797,7 @@ export default function HomeScreen() {
           recommendationReasonInstruction:
             "각 미션마다 가장 핵심적인 추천 이유 하나만 recommendation_reason 필드에 가능하면 한 줄 분량의 짧은 한국어 한 문장으로 작성해주세요. 반드시 '~해요.', '~좋아요.', '~추천드려요.'처럼 높임말 완결형으로 끝내고, 말줄임표나 미완성 표현을 쓰지 마세요. 미션마다 서로 다른 이유를 쓰고 같은 문장을 반복하지 마세요.",
           generationInstruction:
-            `제목, 설명, 미션 안내, 추천 이유를 모두 자연스러운 한국어로 작성하세요. 추천 이유는 가능하면 한 줄 분량으로 짧게 쓰되 반드시 높임말 완결형으로 끝내고 말줄임표를 사용하지 마세요. 카테고리를 상관없음으로 선택했을 때는 사용자의 초기 관심 카테고리를 약 60% 비중으로 우선하되, 관심사 밖의 카테고리도 반드시 섞으세요. 가능한 경우 최소 4개 이상의 서로 다른 카테고리를 포함하고 같은 카테고리는 최대 2개까지만 포함하세요. 장소 유형은 세 가지입니다. 특정 장소 미션은 availablePlaces에 포함된 실제 장소의 이름과 ID를 사용하세요. 집에서 하는 미션은 place_name을 정확히 '내 방'으로 쓰고 requires_place를 false로 설정하세요. 특정 장소가 필요 없는 미션은 place_name을 정확히 '어디서나 가능'으로 쓰고 requires_place를 false로 설정하세요. '자유 장소', '지역 내 어디서나', '현재 위치 주변의 편한 장소' 같은 다른 표현은 사용하지 마세요. 집 미션은 전체 10개 중 최대 2개, 어디서나 가능 미션은 최대 3개만 포함하세요. 반드시 데이터베이스에 저장된 UUID 미션만 반환하세요. ${
+            `제목, 설명, 미션 안내, 추천 이유를 모두 자연스러운 한국어로 작성하세요. instructions는 반드시 정확히 두 문장으로 작성하세요. 첫 문장은 무엇을 할지 부드러운 높임말로 안내하고, 둘째 문장은 그 경험의 기대나 매력을 높임말로 설명하세요. 번호, 불릿, 단계 나열, 세 번째 문장은 절대 쓰지 마세요. 추천 이유는 가능하면 한 줄 분량으로 짧게 쓰되 반드시 높임말 완결형으로 끝내고 말줄임표를 사용하지 마세요. 카테고리를 상관없음으로 선택했을 때는 사용자의 초기 관심 카테고리를 약 60% 비중으로 우선하되, 관심사 밖의 카테고리도 반드시 섞으세요. 가능한 경우 최소 4개 이상의 서로 다른 카테고리를 포함하고 같은 카테고리는 최대 2개까지만 포함하세요. 장소 유형은 세 가지입니다. 특정 장소 미션은 availablePlaces에 포함된 실제 장소의 이름과 ID를 사용하고, 반드시 그 장소의 category와 실제 수행 행동을 일치시키세요. 카페 및 디저트 장소에서는 메뉴·음료·디저트·맛·공간 분위기 미션만 만들고 명상·요가·운동·낮잠 미션은 만들지 마세요. 음식 장소에서는 메뉴·식사·맛 미션만 만들고 독서·명상·운동 미션은 만들지 마세요. 산책 장소에서는 걷기·풍경 관찰·사진·자연 감상·가벼운 휴식 미션을 만드세요. 감상·배움 장소에서는 작품 관람·전시·공연·독서·학습처럼 해당 시설을 실제로 이용하는 미션을 만드세요. 장소 이름만 문장에 붙이고 무관한 행동을 시키는 조합은 절대 만들지 마세요. 집에서 하는 미션은 place_name을 정확히 '내 방'으로 쓰고 requires_place를 false로 설정하세요. 특정 장소가 필요 없는 미션은 place_name을 정확히 '어디서나 가능'으로 쓰고 requires_place를 false로 설정하세요. '자유 장소', '지역 내 어디서나', '현재 위치 주변의 편한 장소' 같은 다른 표현은 사용하지 마세요. 집 미션은 전체 10개 중 최대 2개, 어디서나 가능 미션은 최대 3개만 포함하세요. 반드시 데이터베이스에 저장된 UUID 미션만 반환하세요. ${
               avoidCurrent
                 ? "직전 추천에 나온 미션과 장소는 가능한 한 제외하고 새로운 조합을 반환하세요."
                 : ""
@@ -3634,13 +4082,21 @@ export default function HomeScreen() {
               ? placeMap[String(attemptWithPlace.place_id)]
               : null;
 
+            const loadedMission = mapBackendMission(
+              mission as ExtendedBackendMission,
+              0,
+              recommendationCenter ?? userLocation,
+              place,
+            );
+            const cachedMission = recommendationsRef.current.find(
+              (candidate) => candidate.id === missionId,
+            );
+
             return [
               missionId,
-              mapBackendMission(
-                mission as ExtendedBackendMission,
-                0,
-                recommendationCenter ?? userLocation,
-                place,
+              mergeActiveMissionPlaceSnapshot(
+                loadedMission,
+                cachedMission,
               ),
             ] as const;
           } catch (error) {
@@ -3868,6 +4324,7 @@ export default function HomeScreen() {
     );
     const sharedIsAtHome =
       shared.isAtHome === true ||
+      normalizeComparableText(shared.placeName) === "내방" ||
       /(내 방|내 집|집에서|집 안|방에서|자택)/.test(
         `${sharedTitle} ${sharedDescription} ${sharedInstructions}`,
       );
@@ -3904,10 +4361,15 @@ export default function HomeScreen() {
             isAtHome: sharedIsAtHome,
           }),
       ),
-      durationMinutes: parseDurationMinutes(
-        shared.time,
+      durationMinutes:
+        toFiniteNumber(shared.durationMinutes) ??
+        parseDurationMinutes(shared.time),
+      time: String(
+        shared.time ??
+          (toFiniteNumber(shared.durationMinutes) !== null
+            ? `${toFiniteNumber(shared.durationMinutes)}분`
+            : "시간 자유"),
       ),
-      time: String(shared.time ?? "시간 자유"),
       dist: sharedIsAtHome
         ? "내 방"
         : sharedIsLocationFlexible
@@ -3942,6 +4404,14 @@ export default function HomeScreen() {
         : sharedIsLocationFlexible
           ? "어디서나 가능"
           : shared.placeName,
+      placeAddress:
+        sharedIsAtHome || sharedIsLocationFlexible
+          ? undefined
+          : shared.placeAddress,
+      districtName:
+        sharedIsAtHome || sharedIsLocationFlexible
+          ? undefined
+          : shared.districtName,
       isAtHome: sharedIsAtHome,
       isLocationFlexible: sharedIsLocationFlexible,
       isFallback: !isUuid(String(shared.id)),
@@ -3951,8 +4421,13 @@ export default function HomeScreen() {
       const exists = previous.some(
         (mission) => mission.id === missionToAdd.id,
       );
+
       return exists
-        ? previous
+        ? previous.map((mission) =>
+            mission.id === missionToAdd.id
+              ? missionToAdd
+              : mission,
+          )
         : [missionToAdd, ...previous];
     });
     setSheetSection("recommended");
@@ -4592,6 +5067,7 @@ export default function HomeScreen() {
     setRecordSelectedPlace(null);
     setRecordPlaceSearch("");
     setRecordPlacesLoading(false);
+    setRecordExternalPlaceSearch(null);
   };
 
   const closeRecordModal = (force = false) => {
@@ -4611,6 +5087,7 @@ export default function HomeScreen() {
     setRecordSelectedPlace(null);
     setRecordPlaceSearch("");
     setRecordPlacesLoading(false);
+    setRecordExternalPlaceSearch(null);
   };
 
   const loadRecordPlaceCandidates = async () => {
@@ -5348,7 +5825,7 @@ export default function HomeScreen() {
             lng: markerCoordinate.lng,
             category: item.mission.cat,
             title: item.mission.title,
-            description: item.mission.desc,
+            description: item.mission.instructions,
             recommendationReason: normalizeRecommendationReason(
               item.mission.recommendationReason,
             ),
@@ -5451,9 +5928,9 @@ export default function HomeScreen() {
                     {homeItem.mission.title}
                   </Text>
 
-                  {homeItem.mission.desc ? (
+                  {homeItem.mission.instructions ? (
                     <Text style={styles.homeMissionCardDescription}>
-                      {homeItem.mission.desc}
+                      {homeItem.mission.instructions}
                     </Text>
                   ) : null}
 
@@ -6302,22 +6779,69 @@ export default function HomeScreen() {
 
                   {recordLocationKind === "place" ? (
                     <View style={styles.recordPlacePickerBox}>
-                      <TextInput
-                        value={recordPlaceSearch}
-                        onChangeText={setRecordPlaceSearch}
-                        placeholder="장소 이름이나 주소 검색"
-                        placeholderTextColor={T2}
-                        style={styles.recordPlaceSearchInput}
-                      />
+                      <View style={styles.recordLocationHeader}>
+                        <View style={styles.recordLocationHeaderText}>
+                          <Text style={styles.recordLocationHelp}>
+                            지도에 표시된 실제 장소 마커를 눌러 미션을 수행한 장소를 선택해주세요.
+                          </Text>
+                        </View>
+                        <Pressable
+                          onPress={() => {
+                            if (userLocation) {
+                              setRecordExternalPlaceSearch({
+                                coordinate: userLocation,
+                                nonce: Date.now(),
+                              });
+                            } else {
+                              Alert.alert(
+                                "현재 위치를 확인할 수 없어요",
+                                "위치 권한을 허용한 뒤 다시 시도해주세요.",
+                              );
+                            }
+                          }}
+                          style={styles.recordCurrentLocationButton}
+                        >
+                          <Text style={styles.recordCurrentLocationButtonText}>
+                            현재 위치로 이동
+                          </Text>
+                        </Pressable>
+                      </View>
+
+                      <View style={styles.recordLocationMapWrapper}>
+                        <ActualPlacePickerMap
+                          center={
+                            userLocation ??
+                            recommendationCenter ??
+                            DEFAULT_CENTER
+                          }
+                          selectedPlace={recordSelectedPlace}
+                          searchRequest={recordExternalPlaceSearch}
+                          onLoadingChange={setRecordPlacesLoading}
+                          onPlaceSelected={(place) => {
+                            setRecordSelectedPlace(place);
+                            setRecordPlaceSearch("");
+                          }}
+                        />
+                      </View>
 
                       {recordPlacesLoading ? (
                         <View style={styles.recordPlaceLoading}>
                           <ActivityIndicator color={BL} />
                           <Text style={styles.recordPlaceLoadingText}>
-                            실제 장소를 불러오는 중이에요...
+                            지도 주변의 실제 장소를 불러오는 중이에요...
                           </Text>
                         </View>
-                      ) : visibleRecordPlaceCandidates.length > 0 ? (
+                      ) : null}
+
+                      <TextInput
+                        value={recordPlaceSearch}
+                        onChangeText={setRecordPlaceSearch}
+                        placeholder="목록에서 장소 이름이나 주소 검색"
+                        placeholderTextColor={T2}
+                        style={styles.recordPlaceSearchInput}
+                      />
+
+                      {visibleRecordPlaceCandidates.length > 0 ? (
                         <ScrollView
                           nestedScrollEnabled
                           style={styles.recordPlaceList}
@@ -6338,6 +6862,13 @@ export default function HomeScreen() {
                                 onPress={() => {
                                   setRecordSelectedPlace(place);
                                   setRecordPlaceSearch("");
+                                  setRecordExternalPlaceSearch({
+                                    coordinate: {
+                                      lat: place.latitude,
+                                      lng: place.longitude,
+                                    },
+                                    nonce: Date.now(),
+                                  });
                                 }}
                                 style={[
                                   styles.recordPlaceOption,
@@ -6372,25 +6903,13 @@ export default function HomeScreen() {
                             );
                           })}
                         </ScrollView>
-                      ) : (
-                        <View style={styles.recordPlaceEmpty}>
-                          <Text style={styles.recordPlaceEmptyText}>
-                            장소가 없거나 검색 결과가 없어요.
-                          </Text>
-                          <Pressable
-                            onPress={() => void loadRecordPlaceCandidates()}
-                            style={styles.recordPlaceReloadButton}
-                          >
-                            <Text style={styles.recordPlaceReloadButtonText}>
-                              다시 불러오기
-                            </Text>
-                          </Pressable>
-                        </View>
-                      )}
+                      ) : null}
 
                       {recordSelectedPlace ? (
                         <View style={styles.recordSelectedPlaceBox}>
-                          <Text style={styles.recordSelectedPlaceLabel}>선택한 장소</Text>
+                          <Text style={styles.recordSelectedPlaceLabel}>
+                            선택한 장소
+                          </Text>
                           <Text style={styles.recordSelectedPlaceName}>
                             📍 {recordSelectedPlace.name}
                           </Text>

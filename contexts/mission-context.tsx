@@ -1,4 +1,9 @@
-import { createContext, ReactNode, useContext, useState } from "react";
+import {
+  createContext,
+  ReactNode,
+  useContext,
+  useState,
+} from "react";
 
 export type Mission = {
   id: number | string;
@@ -17,6 +22,7 @@ export type SharedMission = {
   desc: string;
   instructions: string;
   recommendationReason: string;
+  durationMinutes?: number | null;
   time: string;
   dist: string;
   cost: string;
@@ -26,6 +32,12 @@ export type SharedMission = {
   placeLat?: number;
   placeLng?: number;
   placeName?: string;
+  placeAddress?: string;
+  districtName?: string;
+  requiresPlace?: boolean;
+  requires_place?: boolean;
+  isAtHome?: boolean;
+  isLocationFlexible?: boolean;
 };
 
 type MissionContextType = {
@@ -36,11 +48,19 @@ type MissionContextType = {
   clearPendingSharedMission: () => void;
 };
 
-const MissionContext = createContext<MissionContextType | undefined>(undefined);
+const MissionContext = createContext<
+  MissionContextType | undefined
+>(undefined);
 
-export function MissionProvider({ children }: { children: ReactNode }) {
-  const [mainMission, setMainMission] = useState<Mission | null>(null);
-  const [pendingSharedMission, setPendingSharedMission] = useState<SharedMission | null>(null);
+export function MissionProvider({
+  children,
+}: {
+  children: ReactNode;
+}) {
+  const [mainMission, setMainMission] =
+    useState<Mission | null>(null);
+  const [pendingSharedMission, setPendingSharedMission] =
+    useState<SharedMission | null>(null);
 
   return (
     <MissionContext.Provider
@@ -48,8 +68,10 @@ export function MissionProvider({ children }: { children: ReactNode }) {
         mainMission,
         setMainMission,
         pendingSharedMission,
-        shareMissionToHome: (mission) => setPendingSharedMission(mission),
-        clearPendingSharedMission: () => setPendingSharedMission(null),
+        shareMissionToHome: (mission) =>
+          setPendingSharedMission(mission),
+        clearPendingSharedMission: () =>
+          setPendingSharedMission(null),
       }}
     >
       {children}
@@ -60,7 +82,9 @@ export function MissionProvider({ children }: { children: ReactNode }) {
 export function useMission() {
   const context = useContext(MissionContext);
   if (!context) {
-    throw new Error("useMission은 MissionProvider 안에서만 사용할 수 있어요");
+    throw new Error(
+      "useMission은 MissionProvider 안에서만 사용할 수 있어요",
+    );
   }
   return context;
 }
