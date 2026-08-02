@@ -35,7 +35,6 @@ import {
 } from "../../services/friend.service";
 import { updateMyProfile } from "../../services/profile.service";
 
-// 🌿 에세이, 캘린더, 발견 탭과 동일한 톤앤매너 팔레트
 const COLORS = {
   primary: "#315C4A",
   primaryLight: "#E5EEE8",
@@ -349,7 +348,6 @@ export default function MyScreen() {
   const [profileSaving, setProfileSaving] = useState(false);
   const scrollViewRef = useRef<ScrollView>(null);
 
-  // 친구 관련 state
   const [friendModalVisible, setFriendModalVisible] = useState(false);
   const [friendTab, setFriendTab] = useState<"list" | "search" | "requests">("list");
   const [friendList, setFriendList] = useState<Array<FriendProfile & { relationId: string }>>([]);
@@ -480,7 +478,6 @@ export default function MyScreen() {
 
           const myBadgeRows = badgesResult.data ?? [];
 
-          // 딴 것/못 딴 것 모두 표시 (안 딴 건 잠금 카드로)
           const badgeList: Badge[] = myBadgeRows.map((row) => {
             const palette =
               CATEGORY_COLORS[row.badge_id] ??
@@ -550,7 +547,6 @@ export default function MyScreen() {
           const storedEssayCount = profileData?.ai_interests_essay_count ?? 0;
           const storedInterests = normalizeStringArray(profileData?.ai_interests);
 
-          // 완성 에세이 개수가 마지막 분석 시점과 같으면 저장된 결과 재사용
           if (storedInterests.length > 0 && currentEssayCount === storedEssayCount) {
             setDiscoveredInterests(storedInterests);
             return;
@@ -720,7 +716,6 @@ export default function MyScreen() {
     }
   };
 
-  // 친구 관련 함수
   const loadFriendData = async () => {
     setFriendLoading(true);
     try {
@@ -741,6 +736,12 @@ export default function MyScreen() {
     setFriendTab("list");
     setFriendModalVisible(true);
     void loadFriendData();
+  };
+
+  const closeFriendModal = () => {
+    setFriendModalVisible(false);
+    setViewingFriend(null);
+    setFriendProfileLoading(false);
   };
 
   const handleFriendSearch = async (text: string) => {
@@ -805,7 +806,9 @@ export default function MyScreen() {
     ]);
   };
 
+  // 프로필 열 때 목록 모달을 먼저 닫아, 두 모달이 동시에 겹쳐 뜨며 생기던 프리징을 방지한다.
   const handleViewFriendProfile = async (userId: string) => {
+    setFriendModalVisible(false);
     setFriendProfileLoading(true);
     try {
       const profile = await getFriendPublicProfile(userId);
@@ -817,7 +820,6 @@ export default function MyScreen() {
     }
   };
 
-  // 🌿 뱃지 상세 모달
   if (selectedBadge) {
     const isPrism = selectedBadge.level === "prism";
     const isLocked = selectedBadge.level === "locked";
@@ -1298,18 +1300,18 @@ export default function MyScreen() {
         visible={friendModalVisible}
         transparent
         animationType="fade"
-        onRequestClose={() => setFriendModalVisible(false)}
+        onRequestClose={closeFriendModal}
       >
         <KeyboardAvoidingView
           style={styles.centerModalOverlay}
           behavior={Platform.OS === "ios" ? "padding" : undefined}
         >
-          <Pressable style={styles.profileModalBackdrop} onPress={() => setFriendModalVisible(false)} />
+          <Pressable style={styles.profileModalBackdrop} onPress={closeFriendModal} />
           <View style={styles.friendFloatingCard}>
             <View style={{ paddingHorizontal: 20, paddingTop: 20 }}>
               <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
                 <Text style={styles.profileModalTitle}>친구</Text>
-                <Pressable onPress={() => setFriendModalVisible(false)} hitSlop={10}>
+                <Pressable onPress={closeFriendModal} hitSlop={10}>
                   <Ionicons name="close" size={22} color={COLORS.textMuted} />
                 </Pressable>
               </View>
@@ -1503,6 +1505,15 @@ export default function MyScreen() {
                     style={[styles.profileSaveButton, { marginTop: 20 }]}
                   >
                     <Text style={styles.profileSaveButtonText}>닫기</Text>
+                  </Pressable>
+                  <Pressable
+                    onPress={() => {
+                      setViewingFriend(null);
+                      openFriendModal();
+                    }}
+                    style={{ alignItems: "center", marginTop: 12 }}
+                  >
+                    <Text style={{ color: COLORS.textMuted, fontSize: 12 }}>친구 목록으로</Text>
                   </Pressable>
                 </>
               ) : null}
@@ -2116,7 +2127,6 @@ const styles = StyleSheet.create({
     color: COLORS.white,
   },
 
-  // 친구 기능
   centerModalOverlay: {
     flex: 1,
     alignItems: "center",
