@@ -1,13 +1,17 @@
 import Ionicons from "@expo/vector-icons/Ionicons";
 import * as ImagePicker from "expo-image-picker";
 import { LinearGradient } from "expo-linear-gradient";
-import { useFocusEffect } from "expo-router";
-import { useCallback, useMemo, useState } from "react";
+// 🚀 수정: router 추가
+import { router, useFocusEffect } from "expo-router";
+// 🚀 수정: useRef 추가
+import { useCallback, useMemo, useRef, useState } from "react";
 import {
   Alert,
   Image,
   KeyboardAvoidingView,
   Modal,
+  // 🚀 수정: PanResponder 추가
+  PanResponder,
   Platform,
   Pressable,
   ScrollView,
@@ -221,18 +225,11 @@ const LEVEL_LABEL: Record<BadgeLevel, string> = {
   prism: "PRISM",
 };
 
+// 🚀 수정: 요구사항에 맞게 미션 조건 설정 및 기록 공개 범위를 제거했습니다.
 const SETTINGS: SettingItem[] = [
-  {
-    label: "미션 조건 설정",
-    description: "이동 거리 · 시간 · 비용 · 실내외",
-  },
   {
     label: "알림 설정",
     description: "추천 미션 · 근처 기록 · 에세이 완성",
-  },
-  {
-    label: "기록 공개 범위",
-    description: "익명으로 공유",
   },
   {
     label: "계정 및 개인정보",
@@ -344,9 +341,26 @@ export default function MyScreen() {
   const [draftAvatarUri, setDraftAvatarUri] = useState<string | null>(null);
   const [draftTitle, setDraftTitle] = useState<string | null>(null);
   const [profileSaving, setProfileSaving] = useState(false);
+  // 뱃지 영역으로 스크롤하기 위한 리모컨
+  const scrollViewRef = useRef<ScrollView>(null);
+
+  // 🚀 수정: 모달을 아래로 쓸어내려 닫을 수 있도록 PanResponder 설정 추가
+  const modalPanResponder = useRef(
+    PanResponder.create({
+      onMoveShouldSetPanResponder: (_, gestureState) => {
+        // 상하 드래그일 때만 활성화 (좌우 스와이프 방지)
+        return Math.abs(gestureState.dy) > Math.abs(gestureState.dx) && gestureState.dy > 5;
+      },
+      onPanResponderRelease: (_, gestureState) => {
+        if (gestureState.dy > 50) { // 50px 이상 쓸어내렸다면 닫기
+          setProfileModalVisible(false);
+        }
+      },
+    })
+  ).current;
 
   const [stats, setStats] = useState<StatItem[]>([
-    { label: "완료 미션", value: "0" },
+    { label: "좋아요", value: "0" },
     { label: "기록 경험", value: "0" },
     { label: "발견 장소", value: "0" },
     { label: "완성 에세이", value: "0" },
@@ -553,8 +567,6 @@ export default function MyScreen() {
 
           setEarnedBadges(earnedBadgeList);
 
-          // 실제 장소에서 완료한 미션 기록의 개수입니다.
-          // 최신 기록은 location_type으로, 이전 기록은 place_id로 보완해 셉니다.
           const discoveredPlaceCount = records.filter(
             (record) =>
               record.location_type === "place" || Boolean(record.place_id),
@@ -562,10 +574,6 @@ export default function MyScreen() {
 
           const myDiscoverPosts = discoverPostsResult.data ?? [];
 
-          // records에는 홈에서 완료한 미션 기록이 들어갑니다.
-          // 여기에 발견 탭에서 미션 없이 직접 작성한 독립 기록을 더해
-          // MY의 ‘기록 경험’에 사용자의 모든 기록 개수를 표시합니다.
-          // source_kind가 없는 예전 독립 기록도 source_mission_id가 없다면 포함합니다.
           const independentDiscoverRecordCount = myDiscoverPosts.filter(
             (post) =>
               post.source_kind !== "mission" &&
@@ -574,9 +582,6 @@ export default function MyScreen() {
           const totalExperienceRecordCount =
             records.length + independentDiscoverRecordCount;
 
-          // 발견 탭에 작성한 내 기록들이 받은 좋아요를 모두 합산합니다.
-          // discover_post_likes 트리거가 유지하는 likes_count를 사용하므로
-          // 방 안 기록과 지도 기록을 포함한 실제 표시값과 동일합니다.
           const receivedLikesCount = myDiscoverPosts.reduce(
             (sum, post) => sum + Math.max(0, Number(post.likes_count ?? 0)),
             0,
@@ -588,7 +593,7 @@ export default function MyScreen() {
 
           setStats([
             {
-              label: "완료 미션",
+              label: "좋아요",
               value: String(completedMissionsResult.count ?? 0),
             },
             {
@@ -1069,12 +1074,43 @@ ${experienceText}
         </View>
 
         {/* 활동 통계 */}
+        {/* 활동 통계 */}
         <View style={styles.statsGrid}>
           {stats.map((stat) => (
-            <View key={stat.label} style={styles.statCard}>
+            <Pressable
+              key={stat.label}
+              onPress={() => {
+                switch (stat.label) {
+                  case "좋아요":
+                    router.push("/my/likes"); // 내가 누른 좋아요 페이지
+                    break;
+                  case "기록 경험":
+                    router.push("/my/records"); // 기록 경험 페이지
+                    break;
+                  case "발견 장소":
+                    router.push("/my/places"); // 발견 장소 페이지
+                    break;
+                  case "완성 에세이":
+                    router.push("/(tabs)/essay"); // 에세이 메인 탭으로 점프
+                    break;
+                  case "받은 좋아요":
+                    // 누를 수 없는 항목이므로 아무 동작도 하지 않음
+                    return;
+                  case "획득 뱃지":
+                    // 아래 뱃지 보관함 영역으로 스무스하게 스크롤 이동
+                    scrollViewRef.current?.scrollTo({ y: 700, animated: true });
+                    break;
+                }
+              }}
+              style={({ pressed }) => [
+                styles.statCard,
+                // "받은 좋아요"는 클릭 효과(투명해지는 것)를 빼서 그냥 텍스트처럼 보이게 함
+                stat.label !== "받은 좋아요" && pressed && styles.pressed,
+              ]}
+            >
               <Text style={styles.statValue}>{stat.value}</Text>
               <Text style={styles.statLabel}>{stat.label}</Text>
-            </View>
+            </Pressable>
           ))}
         </View>
 
@@ -1127,7 +1163,7 @@ ${experienceText}
           </Text>
         </View>
 
-        {/* 실제 획득한 뱃지만 표시 */}
+        {/* 뱃지 보관함 */}
         <View style={styles.sectionCard}>
           <Text style={styles.sectionTitle}>뱃지 보관함</Text>
 
@@ -1218,7 +1254,12 @@ ${experienceText}
             onPress={() => setProfileModalVisible(false)}
           />
           <View style={styles.profileModalCard}>
-            <View style={styles.profileModalHandle} />
+            
+            {/* 🚀 수정: PanResponder를 적용하여 아래로 쓸어내려 닫을 수 있는 핸들 래퍼 추가 */}
+            <View style={styles.profileModalHandleWrap} {...modalPanResponder.panHandlers}>
+              <View style={styles.profileModalHandle} />
+            </View>
+
             <ScrollView
               showsVerticalScrollIndicator={false}
               keyboardShouldPersistTaps="handled"
@@ -1226,15 +1267,18 @@ ${experienceText}
             >
               <Text style={styles.profileModalTitle}>프로필 수정</Text>
 
-              <Pressable onPress={handlePickAvatar} style={styles.avatarPicker}>
-                {draftAvatarUri || avatarUrl ? (
-                  <Image
-                    source={{ uri: draftAvatarUri ?? avatarUrl ?? undefined }}
-                    style={styles.avatarPickerImage}
-                  />
-                ) : (
-                  <Text style={styles.profileEmoji}>🧑</Text>
-                )}
+              {/* 🚀 수정: 사진 래퍼와 내부 아이콘 분리 (이미지 잘림 해결) */}
+              <Pressable onPress={handlePickAvatar} style={styles.avatarPickerWrapper}>
+                <View style={styles.avatarPicker}>
+                  {draftAvatarUri || avatarUrl ? (
+                    <Image
+                      source={{ uri: draftAvatarUri ?? avatarUrl ?? undefined }}
+                      style={styles.avatarPickerImage}
+                    />
+                  ) : (
+                    <Text style={styles.profileEmoji}>🧑</Text>
+                  )}
+                </View>
                 <View style={styles.avatarEditBadge}>
                   <Ionicons name="camera" size={14} color={COLORS.white} />
                 </View>
@@ -1809,18 +1853,23 @@ const styles = StyleSheet.create({
     borderTopRightRadius: 24,
   },
 
+  // 🚀 수정: PanResponder 제어를 위해 핸들을 감싸는 영역 추가
+  profileModalHandleWrap: {
+    width: "100%",
+    paddingVertical: 15,
+    alignItems: "center",
+  },
+
   profileModalHandle: {
-    alignSelf: "center",
     width: 42,
     height: 5,
-    marginTop: 10,
     backgroundColor: "#D7D9DE",
     borderRadius: 3,
   },
 
   profileModalContent: {
     paddingHorizontal: 20,
-    paddingTop: 17,
+    paddingTop: 5,
     paddingBottom: 34,
     alignItems: "center",
   },
@@ -1833,10 +1882,17 @@ const styles = StyleSheet.create({
     color: COLORS.textMain,
   },
 
-  avatarPicker: {
+  // 🚀 수정: 아이콘 안 잘리게 하는 래퍼
+  avatarPickerWrapper: {
+    position: "relative",
     width: 88,
     height: 88,
     marginBottom: 20,
+  },
+
+  avatarPicker: {
+    width: 88,
+    height: 88,
     alignItems: "center",
     justifyContent: "center",
     backgroundColor: "#DCE3FF",
