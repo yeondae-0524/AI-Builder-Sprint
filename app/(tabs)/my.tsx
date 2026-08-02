@@ -432,10 +432,7 @@ export default function MyScreen() {
 
             supabase
               .from("discover_post_likes")
-              .select("*", {
-                count: "exact",
-                head: true,
-              })
+              .select("id, discover_posts!inner(id)", { count: "exact", head: true })
               .eq("user_id", user.id),
 
             getMyBadges()
