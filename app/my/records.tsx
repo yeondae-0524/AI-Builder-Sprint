@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import {
     ActivityIndicator,
     FlatList,
+    Image,
     Pressable,
     StyleSheet,
     Text,
@@ -12,7 +13,6 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 import { supabase } from "../../lib/supabase";
 
-// my.tsx에서 쓰던 컬러 파레트 통일
 const COLORS = {
   primary: "#3D5AFE",
   primaryLight: "#EEF1FF",
@@ -29,14 +29,17 @@ type RecordItem = {
   content: string | null;
   emotion: string | null;
   recorded_at: string;
-  location_type: string | null;
+  mission_title: string | null; // 임시: 미션 이름
+  keywords: string[]; // 임시: 키워드 배열
+  image_url: string | null; // 임시: 사진
+  likes_count: number; // 임시: 받은 좋아요
 };
 
 export default function RecordsScreen() {
   const [records, setRecords] = useState<RecordItem[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [expandedId, setExpandedId] = useState<string | null>(null); // 👈 더보기(펼침) 상태 관리
 
-  // 화면이 켜지면 데이터를 불러옵니다.
   useEffect(() => {
     fetchRecords();
   }, []);
@@ -44,91 +47,117 @@ export default function RecordsScreen() {
   const fetchRecords = async () => {
     try {
       setIsLoading(true);
-      
-      // 1. 현재 로그인한 내 정보 가져오기
       const { data: { user }, error: userError } = await supabase.auth.getUser();
       if (userError || !user) throw new Error("로그인 정보를 확인할 수 없습니다.");
 
-      // 2. records 테이블에서 내 기록만 최신순(내림차순)으로 가져오기
+      // TODO: 실제 테이블 구조에 맞게 조인(join)을 수정해야 할 수 있습니다. 
+      // 일단 records 기준으로 가져옵니다.
       const { data, error } = await supabase
         .from("records")
-        .select("id, content, emotion, recorded_at, location_type")
+        .select("*")
         .eq("user_id", user.id)
         .order("recorded_at", { ascending: false });
 
       if (error) throw error;
 
-      setRecords(data || []);
+      // 백엔드 구조가 아직 완벽히 연결 안 된 데이터(키워드, 사진 등)는 가짜 데이터로 매핑
+      const formattedData = (data || []).map(item => ({
+        id: item.id,
+        content: item.content,
+        emotion: item.emotion,
+        recorded_at: item.recorded_at,
+        mission_title: "테스트 미션 이름", // 연결 필요
+        keywords: ["comfortable", "new", "unsure"], // 연결 필요
+        image_url: null, // 연결 필요
+        likes_count: 5, // 연결 필요
+      }));
+
+      setRecords(formattedData);
     } catch (error) {
-      console.error("기록을 불러오는 중 오류 발생:", error);
+      console.error("기록 오류:", error);
     } finally {
       setIsLoading(false);
     }
   };
 
-  // 날짜 예쁘게 포맷팅 해주는 함수 (예: 2026. 08. 02)
   const formatDate = (dateString: string) => {
     const date = new Date(dateString);
-    const year = date.getFullYear();
-    const month = String(date.getMonth() + 1).padStart(2, "0");
-    const day = String(date.getDate()).padStart(2, "0");
-    return `${year}. ${month}. ${day}`;
+    return `${date.getFullYear()}. ${String(date.getMonth() + 1).padStart(2, "0")}. ${String(date.getDate()).padStart(2, "0")}`;
   };
 
-  // 각각의 카드(기록)를 어떻게 그릴지 정의
-  const renderItem = ({ item }: { item: RecordItem }) => (
-    <View style={styles.recordCard}>
-      <View style={styles.cardHeader}>
-        <Text style={styles.dateText}>{formatDate(item.recorded_at)}</Text>
-        
-        {/* 감정(emotion) 데이터가 있으면 뱃지로 띄워줌 */}
-        {item.emotion && (
-          <View style={styles.emotionBadge}>
-            <Text style={styles.emotionText}>{item.emotion}</Text>
+  // 더보기 버튼 누르면 열리고 닫히는 함수
+  const toggleExpand = (id: string) => {
+    setExpandedId(prev => (prev === id ? null : id));
+  };
+
+  const renderItem = ({ item }: { item: RecordItem }) => {
+    const isExpanded = expandedId === item.id; // 현재 이 카드가 열려있는지 확인
+
+    return (
+      <View style={styles.recordCard}>
+        {/* 🟢 항상 보이는 요약 영역 */}
+        <Pressable onPress={() => toggleExpand(item.id)} style={styles.summaryArea}>
+          <View style={styles.summaryHeader}>
+            <Text style={styles.dateText}>{formatDate(item.recorded_at)}</Text>
+            {/* 더보기 화살표 아이콘 */}
+            <Ionicons name={isExpanded ? "chevron-up" : "chevron-down"} size={20} color={COLORS.textMuted} />
+          </View>
+          
+          <Text style={styles.missionTitle}>{item.mission_title}</Text>
+          
+          <View style={styles.keywordContainer}>
+            {item.keywords.map((kw, index) => (
+              <View key={index} style={styles.keywordChip}>
+                <Text style={styles.keywordText}>{kw}</Text>
+              </View>
+            ))}
+          </View>
+        </Pressable>
+
+        {/* 🟢 더보기(화살표) 눌렀을 때만 펼쳐지는 상세 영역 */}
+        {isExpanded && (
+          <View style={styles.detailArea}>
+            <View style={styles.divider} />
+            
+            {item.image_url && (
+              <Image source={{ uri: item.image_url }} style={styles.recordImage} />
+            )}
+            
+            <Text style={styles.contentText}>
+              {item.content || "작성된 내용이 없습니다."}
+            </Text>
+
+            <View style={styles.likesRow}>
+              <Ionicons name="heart" size={16} color="#EF4444" />
+              <Text style={styles.likesText}>받은 좋아요 {item.likes_count}개</Text>
+            </View>
           </View>
         )}
       </View>
-      <Text style={styles.contentText} numberOfLines={4}>
-        {item.content || "작성된 내용이 없습니다."}
-      </Text>
-    </View>
-  );
+    );
+  };
 
   return (
     <SafeAreaView style={styles.safeArea} edges={["top"]}>
-      {/* 🟢 상단 헤더 영역 */}
       <View style={styles.header}>
-        <Pressable
-          onPress={() => router.back()} // 누르면 이전 화면(MY탭)으로 돌아감
-          style={({ pressed }) => [styles.backButton, pressed && styles.pressed]}
-        >
+        <Pressable onPress={() => router.back()} style={styles.backButton}>
           <Ionicons name="arrow-back" size={24} color={COLORS.textMain} />
         </Pressable>
         <Text style={styles.headerTitle}>기록 경험</Text>
-        <View style={{ width: 24 }} /> {/* 타이틀을 정가운데로 맞추기 위한 빈 공간 */}
+        <View style={{ width: 24 }} />
       </View>
 
-      {/* 🟢 메인 리스트 영역 */}
       {isLoading ? (
-        // 로딩 중일 때 뱅글뱅글 아이콘 표시
         <View style={styles.centerContainer}>
           <ActivityIndicator size="large" color={COLORS.primary} />
         </View>
       ) : (
-        // 로딩 끝났을 때 FlatList로 카드 리스트 주루룩 뿌려주기
         <FlatList
           data={records}
           keyExtractor={(item) => item.id}
           renderItem={renderItem}
           contentContainerStyle={styles.listContent}
           showsVerticalScrollIndicator={false}
-          // 데이터가 0개일 때 보여줄 화면
-          ListEmptyComponent={
-            <View style={styles.emptyContainer}>
-              <Ionicons name="document-text-outline" size={48} color={COLORS.textMuted} />
-              <Text style={styles.emptyText}>아직 작성된 기록이 없어요.</Text>
-            </View>
-          }
         />
       )}
     </SafeAreaView>
@@ -136,80 +165,28 @@ export default function RecordsScreen() {
 }
 
 const styles = StyleSheet.create({
-  safeArea: {
-    flex: 1,
-    backgroundColor: COLORS.background,
-  },
-  header: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    backgroundColor: COLORS.background,
-  },
-  backButton: {
-    padding: 4,
-  },
-  pressed: {
-    opacity: 0.6,
-  },
-  headerTitle: {
-    fontSize: 16,
-    fontWeight: "700",
-    color: COLORS.textMain,
-  },
-  listContent: {
-    padding: 16,
-    paddingBottom: 40,
-  },
-  recordCard: {
-    backgroundColor: COLORS.white,
-    borderRadius: 16,
-    padding: 16,
-    marginBottom: 12,
-    borderWidth: 1,
-    borderColor: COLORS.border,
-  },
-  cardHeader: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    marginBottom: 12,
-  },
-  dateText: {
-    fontSize: 13,
-    fontWeight: "600",
-    color: COLORS.textMuted,
-  },
-  emotionBadge: {
-    backgroundColor: COLORS.primaryLight,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 6,
-  },
-  emotionText: {
-    fontSize: 11,
-    fontWeight: "700",
-    color: COLORS.primary,
-  },
-  contentText: {
-    fontSize: 14,
-    lineHeight: 22,
-    color: COLORS.textMain,
-  },
-  centerContainer: {
-    flex: 1,
-    justifyContent: "center",
-    alignItems: "center",
-  },
-  emptyContainer: {
-    alignItems: "center",
-    paddingTop: 80,
-  },
-  emptyText: {
-    marginTop: 12,
-    fontSize: 14,
-    color: COLORS.textMuted,
-  },
+  safeArea: { flex: 1, backgroundColor: COLORS.background },
+  header: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 16, paddingVertical: 12, backgroundColor: COLORS.background },
+  backButton: { padding: 4 },
+  headerTitle: { fontSize: 16, fontWeight: "700", color: COLORS.textMain },
+  listContent: { padding: 16, paddingBottom: 40 },
+  centerContainer: { flex: 1, justifyContent: "center", alignItems: "center" },
+  
+  // 카드 스타일
+  recordCard: { backgroundColor: COLORS.white, borderRadius: 16, padding: 16, marginBottom: 12, borderWidth: 1, borderColor: COLORS.border },
+  summaryArea: {},
+  summaryHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 8 },
+  dateText: { fontSize: 13, fontWeight: "600", color: COLORS.textMuted },
+  missionTitle: { fontSize: 16, fontWeight: "700", color: COLORS.textMain, marginBottom: 10 },
+  keywordContainer: { flexDirection: "row", flexWrap: "wrap", gap: 6 },
+  keywordChip: { backgroundColor: COLORS.primaryLight, paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6 },
+  keywordText: { fontSize: 11, fontWeight: "600", color: COLORS.primary },
+  
+  // 펼침(상세) 영역 스타일
+  detailArea: { marginTop: 12 },
+  divider: { height: 1, backgroundColor: COLORS.border, marginBottom: 12 },
+  recordImage: { width: "100%", height: 200, borderRadius: 12, marginBottom: 12, backgroundColor: "#E5E7EB" },
+  contentText: { fontSize: 14, lineHeight: 22, color: COLORS.textMain, marginBottom: 16 },
+  likesRow: { flexDirection: "row", alignItems: "center" },
+  likesText: { marginLeft: 6, fontSize: 12, fontWeight: "600", color: "#EF4444" },
 });

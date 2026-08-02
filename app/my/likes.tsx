@@ -51,7 +51,7 @@ export default function LikesScreen() {
       const { data, error } = await supabase
         .from("discover_post_likes")
         .select(`
-          id,
+          post_id,
           discover_posts (
             id,
             content,
@@ -104,7 +104,7 @@ export default function LikesScreen() {
       ) : (
         <FlatList
           data={likedPosts}
-          keyExtractor={(item) => item.id}
+          keyExtractor={(item, index) => item.discover_posts?.id || String(index)}
           renderItem={renderItem}
           contentContainerStyle={styles.listContent}
           showsVerticalScrollIndicator={false}
