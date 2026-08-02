@@ -16,7 +16,7 @@ import {
   TextInput,
   View
 } from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
+import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { supabase } from "../../lib/supabase";
 
 // 🌿 파스텔 & 우드 감성 컬러 팔레트
@@ -144,6 +144,62 @@ const PERSONA_LABEL: Record<PersonaType, string> = {
   entertainment_pd: "인생 예능 PD",
 };
 
+const EMOTION_LABELS: Record<string, string> = {
+  comfortable: "편안해요",
+  joyful: "즐거워요",
+  new: "새로워요",
+  uncomfortable: "불편해요",
+  unsure: "잘 모르겠어요",
+};
+
+function getEmotionLabel(value: unknown) {
+  const emotion = String(value ?? "").trim();
+  return EMOTION_LABELS[emotion] ?? emotion;
+}
+
+function formatEssayForReadability(value: unknown) {
+  const normalized = String(value ?? "")
+    .replace(/\r\n?/g, "\n")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+
+  if (!normalized) return "";
+
+  const existingParagraphs = normalized
+    .split(/\n{2,}/)
+    .map((paragraph) => paragraph.trim())
+    .filter(Boolean);
+
+  if (existingParagraphs.length >= 3) {
+    return existingParagraphs.join("\n\n");
+  }
+
+  const lines = normalized
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  if (lines.length >= 3) {
+    return lines.join("\n\n");
+  }
+
+  const sentences = (
+    normalized.match(/[^.!?。！？]+[.!?。！？]+|[^.!?。！？]+$/g) ?? []
+  )
+    .map((sentence) => sentence.trim())
+    .filter(Boolean);
+
+  if (sentences.length <= 3) return normalized;
+
+  const paragraphs: string[] = [];
+  for (let index = 0; index < sentences.length; index += 2) {
+    paragraphs.push(sentences.slice(index, index + 2).join(" "));
+  }
+
+  return paragraphs.join("\n\n");
+}
+
 function normalizeRelation<T>(value: T | T[] | null | undefined): T | null {
   if (!value) return null;
   return Array.isArray(value) ? value[0] ?? null : value;
@@ -233,6 +289,7 @@ async function getFreshAccessToken() {
 
 export default function EssayScreen() {
   const router = useRouter();
+  const insets = useSafeAreaInsets();
 
   const [journey, setJourney] = useState<ActiveJourney | null>(null);
   const [completedDayCount, setCompletedDayCount] = useState(0);
@@ -339,7 +396,7 @@ export default function EssayScreen() {
               missionDescription: mission?.short_description ?? "",
               category: category?.name ?? "기타",
               recordedAt: String(r.recorded_at ?? "").slice(0, 10),
-              emotion: r.emotion ?? "",
+              emotion: getEmotionLabel(r.emotion),
               content: r.content ?? "",
               photoUrls,
               photoPaths,
@@ -449,7 +506,7 @@ export default function EssayScreen() {
             id: String(row.id),
             journeyId: String(row.journey_id),
             title: row.title ?? "제목 없는 에세이",
-            content: row.content ?? "",
+            content: formatEssayForReadability(row.content),
             journeyGoal: payload.goal ?? undefined,
             dateRangeText: payload.dateRangeText ?? "",
             durationDays: Number(payload.durationDays ?? 7),
@@ -541,7 +598,7 @@ export default function EssayScreen() {
         const missionDescription = record.missionDescription.trim();
         const fallbackContent = [
           missionDescription,
-          record.emotion ? `기록 당시 감정: ${record.emotion}` : "",
+          record.emotion ? `기록 당시 감정: ${getEmotionLabel(record.emotion)}` : "",
         ]
           .filter(Boolean)
           .join("\n");
@@ -555,7 +612,7 @@ export default function EssayScreen() {
             content ||
             fallbackContent ||
             `${record.missionTitle} 미션을 완료한 기록입니다.`,
-          emotion: record.emotion || null,
+          emotion: getEmotionLabel(record.emotion) || null,
           placeName: null,
           photoUrls: record.photoUrls,
         };
@@ -600,7 +657,7 @@ export default function EssayScreen() {
         comic?: unknown;
       };
       const title = String(result.title ?? "").trim();
-      const content = String(result.content ?? "").trim();
+      const content = formatEssayForReadability(result.content);
 
       if (!title || !content) {
         throw new Error("AI가 에세이 제목이나 본문을 반환하지 않았습니다.");
@@ -1185,28 +1242,52 @@ export default function EssayScreen() {
         visible={writerModalVisible}
         animationType="slide"
         presentationStyle="fullScreen"
-        statusBarTranslucent={false}
+        statusBarTranslucent
         onRequestClose={closeWriter}
       >
-        <SafeAreaView
-          style={styles.writerSafeArea}
-          edges={["top", "bottom"]}
+        <View
+          style={[
+            styles.writerSafeArea,
+            {
+              paddingTop: Math.max(insets.top, 18),
+              paddingBottom: Math.max(insets.bottom, 12),
+            },
+          ]}
         >
           {draftEssay && (
-            <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 60 }}>
-              
+            <>
               <View style={styles.screenHeaderBar}>
                 <Pressable
-                  onPress={closeWriter}
-                  hitSlop={20}
-                  style={styles.backButtonTouch}
+                  accessibilityRole="button"
+                  accessibilityLabel="에세이 편집 화면 닫기"
+                  onPress={() => closeWriter()}
+                  disabled={finishing}
+                  hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+                  style={({ pressed }) => [
+                    styles.backButtonTouch,
+                    pressed && styles.backButtonPressed,
+                    finishing && styles.backButtonDisabled,
+                  ]}
                 >
-                  <Ionicons name="chevron-back" size={28} color={COLORS.textMain} />
+                  <Ionicons name="chevron-back" size={26} color={COLORS.textMain} />
                 </Pressable>
-                <Text style={styles.screenHeaderTitle}>{draftEssay.journeyTitle}</Text>
-                <View style={{ width: 28 }} />
+
+                <Text
+                  numberOfLines={1}
+                  style={styles.screenHeaderTitle}
+                >
+                  {draftEssay.journeyTitle}
+                </Text>
+
+                <View style={styles.screenHeaderSideSpacer} />
               </View>
 
+              <ScrollView
+                style={styles.writerScrollView}
+                showsVerticalScrollIndicator={false}
+                keyboardShouldPersistTaps="handled"
+                contentContainerStyle={styles.writerScrollContent}
+              >
               <View style={styles.editorImageFrame}>
                 {draftEssay.coverImage ? (
                   <Image source={{ uri: draftEssay.coverImage }} style={styles.editorCoverImage} />
@@ -1358,7 +1439,7 @@ export default function EssayScreen() {
                             <View style={{ flex: 1 }}>
                               <Text style={styles.recordItemTitle}>{rec.missionTitle}</Text>
                               <Text style={styles.recordItemMeta}>{rec.category} · {rec.recordedAt}</Text>
-                              <Text style={styles.recordItemEmotion}>감정: {rec.emotion}</Text>
+                              <Text style={styles.recordItemEmotion}>감정: {getEmotionLabel(rec.emotion)}</Text>
                               <Text style={styles.recordItemContent}>{rec.content}</Text>
                             </View>
                           </View>
@@ -1391,7 +1472,8 @@ export default function EssayScreen() {
                   )}
                 </Pressable>
               </View>
-            </ScrollView>
+              </ScrollView>
+            </>
           )}
 
           {personaPickerVisible ? (
@@ -1403,7 +1485,7 @@ export default function EssayScreen() {
               {renderPersonaPickerCard()}
             </View>
           ) : null}
-        </SafeAreaView>
+        </View>
       </Modal>
 
       {/* 🎭 집필 시작 전 AI 선택 */}
@@ -1776,26 +1858,51 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: "#F9F7F1",
   },
+  writerScrollView: {
+    flex: 1,
+  },
+  writerScrollContent: {
+    paddingBottom: 60,
+  },
   screenHeaderBar: {
-    minHeight: 56,
-    paddingHorizontal: 16,
-    paddingTop: 8,
+    minHeight: 64,
+    paddingHorizontal: 14,
     flexDirection: "row",
     alignItems: "center",
-    justifyContent: "space-between",
     borderBottomWidth: 1,
     borderBottomColor: COLORS.border,
     backgroundColor: "#F9F7F1",
+    zIndex: 20,
+    elevation: 20,
   },
   backButtonTouch: {
-    padding: 6,
+    width: 48,
+    height: 48,
+    borderRadius: 24,
     justifyContent: "center",
     alignItems: "center",
+    zIndex: 30,
+    elevation: 30,
+  },
+  backButtonPressed: {
+    backgroundColor: COLORS.primaryLight,
+    transform: [{ scale: 0.96 }],
+  },
+  backButtonDisabled: {
+    opacity: 0.45,
   },
   screenHeaderTitle: {
+    flex: 1,
+    minWidth: 0,
+    paddingHorizontal: 8,
     fontSize: 16,
     fontWeight: "800",
     color: COLORS.textMain,
+    textAlign: "center",
+  },
+  screenHeaderSideSpacer: {
+    width: 48,
+    height: 48,
   },
   editorImageFrame: {
     width: "100%",
@@ -1895,15 +2002,17 @@ const styles = StyleSheet.create({
     marginBottom: 16,
   },
   editorBodyInput: {
-    minHeight: 180,
-    padding: 16,
+    minHeight: 240,
+    paddingHorizontal: 16,
+    paddingVertical: 18,
     backgroundColor: COLORS.white,
     borderWidth: 1,
     borderColor: COLORS.border,
     borderRadius: 16,
-    fontSize: 14,
-    lineHeight: 22,
+    fontSize: 15,
+    lineHeight: 25,
     color: COLORS.textMain,
+    textAlignVertical: "top",
     marginBottom: 20,
   },
 
@@ -2152,7 +2261,7 @@ const styles = StyleSheet.create({
   },
   bookOpenBody: {
     fontSize: 15,
-    lineHeight: 26,
+    lineHeight: 28,
     color: COLORS.textMain,
     marginBottom: 24,
   },

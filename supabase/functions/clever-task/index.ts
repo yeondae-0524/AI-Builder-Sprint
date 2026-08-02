@@ -1,5 +1,24 @@
-import "jsr:@supabase/functions-js/edge-runtime.d.ts";
+export { };
+
+// Supabase Edge Runtime에서 실제로 해석되는 JSR import다.
+// Expo 프로젝트의 일반 TypeScript 서버는 jsr: 스킴을 모르므로 편집기 진단만 무시한다.
+// @ts-ignore
+  import "jsr:@supabase/functions-js/edge-runtime.d.ts";
+// @ts-ignore
 import { createClient } from "jsr:@supabase/supabase-js@2";
+
+type DenoRuntime = {
+  env: {
+    get(name: string): string | undefined;
+  };
+  serve(
+    handler: (request: Request) => Response | Promise<Response>,
+  ): void;
+};
+
+const denoRuntime = (
+  globalThis as unknown as { Deno: DenoRuntime }
+).Deno;
 
 type CostFilter = "무료" | "유료" | "무료/유료" | string;
 type LocationType = "실내" | "실외" | "실내/실외" | string;
@@ -82,8 +101,8 @@ const corsHeaders = {
 };
 
 const supabaseClient = createClient(
-  Deno.env.get("SUPABASE_URL")!,
-  Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
+  denoRuntime.env.get("SUPABASE_URL")!,
+  denoRuntime.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
 );
 
 const ALL_CATEGORIES = [
@@ -368,7 +387,7 @@ async function searchNearbyPlaces(
   latitude: number,
   longitude: number,
 ): Promise<NormalizedPlace[]> {
-  const kakaoKey = Deno.env.get("KAKAO_REST_API_KEY");
+  const kakaoKey = denoRuntime.env.get("KAKAO_REST_API_KEY");
   if (!kakaoKey) {
     console.warn("KAKAO_REST_API_KEY가 없어 장소 검색을 건너뜁니다.");
     return [];
@@ -588,7 +607,7 @@ async function callUpstage({
   return missions;
 }
 
-Deno.serve(async (req) => {
+denoRuntime.serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
   }
@@ -598,7 +617,7 @@ Deno.serve(async (req) => {
   }
 
   try {
-    const upstageApiKey = Deno.env.get("UPSTAGE_API_KEY");
+    const upstageApiKey = denoRuntime.env.get("UPSTAGE_API_KEY");
     if (!upstageApiKey) {
       return jsonResponse(
         { error: "UPSTAGE_API_KEY가 설정되지 않았습니다." },
