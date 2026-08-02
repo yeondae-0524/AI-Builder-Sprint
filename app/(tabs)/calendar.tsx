@@ -573,6 +573,7 @@ export default function CalendarScreen() {
   );
 
   const journeyTarget = journey?.target_record_count ?? 0;
+  const hasJourneyGoal = journeyGoal.trim().length > 0;
   const remainingDays = Math.max(journeyTarget - journeyCompletedDayCount, 0);
   const progressPercentage = (
     journeyTarget > 0
@@ -779,7 +780,7 @@ export default function CalendarScreen() {
         >
           {/* 🌿 헤더 타이틀 영역 (에세이 탭 스타일 적용) */}
           <View style={styles.header}>
-            <View>
+            <View style={styles.headerTextArea}>
               <Text style={styles.eyebrow}>CALENDAR & JOURNEY</Text>
               <Text style={styles.headerTitle}>기록 캘린더</Text>
               <Text style={styles.headerDescription}>
@@ -942,7 +943,35 @@ export default function CalendarScreen() {
                   어느 속도로 시작해볼까요?
                 </Text>
 
-                <Text style={styles.journeyPickerDescription}>
+                <View
+                  style={[
+                    styles.journeyOrderNotice,
+                    hasJourneyGoal && styles.journeyOrderNoticeReady,
+                  ]}
+                >
+                  <Ionicons
+                    name={hasJourneyGoal ? "checkmark-circle" : "lock-closed"}
+                    size={16}
+                    color={hasJourneyGoal ? COLORS.primary : COLORS.textMuted}
+                  />
+                  <Text
+                    style={[
+                      styles.journeyOrderNoticeText,
+                      hasJourneyGoal && styles.journeyOrderNoticeTextReady,
+                    ]}
+                  >
+                    {hasJourneyGoal
+                      ? "목표가 정해졌어요. 이제 기간과 시작일을 선택할 수 있어요."
+                      : "먼저 위에서 목표를 입력하거나 추천 목표를 선택해주세요."}
+                  </Text>
+                </View>
+
+                <Text
+                  style={[
+                    styles.journeyPickerDescription,
+                    !hasJourneyGoal && styles.journeyPickerDescriptionDisabled,
+                  ]}
+                >
                   기간을 고른 뒤 여정 시작일을 직접 선택할 수 있어요.
                 </Text>
 
@@ -950,25 +979,39 @@ export default function CalendarScreen() {
                   {JOURNEY_OPTIONS.map((option) => (
                     <Pressable
                       key={option.label}
-                      disabled={isCreatingJourney}
+                      disabled={isCreatingJourney || !hasJourneyGoal}
+                      accessibilityState={{ disabled: isCreatingJourney || !hasJourneyGoal }}
                       onPress={() => handleStartJourney(option)}
                       style={({ pressed }) => [
                         styles.journeyOptionButton,
-                        pressed && styles.buttonPressed,
+                        !hasJourneyGoal && styles.journeyOptionButtonLocked,
+                        pressed && hasJourneyGoal && styles.buttonPressed,
                         isCreatingJourney && styles.disabledButton,
                       ]}
                     >
                       <View>
-                        <Text style={styles.journeyOptionLabel}>{option.label}</Text>
-                        <Text style={styles.journeyOptionDescription}>
+                        <Text
+                          style={[
+                            styles.journeyOptionLabel,
+                            !hasJourneyGoal && styles.journeyOptionLabelLocked,
+                          ]}
+                        >
+                          {option.label}
+                        </Text>
+                        <Text
+                          style={[
+                            styles.journeyOptionDescription,
+                            !hasJourneyGoal && styles.journeyOptionDescriptionLocked,
+                          ]}
+                        >
                           {option.description}
                         </Text>
                       </View>
 
                       <Ionicons
-                        name="arrow-forward-circle"
-                        size={25}
-                        color={COLORS.primary}
+                        name={hasJourneyGoal ? "arrow-forward-circle" : "lock-closed"}
+                        size={hasJourneyGoal ? 25 : 20}
+                        color={hasJourneyGoal ? COLORS.primary : COLORS.textMuted}
                       />
                     </Pressable>
                   ))}
@@ -1461,10 +1504,16 @@ const styles = StyleSheet.create({
 
   // 🌿 상단 헤더
   header: {
+    width: "100%",
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
     marginBottom: 22,
+  },
+  headerTextArea: {
+    flex: 1,
+    minWidth: 0,
+    paddingRight: 14,
   },
   eyebrow: {
     color: "#789083",
@@ -1480,13 +1529,17 @@ const styles = StyleSheet.create({
     letterSpacing: -0.8,
   },
   headerDescription: {
+    flexShrink: 1,
     color: "#65766D",
     fontSize: 14,
+    lineHeight: 20,
     marginTop: 7,
   },
   headerIcon: {
     width: 54,
     height: 54,
+    marginLeft: 10,
+    flexShrink: 0,
     borderRadius: 18,
     backgroundColor: "#E1E9E3",
     alignItems: "center",
@@ -1656,6 +1709,36 @@ const styles = StyleSheet.create({
     lineHeight: 18,
     color: COLORS.textSub,
   },
+  journeyPickerDescriptionDisabled: {
+    color: COLORS.textMuted,
+  },
+  journeyOrderNotice: {
+    marginTop: 2,
+    marginBottom: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    backgroundColor: "#F2F1EC",
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: 12,
+  },
+  journeyOrderNoticeReady: {
+    backgroundColor: COLORS.primaryLight,
+    borderColor: "#C8D8CF",
+  },
+  journeyOrderNoticeText: {
+    flex: 1,
+    fontSize: 11,
+    lineHeight: 16,
+    color: COLORS.textMuted,
+  },
+  journeyOrderNoticeTextReady: {
+    fontWeight: "700",
+    color: COLORS.primary,
+  },
   goalContainer: {
     marginBottom: 10,
     marginTop: 6,
@@ -1709,15 +1792,25 @@ const styles = StyleSheet.create({
     borderColor: "#C8D8CF",
     borderRadius: 14,
   },
+  journeyOptionButtonLocked: {
+    backgroundColor: "#F1F0EB",
+    borderColor: "#E4E2DA",
+  },
   journeyOptionLabel: {
     marginBottom: 2,
     fontSize: 14,
     fontWeight: "800",
     color: COLORS.primary,
   },
+  journeyOptionLabelLocked: {
+    color: COLORS.textMuted,
+  },
   journeyOptionDescription: {
     fontSize: 11,
     color: COLORS.textSub,
+  },
+  journeyOptionDescriptionLocked: {
+    color: "#B5BBB7",
   },
   journeyCreatingText: {
     marginTop: 10,
