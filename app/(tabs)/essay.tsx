@@ -49,14 +49,18 @@ const COLORS = {
 
 const { width: SCREEN_WIDTH } = Dimensions.get("window");
 
-const GENERATE_ESSAY_URL =
-  "https://najkutamgxdagbkxhwhs.supabase.co/functions/v1/generate-essay";
+const ESSAY_FUNCTION_NAME =
+  String(
+    process.env.EXPO_PUBLIC_ESSAY_FUNCTION_NAME ?? "generate-essay",
+  ).trim() || "generate-essay";
 
 type PersonaType =
   | "emotion_interpreter"
   | "strict_teacher"
   | "record_detective"
   | "entertainment_pd";
+
+type PersonaPickerMode = "start" | "regenerate" | "restart" | null;
 
 type JourneyStatus = "active" | "completed_pending_essay" | "completed" | "finished" | "cancelled";
 
@@ -109,11 +113,11 @@ type DraftEssay = {
   comic: { episodeTitle: string; panels: ComicPanel[] } | null;
   persona: PersonaType;
   records: JourneyRecordItem[];
-  aiSummary: string;
 };
 
 type CompletedEssay = {
   id: string;
+  journeyId: string;
   title: string;
   content: string;
   journeyGoal?: string;
@@ -122,6 +126,12 @@ type CompletedEssay = {
   created_at: string;
   themeIndex: number;
   persona: PersonaType;
+  summary: string;
+  verdict: string;
+  insights: EssayInsight[];
+  aiRecommendation: string;
+  comic: DraftEssay["comic"];
+  generationCount: number;
   coverImage?: string | null;
 };
 
@@ -135,6 +145,88 @@ const PERSONA_LABEL: Record<PersonaType, string> = {
 function normalizeRelation<T>(value: T | T[] | null | undefined): T | null {
   if (!value) return null;
   return Array.isArray(value) ? value[0] ?? null : value;
+}
+
+function getErrorMessage(error: unknown, fallback: string) {
+  if (error instanceof Error && error.message.trim()) {
+    return error.message;
+  }
+
+  if (error && typeof error === "object" && "message" in error) {
+    const message = String(
+      (error as { message?: unknown }).message ?? "",
+    ).trim();
+
+    if (message) return message;
+  }
+
+  return fallback;
+}
+
+async function getFunctionInvokeErrorMessage(error: unknown) {
+  const fallback = getErrorMessage(
+    error,
+    "Edge Function 호출에 실패했습니다.",
+  );
+
+  if (!error || typeof error !== "object" || !("context" in error)) {
+    return fallback;
+  }
+
+  try {
+    const context = (error as { context?: unknown }).context as
+      | {
+          clone?: () => { text?: () => Promise<string> };
+          text?: () => Promise<string>;
+        }
+      | undefined;
+    const responseLike = context?.clone?.() ?? context;
+    const raw = await responseLike?.text?.();
+
+    if (!raw?.trim()) return fallback;
+
+    try {
+      const payload = JSON.parse(raw) as Record<string, unknown>;
+      const detail = String(
+        payload.error ??
+          payload.message ??
+          payload.details ??
+          "",
+      ).trim();
+
+      if (detail) return detail;
+    } catch {
+      return raw.trim();
+    }
+  } catch {
+    // 응답 본문을 읽지 못하면 기본 오류 문구를 사용한다.
+  }
+
+  return fallback;
+}
+
+async function getFreshAccessToken() {
+  const { data, error } = await supabase.auth.getSession();
+
+  if (error) throw error;
+  if (!data.session) throw new Error("로그인이 필요합니다.");
+
+  const expiresAtMs = (data.session.expires_at ?? 0) * 1000;
+  const shouldRefresh = expiresAtMs <= Date.now() + 60_000;
+
+  if (!shouldRefresh) {
+    return data.session.access_token;
+  }
+
+  const { data: refreshed, error: refreshError } =
+    await supabase.auth.refreshSession();
+
+  if (refreshError) throw refreshError;
+  if (!refreshed.session) {
+    throw new Error("로그인 정보를 새로고침하지 못했습니다.");
+  }
+
+  return refreshed.session.access_token;
 }
 
 export default function EssayScreen() {
@@ -152,7 +244,10 @@ export default function EssayScreen() {
   const [finishing, setFinishing] = useState(false);
 
   const [writerModalVisible, setPersonaWriterModalVisible] = useState(false);
+  const [editingEssayId, setEditingEssayId] = useState<string | null>(null);
   const [personaPickerVisible, setPersonaPickerVisible] = useState(false);
+  const [personaPickerMode, setPersonaPickerMode] =
+    useState<PersonaPickerMode>(null);
   const [selectedEssay, setSelectedEssay] = useState<CompletedEssay | null>(null);
   const [recordsFolded, setRecordsFolded] = useState(false);
 
@@ -280,7 +375,7 @@ export default function EssayScreen() {
 
       const { data: essayRows } = await supabase
         .from("essays")
-        .select("id, title, content, created_at, journey_id, cover_photo_path, selected_payload")
+        .select("id, title, content, created_at, journey_id, cover_photo_path, selected_payload, generation_count")
         .eq("user_id", user.id)
         .order("created_at", { ascending: false });
 
@@ -298,8 +393,28 @@ export default function EssayScreen() {
             coverImage = data.publicUrl;
           }
 
+          const parsedInsights = Array.isArray(payload.insights)
+            ? payload.insights
+                .map((item: unknown) => {
+                  if (!item || typeof item !== "object") return null;
+                  const raw = item as Record<string, unknown>;
+                  const keyword = String(raw.keyword ?? "").trim();
+                  const description = String(raw.description ?? "").trim();
+                  return keyword && description
+                    ? { keyword, description }
+                    : null;
+                })
+                .filter((item: EssayInsight | null): item is EssayInsight => item !== null)
+            : [];
+
+          const parsedComic =
+            payload.comic && typeof payload.comic === "object"
+              ? (payload.comic as DraftEssay["comic"])
+              : null;
+
           return {
-            id: row.id,
+            id: String(row.id),
+            journeyId: String(row.journey_id),
             title: row.title ?? "제목 없는 에세이",
             content: row.content ?? "",
             journeyGoal: payload.goal ?? undefined,
@@ -308,6 +423,12 @@ export default function EssayScreen() {
             created_at: row.created_at,
             themeIndex: idx % COLORS.bookThemes.length,
             persona: (payload.persona as PersonaType) ?? "emotion_interpreter",
+            summary: String(payload.summary ?? ""),
+            verdict: String(payload.verdict ?? ""),
+            insights: parsedInsights,
+            aiRecommendation: String(payload.aiRecommendation ?? ""),
+            comic: parsedComic,
+            generationCount: Number(row.generation_count ?? 1),
             coverImage,
           };
         }),
@@ -357,78 +478,244 @@ export default function EssayScreen() {
 
   // 🚀 실제 AI 에세이 생성
   const generateEssay = async (persona: PersonaType) => {
-    if (!draftEssay || rawRecords.length === 0) return;
+    if (!draftEssay) {
+      Alert.alert("에세이 준비 실패", "집필할 여정 정보를 불러오지 못했습니다.");
+      return;
+    }
+
+    if (rawRecords.length === 0) {
+      Alert.alert("에세이 준비 실패", "에세이에 담을 기록이 없습니다.");
+      return;
+    }
 
     setGenerating(true);
-    setPersonaPickerVisible(false);
+    setDraftEssay((previous) =>
+      previous ? { ...previous, persona } : previous,
+    );
 
     try {
-      const { data: { user } } = await supabase.auth.getUser();
-      const { data: sessionData } = await supabase.auth.getSession();
-      const accessToken = sessionData.session?.access_token;
+      const {
+        data: { user },
+        error: userError,
+      } = await supabase.auth.getUser();
 
-      const response = await fetch(GENERATE_ESSAY_URL, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${accessToken ?? ""}`,
-        },
-        body: JSON.stringify({
-          persona,
-          nickname: user?.user_metadata?.nickname ?? "사용자",
-          journeyTitle: draftEssay.journeyTitle,
-          durationDays: draftEssay.durationDays,
-          records: rawRecords.map((r) => ({
-            missionTitle: r.missionTitle,
-            missionDescription: r.missionDescription,
-            category: r.category,
-            recordedAt: r.recordedAt,
-            userContent: r.content,
-            emotion: r.emotion,
-            placeName: null,
-            photoUrls: r.photoUrls,
-          })),
-        }),
+      if (userError) throw userError;
+      if (!user) throw new Error("로그인이 필요합니다.");
+
+      const accessToken = await getFreshAccessToken();
+      const records = rawRecords.map((record) => {
+        const content = record.content.trim();
+        const missionDescription = record.missionDescription.trim();
+        const fallbackContent = [
+          missionDescription,
+          record.emotion ? `기록 당시 감정: ${record.emotion}` : "",
+        ]
+          .filter(Boolean)
+          .join("\n");
+
+        return {
+          missionTitle: record.missionTitle,
+          missionDescription: record.missionDescription,
+          category: record.category,
+          recordedAt: record.recordedAt,
+          userContent:
+            content ||
+            fallbackContent ||
+            `${record.missionTitle} 미션을 완료한 기록입니다.`,
+          emotion: record.emotion || null,
+          placeName: null,
+          photoUrls: record.photoUrls,
+        };
       });
 
-      const result = await response.json();
+      const { data, error } =
+        await supabase.functions.invoke<Record<string, unknown>>(
+          ESSAY_FUNCTION_NAME,
+          {
+            headers: {
+              Authorization: `Bearer ${accessToken}`,
+            },
+            body: {
+              persona,
+              nickname: user.user_metadata?.nickname ?? "사용자",
+              journeyTitle: draftEssay.journeyTitle,
+              durationDays: draftEssay.durationDays,
+              records,
+            },
+          },
+        );
 
-      if (!response.ok) {
-        throw new Error(result?.error ?? "에세이 생성에 실패했습니다.");
+      if (error) {
+        throw new Error(await getFunctionInvokeErrorMessage(error));
       }
 
-      setDraftEssay({
-        ...draftEssay,
-        persona,
-        title: result.title,
-        content: result.content,
-        summary: result.summary,
-        verdict: result.verdict,
-        insights: result.insights ?? [],
-        aiRecommendation: result.aiRecommendation,
-        comic: result.comic
-          ? { episodeTitle: result.comic.episodeTitle, panels: result.comic.panels }
-          : null,
-      });
+      if (!data) {
+        throw new Error("AI 생성 결과가 없습니다.");
+      }
+
+      if (typeof data.error === "string" && data.error.trim()) {
+        throw new Error(data.error);
+      }
+
+      const result = data as {
+        title?: unknown;
+        content?: unknown;
+        summary?: unknown;
+        verdict?: unknown;
+        insights?: unknown;
+        aiRecommendation?: unknown;
+        comic?: unknown;
+      };
+      const title = String(result.title ?? "").trim();
+      const content = String(result.content ?? "").trim();
+
+      if (!title || !content) {
+        throw new Error("AI가 에세이 제목이나 본문을 반환하지 않았습니다.");
+      }
+
+      const insights = Array.isArray(result.insights)
+        ? result.insights
+            .map((item) => {
+              if (!item || typeof item !== "object") return null;
+              const raw = item as Record<string, unknown>;
+              const keyword = String(raw.keyword ?? "").trim();
+              const description = String(raw.description ?? "").trim();
+              return keyword && description
+                ? { keyword, description }
+                : null;
+            })
+            .filter((item): item is EssayInsight => item !== null)
+        : [];
+      const rawComic =
+        result.comic && typeof result.comic === "object"
+          ? (result.comic as Record<string, unknown>)
+          : null;
+      const rawPanels = Array.isArray(rawComic?.panels)
+        ? rawComic.panels
+        : [];
+      const panels: ComicPanel[] = rawPanels
+        .map((item, index) => {
+          if (!item || typeof item !== "object") return null;
+          const raw = item as Record<string, unknown>;
+          return {
+            panelNumber: Number(raw.panelNumber ?? index + 1),
+            dialogue: String(raw.dialogue ?? "").trim(),
+            caption: String(raw.caption ?? "").trim(),
+          };
+        })
+        .filter((item): item is ComicPanel => item !== null);
+
+      setDraftEssay((previous) =>
+        previous
+          ? {
+              ...previous,
+              persona,
+              title,
+              content,
+              summary: String(result.summary ?? "").trim(),
+              verdict: String(result.verdict ?? "").trim(),
+              insights,
+              aiRecommendation: String(
+                result.aiRecommendation ?? "",
+              ).trim(),
+              comic: rawComic
+                ? {
+                    episodeTitle: String(
+                      rawComic.episodeTitle ?? "오늘의 4컷",
+                    ).trim(),
+                    panels,
+                  }
+                : null,
+            }
+          : previous,
+      );
     } catch (error) {
+      console.error("에세이 생성 실패 상세:", error);
       Alert.alert(
         "에세이 생성 실패",
-        error instanceof Error ? error.message : "잠시 후 다시 시도해주세요.",
+        getErrorMessage(error, "잠시 후 다시 시도해주세요."),
       );
     } finally {
       setGenerating(false);
     }
   };
 
-  const openWriter = async () => {
-    setPersonaWriterModalVisible(true);
-    if (draftEssay && !draftEssay.content) {
-      await generateEssay("emotion_interpreter");
-    }
+  const closePersonaPicker = () => {
+    if (generating) return;
+    setPersonaPickerVisible(false);
+    setPersonaPickerMode(null);
   };
 
-  const handleSelectPersona = (persona: PersonaType) => {
-    void generateEssay(persona);
+  const openWriter = () => {
+    if (!draftEssay) {
+      Alert.alert("에세이 준비 실패", "집필할 여정 정보를 불러오지 못했습니다.");
+      return;
+    }
+
+    if (rawRecords.length === 0) {
+      Alert.alert("에세이 준비 실패", "에세이에 담을 기록이 없습니다.");
+      return;
+    }
+
+    setEditingEssayId(null);
+    setPersonaPickerMode("start");
+    setPersonaPickerVisible(true);
+  };
+
+  const openCompletedEssayRegeneration = () => {
+    if (!journey) {
+      Alert.alert("에세이 준비 실패", "완료한 여정 정보를 찾지 못했습니다.");
+      return;
+    }
+
+    const existingEssay = essays.find(
+      (essay) => essay.journeyId === journey.id,
+    );
+
+    if (!existingEssay) {
+      Alert.alert("에세이 준비 실패", "다시 만들 에세이를 찾지 못했습니다.");
+      return;
+    }
+
+    if (rawRecords.length === 0) {
+      Alert.alert("에세이 준비 실패", "에세이에 담을 기록이 없습니다.");
+      return;
+    }
+
+    setEditingEssayId(existingEssay.id);
+    setDraftEssay({
+      journeyTitle: journey.title,
+      goal: journey.goal ?? existingEssay.journeyGoal,
+      dateRangeText:
+        existingEssay.dateRangeText || `${journey.start_date} ~ ${journey.end_date}`,
+      durationDays: existingEssay.durationDays || journey.duration_days,
+      coverImage: existingEssay.coverImage ?? null,
+      title: existingEssay.title,
+      content: existingEssay.content,
+      summary: existingEssay.summary,
+      verdict: existingEssay.verdict,
+      insights: existingEssay.insights,
+      aiRecommendation: existingEssay.aiRecommendation,
+      comic: existingEssay.comic,
+      persona: existingEssay.persona,
+      records: rawRecords,
+    });
+    setPersonaPickerMode("restart");
+    setPersonaPickerVisible(true);
+  };
+
+  const handleSelectPersona = async (persona: PersonaType) => {
+    if (generating) return;
+
+    const mode = personaPickerMode;
+    setPersonaPickerVisible(false);
+    setPersonaPickerMode(null);
+
+    if (mode === "start" || mode === "restart") {
+      setPersonaWriterModalVisible(true);
+    }
+
+    await generateEssay(persona);
   };
 
   // 🚀 표지 사진 추가/변경
@@ -503,39 +790,77 @@ export default function EssayScreen() {
                 ? draftEssay.coverImage.split("/essay-covers/")[1] ?? null
                 : null;
 
-              const { error: insertError } = await supabase.from("essays").insert({
-                user_id: user.id,
-                journey_id: journey.id,
-                title: draftEssay.title,
-                content: draftEssay.content,
-                cover_photo_path: coverPath,
-                visibility: "private",
-                status: "completed",
-                essay_type: "taste_report",
-                generation_count: 1,
-                selected_version_no: 1,
-                generation_state: "idle",
-                published_at: null,
-                selected_payload: {
-                  persona: draftEssay.persona,
-                  summary: draftEssay.summary,
-                  verdict: draftEssay.verdict,
-                  insights: draftEssay.insights,
-                  aiRecommendation: draftEssay.aiRecommendation,
-                  comic: draftEssay.comic,
-                  goal: draftEssay.goal ?? null,
-                  dateRangeText: draftEssay.dateRangeText,
-                  durationDays: draftEssay.durationDays,
-                },
-              });
+              const selectedPayload = {
+                persona: draftEssay.persona,
+                summary: draftEssay.summary,
+                verdict: draftEssay.verdict,
+                insights: draftEssay.insights,
+                aiRecommendation: draftEssay.aiRecommendation,
+                comic: draftEssay.comic,
+                goal: draftEssay.goal ?? null,
+                dateRangeText: draftEssay.dateRangeText,
+                durationDays: draftEssay.durationDays,
+              };
 
-              if (insertError) throw insertError;
+              if (editingEssayId) {
+                const previousGenerationCount =
+                  essays.find((essay) => essay.id === editingEssayId)
+                    ?.generationCount ?? 1;
 
+                const { error: updateError } = await supabase
+                  .from("essays")
+                  .update({
+                    title: draftEssay.title,
+                    content: draftEssay.content,
+                    cover_photo_path: coverPath,
+                    visibility: "private",
+                    status: "completed",
+                    essay_type: "taste_report",
+                    generation_count: previousGenerationCount + 1,
+                    selected_version_no: 1,
+                    generation_state: "idle",
+                    generation_started_at: null,
+                    published_at: null,
+                    selected_payload: selectedPayload,
+                  })
+                  .eq("id", editingEssayId)
+                  .eq("user_id", user.id);
+
+                if (updateError) throw updateError;
+              } else {
+                const { error: insertError } = await supabase
+                  .from("essays")
+                  .insert({
+                    user_id: user.id,
+                    journey_id: journey.id,
+                    title: draftEssay.title,
+                    content: draftEssay.content,
+                    cover_photo_path: coverPath,
+                    visibility: "private",
+                    status: "completed",
+                    essay_type: "taste_report",
+                    generation_count: 1,
+                    selected_version_no: 1,
+                    generation_state: "idle",
+                    published_at: null,
+                    selected_payload: selectedPayload,
+                  });
+
+                if (insertError) throw insertError;
+              }
+
+              const wasRegenerated = Boolean(editingEssayId);
               setPersonaWriterModalVisible(false);
+              setEditingEssayId(null);
               setDraftEssay(null);
               await loadData();
 
-              Alert.alert("집필 완료!", "축하합니다! 완결된 에세이가 서재 책꽂이 맨 앞자리에 들어갔습니다. 📚");
+              Alert.alert(
+                wasRegenerated ? "에세이를 다시 만들었어요!" : "집필 완료!",
+                wasRegenerated
+                  ? "새로 선택한 AI의 관점으로 기존 에세이를 교체했어요."
+                  : "완결된 에세이가 서재 책꽂이 맨 앞자리에 들어갔습니다. 📚",
+              );
               } catch (error) {
                 const message =
                   error instanceof Error
@@ -583,7 +908,7 @@ export default function EssayScreen() {
         
         {/* 🌿 헤더 */}
         <View style={styles.header}>
-          <View>
+          <View style={styles.headerTextArea}>
             <Text style={styles.eyebrow}>MY ESSAY LIBRARY</Text>
             <Text style={styles.headerTitle}>에세이 서재</Text>
             <Text style={styles.headerDescription}>
@@ -598,13 +923,21 @@ export default function EssayScreen() {
         {isFinished ? (
           <View style={[styles.journeyCard, { backgroundColor: COLORS.primary }]}>
             <Text style={styles.journeyLabel}>✨ 에세이가 완성되었습니다!</Text>
-            <Text style={styles.journeyTitle}>새로운 여정을 다시 떠나보아요~ 🌿</Text>
+            <Text style={styles.journeyTitle}>완성된 분석이 서재에 저장됐어요 🌿</Text>
             <Text style={[styles.progressDescription, { marginTop: 6, marginBottom: 16 }]}>
-              서재 책꽂이에 새 책이 꽂혔습니다. 캘린더에서 또 다른 멋진 여정을 시작해 보세요!
+              결과가 마음에 들지 않으면 같은 기록을 다른 AI의 관점으로 다시 분석할 수 있어요.
             </Text>
 
             <Pressable
               style={styles.startWritingBtn}
+              onPress={openCompletedEssayRegeneration}
+            >
+              <Ionicons name="sparkles-outline" size={18} color={COLORS.primary} />
+              <Text style={styles.startWritingBtnText}>다른 AI로 다시 분석하기</Text>
+            </Pressable>
+
+            <Pressable
+              style={[styles.startWritingBtn, styles.secondaryJourneyButton]}
               onPress={() => router.push("/(tabs)/calendar")}
             >
               <Ionicons name="calendar-outline" size={18} color={COLORS.primary} />
@@ -616,7 +949,7 @@ export default function EssayScreen() {
             <Text style={styles.journeyLabel}>🎉 여정이 정상적으로 끝났습니다!</Text>
             <Text style={styles.journeyTitle}>에세이 집필하기</Text>
             <Text style={[styles.progressDescription, { marginTop: 4, marginBottom: 14 }]}>
-              수집된 기록들을 바탕으로 AI와 함께 나만의 양장본 책을 집필해 보세요.
+              수집된 기록을 바탕으로 AI가 나의 감정과 행동 성향을 분석해요.
             </Text>
 
             <Pressable
@@ -799,15 +1132,17 @@ export default function EssayScreen() {
                 </View>
 
                 <Pressable
-                  style={styles.reAiCard}
+                  style={[styles.reAiCard, generating && { opacity: 0.55 }]}
+                  disabled={generating}
                   onPress={() => {
-                    console.log("🔥 다른 AI 버튼 눌림, generating:", generating);
+                    if (generating) return;
+                    setPersonaPickerMode("regenerate");
                     setPersonaPickerVisible(true);
                   }}
                 >
                   <View>
                     <Text style={styles.reAiTitle}>다른 AI에게 다시 맡기기</Text>
-                    <Text style={styles.reAiSub}>이전 결과 대신 새 에세이로 바로 바뀌어요.</Text>
+                    <Text style={styles.reAiSub}>같은 기록을 다른 관점으로 다시 분석해요.</Text>
                   </View>
                   <Ionicons name="swap-horizontal" size={22} color={COLORS.primary} />
                 </Pressable>
@@ -816,7 +1151,7 @@ export default function EssayScreen() {
                   <View style={{ alignItems: "center", paddingVertical: 50 }}>
                     <ActivityIndicator color={COLORS.primary} />
                     <Text style={{ marginTop: 12, color: COLORS.textSub, fontSize: 13 }}>
-                      AI가 여정을 읽고 에세이를 쓰는 중이에요...
+                      AI가 기록을 읽고 성향을 분석하는 중이에요...
                     </Text>
                   </View>
                 ) : (
@@ -828,7 +1163,7 @@ export default function EssayScreen() {
                       style={styles.editorTitleInput}
                     />
 
-                    <Text style={styles.inputSectionLabel}>본문</Text>
+                    <Text style={styles.inputSectionLabel}>AI 성향 분석 글</Text>
                     <TextInput
                       value={draftEssay.content}
                       onChangeText={(text) => setDraftEssay({ ...draftEssay, content: text })}
@@ -938,23 +1273,29 @@ export default function EssayScreen() {
         visible={personaPickerVisible}
         transparent
         animationType="fade"
-        onRequestClose={() => setPersonaPickerVisible(false)}
+        onRequestClose={closePersonaPicker}
       >
         <View style={styles.modalOverlay}>
-          <Pressable style={styles.modalBackdrop} onPress={() => setPersonaPickerVisible(false)} />
+          <Pressable style={styles.modalBackdrop} onPress={closePersonaPicker} />
           <View style={styles.personaPopupCard}>
             <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 16 }}>
               <View>
-                <Text style={styles.personaPopupTitle}>이번에는 누가 읽어볼까요?</Text>
-                <Text style={styles.personaPopupSub}>같은 기록도 AI의 역할에 따라 전혀 다르게 해석돼요.</Text>
+                <Text style={styles.personaPopupTitle}>
+                  {personaPickerMode === "start"
+                    ? "내 기록을 누구에게 맡길까요?"
+                    : personaPickerMode === "restart"
+                      ? "어떤 AI로 다시 분석할까요?"
+                      : "이번에는 누가 읽어볼까요?"}
+                </Text>
+                <Text style={styles.personaPopupSub}>같은 기록도 AI의 관점에 따라 서로 다른 성향 분석이 나와요.</Text>
               </View>
-              <Pressable onPress={() => setPersonaPickerVisible(false)} hitSlop={10}>
+              <Pressable onPress={closePersonaPicker} hitSlop={10} disabled={generating}>
                 <Ionicons name="close" size={22} color={COLORS.textMain} />
               </Pressable>
             </View>
 
             <View style={{ gap: 10 }}>
-              <Pressable style={styles.personaSelectItem} onPress={() => handleSelectPersona("emotion_interpreter")}>
+              <Pressable style={styles.personaSelectItem} onPress={() => void handleSelectPersona("emotion_interpreter")}>
                 <View style={styles.personaIconCircle}><Ionicons name="chatbubble-ellipses-outline" size={20} color={COLORS.primary} /></View>
                 <View style={{ flex: 1 }}>
                   <Text style={styles.personaSelectTitle}>감정 통역사</Text>
@@ -963,7 +1304,7 @@ export default function EssayScreen() {
                 <Ionicons name="chevron-forward" size={18} color={COLORS.textMuted} />
               </Pressable>
 
-              <Pressable style={styles.personaSelectItem} onPress={() => handleSelectPersona("strict_teacher")}>
+              <Pressable style={styles.personaSelectItem} onPress={() => void handleSelectPersona("strict_teacher")}>
                 <View style={styles.personaIconCircle}><Ionicons name="school-outline" size={20} color={COLORS.primary} /></View>
                 <View style={{ flex: 1 }}>
                   <Text style={styles.personaSelectTitle}>팩트 폭격 담임</Text>
@@ -972,7 +1313,7 @@ export default function EssayScreen() {
                 <Ionicons name="chevron-forward" size={18} color={COLORS.textMuted} />
               </Pressable>
 
-              <Pressable style={styles.personaSelectItem} onPress={() => handleSelectPersona("record_detective")}>
+              <Pressable style={styles.personaSelectItem} onPress={() => void handleSelectPersona("record_detective")}>
                 <View style={styles.personaIconCircle}><Ionicons name="finger-print-outline" size={20} color={COLORS.primary} /></View>
                 <View style={{ flex: 1 }}>
                   <Text style={styles.personaSelectTitle}>기록 탐정</Text>
@@ -981,7 +1322,7 @@ export default function EssayScreen() {
                 <Ionicons name="chevron-forward" size={18} color={COLORS.textMuted} />
               </Pressable>
 
-              <Pressable style={styles.personaSelectItem} onPress={() => handleSelectPersona("entertainment_pd")}>
+              <Pressable style={styles.personaSelectItem} onPress={() => void handleSelectPersona("entertainment_pd")}>
                 <View style={styles.personaIconCircle}><Ionicons name="videocam-outline" size={20} color={COLORS.primary} /></View>
                 <View style={{ flex: 1 }}>
                   <Text style={styles.personaSelectTitle}>인생 예능 PD</Text>
@@ -1076,9 +1417,13 @@ const styles = StyleSheet.create({
 
   header: {
     flexDirection: "row",
-    justifyContent: "space-between",
     alignItems: "center",
     marginBottom: 22,
+  },
+  headerTextArea: {
+    flex: 1,
+    minWidth: 0,
+    paddingRight: 14,
   },
   eyebrow: {
     color: "#789083",
@@ -1099,6 +1444,7 @@ const styles = StyleSheet.create({
     marginTop: 7,
   },
   headerIcon: {
+    flexShrink: 0,
     width: 54,
     height: 54,
     borderRadius: 18,
@@ -1193,6 +1539,10 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: "800",
     color: COLORS.primary,
+  },
+  secondaryJourneyButton: {
+    marginTop: 10,
+    backgroundColor: "rgba(255, 255, 255, 0.88)",
   },
 
   bookshelfSection: {
