@@ -12,6 +12,7 @@ import {
   ScrollView,
   StyleSheet,
   Text,
+  TextInput, // 🚀 TextInput 추가
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
@@ -40,6 +41,14 @@ const SCREEN_WIDTH = Dimensions.get("window").width;
 const SHEET_CLOSED_POSITION = SCREEN_HEIGHT;
 const DAY_IN_MS = 24 * 60 * 60 * 1000;
 
+// 🚀 추가: 추천 목표 리스트
+const RECOMMENDED_GOALS = [
+  "☕ 새로운 동네 카페 탐험",
+  "🏃‍♂️ 머릿속 잡생각 비우기",
+  "🎨 일상 속 작은 영감 찾기",
+  "🌿 오롯이 나에게 집중하는 시간",
+];
+
 type CalendarCell = number | null;
 
 type Journey = {
@@ -50,6 +59,7 @@ type Journey = {
   start_date: string;
   end_date: string;
   status: string;
+  goal?: string | null;
 };
 
 type CalendarRecord = {
@@ -225,6 +235,9 @@ export default function CalendarScreen() {
   const [journeyStartMonth, setJourneyStartMonth] = useState(
     () => new Date(today.getFullYear(), today.getMonth(), 1),
   );
+  
+  // 🚀 목표 저장을 위한 상태 추가
+  const [journeyGoal, setJourneyGoal] = useState("");
 
   const sheetTranslateY = useRef(
     new Animated.Value(SHEET_CLOSED_POSITION),
@@ -330,12 +343,10 @@ export default function CalendarScreen() {
           supabase
             .from("journeys")
             .select(
-              "id, title, duration_days, target_record_count, start_date, end_date, status",
+              "id, title, duration_days, target_record_count, start_date, end_date, status, goal",
             )
             .eq("user_id", user.id)
             .eq("status", "active")
-            // 목표 기록 수를 채우거나 기간이 지나도 에세이를 만들기 전까지
-            // 여정은 active 상태로 유지됩니다.
             .order("start_date", { ascending: false })
             .limit(1)
             .maybeSingle(),
@@ -767,6 +778,12 @@ export default function CalendarScreen() {
       : null;
 
   const handleStartJourney = (option: JourneyOption) => {
+    // 🚀 목표 입력을 안 했을 경우 경고창 띄우기
+    if (!journeyGoal.trim()) {
+      Alert.alert("목표 설정", "이번 여정의 목표를 입력하거나 선택해 주세요!");
+      return;
+    }
+
     setPendingJourneyOption(option);
     setSelectedJourneyStartKey(todayKey);
     setJourneyStartMonth(
@@ -856,9 +873,10 @@ export default function CalendarScreen() {
           start_date: selectedJourneyStartKey,
           end_date: toDateKey(endDate),
           status: "active",
+          goal: journeyGoal.trim(), // 🚀 DB에 목표(goal) 저장 추가!
         })
         .select(
-          "id, title, duration_days, target_record_count, start_date, end_date, status",
+          "id, title, duration_days, target_record_count, start_date, end_date, status, goal",
         )
         .single();
 
@@ -881,6 +899,7 @@ export default function CalendarScreen() {
       );
       setJourneyStartPickerVisible(false);
       setPendingJourneyOption(null);
+      setJourneyGoal(""); // 시작 완료 후 목표 입력칸 비우기
 
       Alert.alert(
         "여정 시작",
@@ -924,8 +943,6 @@ export default function CalendarScreen() {
                 return;
               }
 
-              // journeys만 중단 상태로 변경합니다.
-              // records와 record_photos는 삭제하거나 수정하지 않습니다.
               setJourney(null);
               setJourneyCompletedDayCount(0);
 
@@ -1006,6 +1023,14 @@ export default function CalendarScreen() {
                     <Text style={styles.journeyTitle}>
                       {journey.title}
                     </Text>
+
+                    {/* 🚀 추가된 부분: 설정한 목표가 있다면 뱃지 형태로 예쁘게 띄워줍니다! */}
+                    {journey.goal && (
+                      <View style={styles.activeGoalBadge}>
+                        <Text style={styles.activeGoalText}>🎯 {journey.goal}</Text>
+                      </View>
+                    )}
+
                   </View>
 
                   <View style={styles.dDayBox}>
@@ -1114,7 +1139,50 @@ export default function CalendarScreen() {
                   새 여정 시작하기
                 </Text>
 
-                <Text style={styles.journeyPickerTitle}>
+                {/* 🌟 수정된 목표 입력 영역 시작 */}
+                <View style={styles.goalContainer}>
+                  <Text style={styles.journeyPickerTitle}>
+                    어떤 목표로 떠나볼까요?
+                  </Text>
+                  
+                  <TextInput
+                    style={styles.goalInput}
+                    value={journeyGoal}
+                    onChangeText={setJourneyGoal}
+                    placeholder="나만의 목표를 입력해 보세요 (예: 동네 빵지순례)"
+                    placeholderTextColor={COLORS.textMuted}
+                    maxLength={30}
+                  />
+
+                  <ScrollView 
+                    horizontal 
+                    showsHorizontalScrollIndicator={false} 
+                    style={styles.goalChipScroll}
+                  >
+                    {RECOMMENDED_GOALS.map((goal) => (
+                      <Pressable
+                        key={goal}
+                        onPress={() => setJourneyGoal(goal)}
+                        style={[
+                          styles.goalChip,
+                          journeyGoal === goal && styles.goalChipSelected,
+                        ]}
+                      >
+                        <Text
+                          style={[
+                            styles.goalChipText,
+                            journeyGoal === goal && styles.goalChipTextSelected,
+                          ]}
+                        >
+                          {goal}
+                        </Text>
+                      </Pressable>
+                    ))}
+                  </ScrollView>
+                </View>
+                {/* 🌟 목표 입력 영역 끝 */}
+
+                <Text style={[styles.journeyPickerTitle, { marginTop: 20 }]}>
                   어느 속도로 시작해볼까요?
                 </Text>
 
@@ -1771,8 +1839,23 @@ const styles = StyleSheet.create({
     paddingTop: 20,
   },
 
+  activeGoalBadge: {
+    marginTop: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    backgroundColor: COLORS.background,
+    borderRadius: 6,
+    alignSelf: "flex-start",
+  },
+
+  activeGoalText: {
+    fontSize: 12,
+    fontWeight: "700",
+    color: COLORS.primary,
+  },
+
   // ─────────────────────────────────────────
-  // 진행 카드
+  // 진행 카드 & 목표 설정 
   // ─────────────────────────────────────────
 
   progressCard: {
@@ -1815,6 +1898,53 @@ const styles = StyleSheet.create({
     fontSize: 12,
     lineHeight: 18,
     color: COLORS.textSub,
+  },
+
+  // 🚀 목표 설정 영역 스타일
+  goalContainer: {
+    marginBottom: 10,
+    marginTop: 10,
+  },
+
+  goalInput: {
+    height: 48,
+    backgroundColor: COLORS.background,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    fontSize: 14,
+    color: COLORS.textMain,
+    marginBottom: 12,
+  },
+
+  goalChipScroll: {
+    flexDirection: "row",
+  },
+
+  goalChip: {
+    marginRight: 8,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    backgroundColor: COLORS.white,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: 20,
+  },
+
+  goalChipSelected: {
+    backgroundColor: COLORS.primaryLight,
+    borderColor: COLORS.primary,
+  },
+
+  goalChipText: {
+    fontSize: 13,
+    color: COLORS.textSub,
+  },
+
+  goalChipTextSelected: {
+    fontWeight: "700",
+    color: COLORS.primary,
   },
 
   journeyOptionList: {
@@ -2133,7 +2263,7 @@ const styles = StyleSheet.create({
   startedDayCircle: {
     position: "relative",
     zIndex: 1,
-  
+    
     width: 34,
     height: 34,
 
