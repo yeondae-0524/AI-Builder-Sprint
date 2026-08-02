@@ -2,27 +2,27 @@ import Ionicons from "@expo/vector-icons/Ionicons";
 import { useRouter } from "expo-router";
 import { useState } from "react";
 import {
-    Alert,
-    KeyboardAvoidingView,
-    Platform,
-    Pressable,
-    ScrollView,
-    StyleSheet,
-    Text,
-    TextInput,
-    View,
+  Alert,
+  KeyboardAvoidingView,
+  Platform,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
 import { supabase } from "../../lib/supabase";
 
 const COLORS = {
-  primary: "#3D5AFE",
+  primary: "#315C4A",
   primaryPressed: "#3048D9",
-  textMain: "#171719",
+  textMain: "#26372E",
   textSub: "#76767F",
-  border: "#E4E4E7",
-  background: "#F7F8FA",
+  border: "#E2E3DC",
+  background: "#F5F2E9",
   white: "#FFFFFF",
   error: "#EF4444",
 };
@@ -146,16 +146,8 @@ export default function SignupScreen() {
           contentContainerStyle={styles.scrollContent}
         >
           <View style={styles.logoArea}>
-            <View style={styles.logoCircle}>
-              <Ionicons
-                name="sparkles"
-                size={28}
-                color={COLORS.primary}
-              />
-            </View>
-
             <Text style={styles.appName}>
-              시작이 반
+              Begin Again
             </Text>
           </View>
 
@@ -321,10 +313,12 @@ const styles = StyleSheet.create({
   },
 
   appName: {
-    fontSize: 18,
-    fontWeight: "800",
-    color: COLORS.textMain,
-  },
+  fontSize: 30,
+  fontWeight: "700",
+  letterSpacing: 2,
+  textTransform: "uppercase",
+  color: COLORS.primary,
+},
 
   titleArea: {
     marginBottom: 32,
