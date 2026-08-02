@@ -33,18 +33,17 @@ import {
   getNearbyDiscoverPosts,
 } from "../../services/service_missons";
 
-// 🌿 에세이 / 캘린더 탭과 통일된 감성 파스텔 톤앤매너
-const BL = "#315C4A";            // 메인 그린
-const BLL = "#E5EEE8";           // 연한 그린
-const ACCENT = "#F2C96D";        // 노란 포인트
-const PINK = "#E07A5F";          // 차분한 코랄 핑크
-const PINK_LIGHT = "#F4EAE1";    // 연한 피치/코랄
-const T0 = "#26372E";            // 텍스트 메인
-const T1 = "#65766D";            // 서브 텍스트
-const T2 = "#9AA49F";            // 뮤트 텍스트
-const T3 = "#E2E3DC";            // 테두리
+const BL = "#315C4A";
+const BLL = "#E5EEE8";
+const ACCENT = "#F2C96D";
+const PINK = "#E07A5F";
+const PINK_LIGHT = "#F4EAE1";
+const T0 = "#26372E";
+const T1 = "#65766D";
+const T2 = "#9AA49F";
+const T3 = "#E2E3DC";
 const WH = "#FFFFFF";
-const BG = "#F5F2E9";            // 따뜻한 베이지 배경
+const BG = "#F5F2E9";
 
 const KAKAO_JS_KEY = "f937d15a94db64ab114b3495f8b6ad3c";
 const KAKAO_REST_API_KEY = "c10a1b62f7bbf1d90e0ff60bb94bdadd";
@@ -332,6 +331,12 @@ async function buildBubbleList(posts: any[]): Promise<DiscoverBubble[]> {
     return post?.place_name !== "내 방" && Number.isFinite(lat) && Number.isFinite(lng) && !(lat === 0 && lng === 0);
   });
 
+  // 🚀 나만 보기 게시물엔 좋아요 버튼이 아예 안 보이도록, visibility 정보를 미리 저장해둔다.
+  const visibilityById = new Map<string, string>();
+  for (const post of mapPosts) {
+    visibilityById.set(String(post.id), String(post.visibility ?? ""));
+  }
+
   const postIds = mapPosts.map((post) => String(post?.id ?? "")).filter(Boolean);
   const metadataById = new Map<string, { title: string; sourceKind: "independent" | "mission"; authorNickname: string; shareMode: "anonymous" | "nickname" }>();
 
@@ -365,11 +370,12 @@ async function buildBubbleList(posts: any[]): Promise<DiscoverBubble[]> {
       const content = String(p.content ?? "");
       const metadata = metadataById.get(id);
       const title = metadata?.title || String(p.title ?? "").trim() || content.slice(0, 40) || "기록";
+      const canLikeThisPost = visibilityById.get(id) === "anonymous";
 
       return {
         id,
         discoverPostId: id,
-        canLike: true,
+        canLike: canLikeThisPost,
         canDelete: true,
         user_id: p.user_id ? String(p.user_id) : null,
         place: String(p.place_name ?? "장소"),
@@ -1227,7 +1233,14 @@ export default function DiscoverScreen() {
       const row = Array.isArray(data) ? data[0] : data;
       applyLikeResult(postId, Boolean(row?.liked), Number(row?.likes_count ?? 0));
     } catch (error) {
-      Alert.alert("좋아요 실패", error instanceof Error ? error.message : "좋아요를 저장하지 못했어요.");
+      const message =
+        error instanceof Error
+          ? error.message
+          : typeof error === "object" && error !== null && "message" in error
+            ? String((error as any).message)
+            : JSON.stringify(error);
+      console.error("좋아요 저장 실패 상세:", error);
+      Alert.alert("좋아요 실패", message);
     } finally {
       setLikeUpdatingIds((current) => current.filter((id) => id !== postId));
     }
@@ -1558,7 +1571,6 @@ export default function DiscoverScreen() {
         onMarkerDelete={handleDiscoverMarkerDelete}
       />
 
-      {/* 🌿 상단 검색 및 필터 바 */}
       <View style={styles.topBar}>
         <View style={styles.searchRow}>
           <View style={styles.searchInput}>
@@ -1618,7 +1630,6 @@ export default function DiscoverScreen() {
         )}
       </View>
 
-      {/* 🌿 방 안 기록 시트 */}
       {activeFilter === "방 안 기록" && (
         <Animated.View style={[styles.homeArchiveSheet, { height: HOME_SHEET_HEIGHT, transform: [{ translateY: homeSheetTranslateY }] }]}>
           <View style={[styles.homeArchiveDragArea, webDragStyle]} {...homePanResponder.panHandlers}>
@@ -1709,7 +1720,6 @@ export default function DiscoverScreen() {
         </Animated.View>
       )}
 
-      {/* 🌿 내 기록 시트 */}
       {activeFilter === "내 기록" && (
         <Animated.View style={[styles.myRecordsSheet, { height: MY_SHEET_HEIGHT, transform: [{ translateY: mySheetTranslateY }] }]}>
           <View style={[styles.myRecordsSheetDragArea, webDragStyle]} {...mySheetPanResponder.panHandlers}>
@@ -1829,7 +1839,6 @@ export default function DiscoverScreen() {
         </Animated.View>
       )}
 
-      {/* 🌿 버블 클릭 상세 시트 */}
       {sheetBubble && (
         <Animated.View style={[styles.sheet, { transform: [{ translateY: sheetTranslateY }] }]}>
           <View style={[styles.dragArea, webDragStyle]} {...panResponder.panHandlers}>
@@ -1842,7 +1851,7 @@ export default function DiscoverScreen() {
                 <Text style={styles.sheetTitle}>{sheetBubble.mission}</Text>
                 <Text style={styles.sheetMeta}>{sheetBubble.place} · {sheetBubble.time} · {sheetBubble.nick}</Text>
               </View>
-              {sheetBubble.canLike !== false && sheetBubble.discoverPostId ? (
+              {sheetBubble.canLike && sheetBubble.discoverPostId ? (
                 <Pressable onPress={() => void handleToggleLike(sheetBubble.discoverPostId!)} disabled={likeUpdatingIds.includes(sheetBubble.discoverPostId)} style={{ alignItems: "center" }}>
                   <Ionicons name={likedPostIds.includes(sheetBubble.discoverPostId) ? "heart" : "heart-outline"} size={20} color={PINK} />
                   <Text style={{ fontSize: 11, color: T1, marginTop: 2 }}>{sheetBubble.likes}</Text>
@@ -1878,7 +1887,6 @@ export default function DiscoverScreen() {
         </Animated.View>
       )}
 
-      {/* 🌿 FAB 플로팅 버튼 */}
       <View style={styles.fabWrap} pointerEvents="box-none">
         <Animated.View style={[styles.fabGlow, { transform: [{ scale: glowScale }], opacity: glowOpacity }]} />
         <Animated.View style={{ transform: [{ scale: btnScale }] }}>
@@ -1888,7 +1896,6 @@ export default function DiscoverScreen() {
         </Animated.View>
       </View>
 
-      {/* 🌿 위치 종류 선택 모달 */}
       <Modal visible={locationTypeVisible} transparent animationType="fade" onRequestClose={() => setLocationTypeVisible(false)}>
         <View style={styles.locationTypeOverlay}>
           <Pressable style={styles.locationTypeBackdrop} onPress={() => setLocationTypeVisible(false)} />
@@ -1915,7 +1922,6 @@ export default function DiscoverScreen() {
         </View>
       </Modal>
 
-      {/* 🌿 장소 피커 지적 모달 */}
       <Modal visible={pickerVisible} animationType="slide" onRequestClose={() => setPickerVisible(false)}>
         <View style={{ flex: 1 }}>
           <RecordLocationPickerMap
@@ -2032,7 +2038,6 @@ export default function DiscoverScreen() {
         </View>
       </Modal>
 
-      {/* 🌿 기록 등록 폼 모달 */}
       <Modal visible={registerVisible} transparent animationType="slide" onRequestClose={() => closeRegister()}>
         <KeyboardAvoidingView style={styles.shareModalOverlay} behavior={Platform.OS === "ios" ? "padding" : undefined}>
           <Pressable style={styles.shareModalBackdrop} onPress={() => closeRegister()} />
@@ -2400,4 +2405,4 @@ const styles = StyleSheet.create({
   myRecordCardOpenFocused: { backgroundColor: BL },
   myRecordCardTitle: { marginBottom: 4, fontSize: 16, lineHeight: 22, fontWeight: "800", color: T0 },
   myRecordCardPlace: { marginBottom: 10, fontSize: 11, color: T1 },
-}); 
+});

@@ -2,15 +2,15 @@ import Ionicons from "@expo/vector-icons/Ionicons";
 import { router } from "expo-router";
 import { useEffect, useState } from "react";
 import {
-  ActivityIndicator,
-  FlatList,
-  Pressable,
-  StyleSheet,
-  Text,
-  View,
+    ActivityIndicator,
+    FlatList,
+    Pressable,
+    StyleSheet,
+    Text,
+    View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { getMyLikedPosts, LikedPost } from "../../services/likes.service";
+import { getReceivedLikePosts, ReceivedLikePost } from "../../services/likes.service";
 
 const COLORS = {
   primary: "#315C4A",
@@ -32,18 +32,18 @@ const EMOTION_LABEL: Record<string, string> = {
   unsure: "잘 모르겠어요",
 };
 
-export default function MyLikesScreen() {
-  const [posts, setPosts] = useState<LikedPost[]>([]);
+export default function ReceivedLikesScreen() {
+  const [posts, setPosts] = useState<ReceivedLikePost[]>([]);
   const [loading, setLoading] = useState(true);
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
   useEffect(() => {
     (async () => {
       try {
-        const data = await getMyLikedPosts();
+        const data = await getReceivedLikePosts();
         setPosts(data);
       } catch (error) {
-        console.error("좋아요 목록 조회 실패:", error);
+        console.error("받은 좋아요 조회 실패:", error);
       } finally {
         setLoading(false);
       }
@@ -65,7 +65,7 @@ export default function MyLikesScreen() {
         <Pressable onPress={() => router.back()} style={styles.backButton}>
           <Ionicons name="arrow-back" size={24} color={COLORS.textMain} />
         </Pressable>
-        <Text style={styles.headerTitle}>내가 누른 좋아요</Text>
+        <Text style={styles.headerTitle}>내가 받은 좋아요</Text>
         <View style={{ width: 24 }} />
       </View>
 
@@ -76,7 +76,7 @@ export default function MyLikesScreen() {
       ) : posts.length === 0 ? (
         <View style={styles.centerContainer}>
           <Ionicons name="heart-outline" size={32} color={COLORS.textMuted} />
-          <Text style={styles.emptyText}>아직 누른 좋아요가 없어요.</Text>
+          <Text style={styles.emptyText}>아직 받은 좋아요가 없어요.</Text>
         </View>
       ) : (
         <FlatList
@@ -88,7 +88,7 @@ export default function MyLikesScreen() {
             return (
               <Pressable onPress={() => toggleExpand(item.id)} style={styles.card}>
                 <View style={styles.cardHeader}>
-                  <Text style={styles.dateText}>{formatDate(item.liked_at)}에 좋아요</Text>
+                  <Text style={styles.dateText}>{formatDate(item.created_at)}</Text>
                   <View style={styles.headerRight}>
                     <View style={styles.likeBadge}>
                       <Ionicons name="heart" size={12} color={COLORS.heart} />

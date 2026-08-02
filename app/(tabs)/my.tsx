@@ -444,7 +444,7 @@ export default function MyScreen() {
               .eq("user_id", user.id),
             supabase
               .from("discover_post_likes")
-              .select("id, discover_posts!inner(id)", { count: "exact", head: true })
+              .select("post_id", { count: "exact", head: true })
               .eq("user_id", user.id),
             getMyBadges()
               .then((data) => ({ data, error: null as null }))
@@ -806,7 +806,6 @@ export default function MyScreen() {
     ]);
   };
 
-  // 프로필 열 때 목록 모달을 먼저 닫아, 두 모달이 동시에 겹쳐 뜨며 생기던 프리징을 방지한다.
   const handleViewFriendProfile = async (userId: string) => {
     setFriendModalVisible(false);
     setFriendProfileLoading(true);
@@ -1036,7 +1035,8 @@ export default function MyScreen() {
                     router.push("/(tabs)/essay");
                     break;
                   case "받은 좋아요":
-                    return;
+                    router.push("/my/received-likes");
+                    break;
                   case "획득 뱃지":
                     scrollViewRef.current?.scrollTo({ y: 700, animated: true });
                     break;
@@ -1044,7 +1044,7 @@ export default function MyScreen() {
               }}
               style={({ pressed }) => [
                 styles.statCard,
-                stat.label !== "받은 좋아요" && pressed && styles.pressed,
+                pressed && styles.pressed,
               ]}
             >
               <Text style={styles.statValue}>{stat.value}</Text>
@@ -1432,12 +1432,12 @@ export default function MyScreen() {
                           </View>
                         )}
                         <Text style={styles.friendName}>{person?.nickname ?? "이름 없음"}</Text>
-                        <View style={{ flexDirection: "row", gap: 8 }}>
+                        <View style={styles.requestActionRow}>
                           <Pressable onPress={() => handleAcceptRequest(request.id)} style={styles.friendAddButton}>
                             <Text style={{ fontSize: 12, fontWeight: "700", color: COLORS.primary }}>수락</Text>
                           </Pressable>
-                          <Pressable onPress={() => handleRejectRequest(request.id)}>
-                            <Text style={{ fontSize: 12, color: COLORS.textMuted }}>거절</Text>
+                          <Pressable onPress={() => handleRejectRequest(request.id)} style={styles.rejectButton}>
+                            <Text style={{ fontSize: 12, fontWeight: "600", color: COLORS.textMuted }}>거절</Text>
                           </Pressable>
                         </View>
                       </View>
@@ -2183,6 +2183,19 @@ const styles = StyleSheet.create({
     paddingHorizontal: 10,
     paddingVertical: 6,
     backgroundColor: COLORS.primaryLight,
+    borderRadius: 8,
+  },
+  requestActionRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  rejectButton: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    backgroundColor: COLORS.background,
+    borderWidth: 1,
+    borderColor: COLORS.border,
     borderRadius: 8,
   },
 });
