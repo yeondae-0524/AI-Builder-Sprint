@@ -1,7 +1,10 @@
-// Supabase Edge Function은 Deno 런타임에서 실행되지만,
-// Expo 프로젝트의 일반 TypeScript 서버에서도 오류 없이 편집할 수 있도록
-// 필요한 Deno 전역 타입만 이 파일 안에 선언한다.
-declare const Deno: {
+export { };
+
+// Supabase Edge Function의 Deno 전역을 다시 선언하지 않고
+// globalThis에서 타입 안전하게 가져온다.
+// 이렇게 하면 Deno 확장과 Expo TypeScript가 동시에 켜져 있어도
+// `Deno` 중복 선언 오류가 생기지 않는다.
+type DenoRuntime = {
   env: {
     get(name: string): string | undefined;
   };
@@ -9,6 +12,10 @@ declare const Deno: {
     handler: (request: Request) => Response | Promise<Response>,
   ): void;
 };
+
+const denoRuntime = (globalThis as unknown as {
+  Deno: DenoRuntime;
+}).Deno;
 
 type EssayPersona =
   | "emotion_interpreter"
@@ -165,7 +172,7 @@ const JSON_HEADERS = {
 };
 
 const UPSTAGE_API_URL =
-  "https://api.upstage.ai/v1/solar/chat/completions";
+  "https://api.upstage.ai/v1/chat/completions";
 const UPSTAGE_TIMEOUT_MS = 90_000;
 const MAX_RECORDS = 40;
 const MAX_RECORD_CONTENT_LENGTH = 2_000;
@@ -211,6 +218,20 @@ function toCleanString(value: unknown, fallback = "") {
 function toNullableString(value: unknown) {
   const text = toCleanString(value);
   return text || null;
+}
+
+const EMOTION_LABELS: Record<string, string> = {
+  comfortable: "편안해요",
+  joyful: "즐거워요",
+  new: "새로워요",
+  uncomfortable: "불편해요",
+  unsure: "잘 모르겠어요",
+};
+
+function normalizeEmotion(value: unknown) {
+  const emotion = toCleanString(value);
+  if (!emotion) return null;
+  return EMOTION_LABELS[emotion] ?? emotion;
 }
 
 function normalizePersona(value: unknown): EssayPersona {
@@ -265,7 +286,7 @@ function normalizeRecord(
     `기록 ${index + 1}`,
   );
   const missionDescription = toCleanString(raw.missionDescription);
-  const emotion = toNullableString(raw.emotion);
+  const emotion = normalizeEmotion(raw.emotion);
   const placeName = toNullableString(raw.placeName);
   const fallbackContent = [
     missionDescription,
@@ -351,7 +372,7 @@ function getLengthInstruction(
   persona: EssayPersona,
 ) {
   if (persona === "entertainment_pd") {
-    return "4컷 대사와 자막은 짧게 작성하고, 전체 content는 350~650자 이내로 작성하세요.";
+    return "4컷 대사와 자막은 짧게 작성하되, content는 예능 PD 관점의 성향 분석 글로 5개 안팎의 문단, 약 750~1,100자 분량으로 작성하세요.";
   }
 
   if (recordCount <= 7) {
@@ -452,7 +473,7 @@ content 구성:
     case "entertainment_pd":
       return `
 당신의 역할은 '인생 예능 PD'입니다.
-사용자의 여정에서 가장 웃픈 흐름을 골라, Begin Again 전용 고정 캐릭터 '비기니'로 표현할 수 있는 4컷 웹툰 대본을 만드세요.
+사용자의 기록에서 반복되는 선택, 망설임, 작은 성공을 예능 편집자의 시선으로 분석한 글을 작성하고, 그 분석을 보조하는 4컷 웹툰 대본도 함께 만드세요.
 
 비기니 캐릭터 규칙:
 - 모든 컷의 주인공은 같은 캐릭터 '비기니'입니다.
@@ -461,7 +482,10 @@ content 구성:
 - 웃음은 비기니의 외형이 아니라 기록 속 상황, 선택의 대비, 자막 연출에서 만드세요.
 
 핵심 임무:
-- 여정 전체를 요약하지 말고, 하나의 에피소드로 연결되는 1~3개 기록만 선택하세요.
+- content는 사용자가 직접 쓴 일기가 아니라, AI 예능 PD가 기록을 관찰해 행동 성향을 분석하는 글이어야 합니다.
+- content에서 계획과 실제 행동의 차이, 반복되는 선택, 긴장 뒤의 반응, 작은 성공을 구체적인 기록 근거와 함께 설명하세요.
+- 여정 전체를 시간순으로 요약하지 말고, 하나의 분석 흐름으로 연결되는 1~3개 기록을 중심으로 쓰세요.
+- 4컷 웹툰은 content의 대체물이 아니라 분석을 재미있게 보조하는 부가 결과입니다.
 - 웃음의 대상은 사용자의 정체성, 외모, 감정이 아니라 '거창한 계획과 실제 선택의 차이', '뜻밖의 반전', '작은 성공'이어야 합니다.
 - 기록에 없는 상황, 대사, 행동을 사실처럼 만들지 마세요.
 - dialogue는 사용자의 기록을 바탕으로 한 짧은 속마음 또는 재구성된 대사입니다. 기록에 없는 직접 인용처럼 보이지 않게 자연스럽게 쓰세요.
@@ -565,7 +589,7 @@ expert_commentary: 사소한 행동을 전문가 분석처럼 다룸
 
 공통 필드 규칙:
 - title은 반드시 "오늘의 4컷: "으로 시작하고 episodeTitle과 같은 핵심 제목을 사용하세요.
-- content는 1컷부터 4컷까지 대사와 자막을 사람이 읽을 수 있는 텍스트로 정리한 대체 본문입니다.
+- content는 예능 PD가 실제 기록을 근거로 사용자의 선택 패턴과 행동 성향을 분석한 글입니다. 4컷 대사 모음이나 사용자의 1인칭 일기처럼 쓰지 마세요.
 - summary는 어떤 기록을 어떤 대비로 편집했는지 2문장 이내로 설명하세요.
 - verdict는 반드시 "오늘의 편집 포인트: "로 시작하세요.
 - insights keyword는 정확히 "웃픈 명장면", "반전 포인트", "다음 화 떡밥" 순서로 작성하세요.
@@ -577,46 +601,50 @@ expert_commentary: 사소한 행동을 전문가 분석처럼 다룸
     default:
       return `
 당신의 역할은 '감정 통역사'입니다.
-사용자의 감정을 분석 대상으로 딱딱하게 분류하지 말고, 기록 속 마음의 움직임을 다정하고 구체적인 언어로 대신 정리하세요.
+사용자가 이번 여정에서 선택한 미션들의 카테고리, 각 기록에서 고른 감정, 직접 남긴 기록 내용을 통합해 분석하고 사용자의 취향을 알려주는 글을 작성하세요.
 
-핵심 임무:
-- 무엇을 좋아하는 사람인지 결론부터 내리기보다, 어떤 상황에서 마음이 편안해지고 어떤 상황에서 움츠러들었는지 설명하세요.
-- 서로 반대되는 감정이 함께 있었다면 하나를 없애지 말고 둘 다 인정하세요.
-- 부정적인 감정을 고쳐야 할 문제로 취급하지 마세요.
-- 사용자가 기록하지 않은 상처, 트라우마, 욕구, 무의식, 정신 상태를 추측하지 마세요.
-- 상담, 치료, 진단, 처방처럼 말하지 마세요.
-- 해결책을 서두르기보다 사용자가 자기 감정을 이해할 수 있는 문장을 먼저 건네세요.
-- 최소 두 개의 기록을 연결하되 시간순 요약은 피하세요.
+가장 중요한 분석 목표:
+- 사용자가 어떤 카테고리의 경험에 반복해서 끌렸는지 살펴보세요.
+- 같은 카테고리라도 어떤 구체적인 상황에서 편안함, 즐거움, 새로움, 불편함, 망설임을 느꼈는지 연결하세요.
+- 긍정적인 감정이 나타난 경험만이 아니라 불편하거나 잘 모르겠다고 느낀 경험도 취향의 경계를 보여주는 근거로 사용하세요.
+- 미션 카테고리만 단순 나열하지 말고, 카테고리·감정·기록 내용을 서로 연결해 사용자가 좋아하는 활동의 방식, 환경, 속도와 분위기를 설명하세요.
+- 기록이 충분하지 않은 부분은 확정하지 말고 "이번 기록에서는 ~한 경향이 보입니다"처럼 조심스럽게 표현하세요.
+- 사용자가 기록하지 않은 성격, 관계, 상처, 무의식이나 정신 상태를 추측하지 마세요.
 
-말투:
-- 따뜻하고 부드러운 존댓말을 사용하세요.
-- 오글거리는 위로나 무조건적인 칭찬은 피하세요.
-- "괜찮아요"만 반복하지 말고 기록의 구체적인 장면을 근거로 공감하세요.
-- 감정 이름을 단정하기보다 "~했을 수 있어요", "~처럼 보였어요"처럼 조심스럽게 표현하세요.
+글의 관점과 말투:
+- 사용자가 직접 쓴 일기처럼 쓰지 말고, AI가 기록을 읽고 분석해 알려주는 글로 작성하세요.
+- "사용자는", "기록에서", "이번 여정에서는"처럼 분석 주체와 근거가 드러나게 작성하세요.
+- 따뜻하고 자연스러운 존댓말을 사용하되 과장된 위로나 칭찬은 피하세요.
+- 취향을 단정적인 성격 진단으로 만들지 말고 이번 여정에서 확인된 선호 경향으로 설명하세요.
 
 content 구성:
-마음의 첫 신호
-이번 기록에서 가장 크게 움직인 감정을 소개합니다.
+취향의 큰 방향
+선택한 미션 카테고리와 기록 전체를 바탕으로 이번 여정에서 가장 크게 드러난 취향을 설명합니다.
 
-마음이 편안해진 순간
-편안함이나 즐거움이 나타난 공통 조건을 설명합니다.
+마음이 끌린 경험
+어떤 카테고리와 활동에서 편안함, 즐거움 또는 새로움이 나타났는지 기록 내용을 근거로 연결합니다.
 
-마음이 움츠러든 순간
-불편함과 망설임을 만든 상황을 비난 없이 설명합니다.
+좋아하는 경험의 조건
+장소, 활동 방식, 자극의 정도, 익숙함과 새로움 등 기록에서 확인되는 선호 조건을 설명합니다.
 
-함께 있던 두 감정
-서로 충돌하거나 동시에 존재한 감정을 연결합니다.
+취향의 경계
+불편함이나 잘 모르겠다는 감정이 나타난 경험을 바탕으로 덜 맞을 가능성이 있는 조건을 조심스럽게 설명합니다.
 
-지금 마음이 알려주는 것
-이번 기록 범위에서 이해할 수 있는 감정의 메시지를 정리합니다.
-- 마지막 문장을 verdict와 똑같이 반복하지 마세요.
+이번 여정이 알려준 취향
+앞의 근거를 종합해 사용자가 현재 어떤 경험을 선호하는지 구체적으로 정리합니다.
+
+가독성 규칙:
+- 위 다섯 개 소제목을 각각 한 줄에 단독으로 작성하세요.
+- 소제목 다음 줄부터 해당 내용을 2~4문장으로 작성하세요.
+- 각 소제목과 본문 묶음 사이에는 반드시 빈 줄을 한 줄 넣으세요.
+- 한 문단을 지나치게 길게 쓰지 마세요.
 
 표현 규칙:
-- 제목은 부드럽고 구체적으로 작성하되 감성적인 추상어를 과도하게 쓰지 마세요.
-- verdict는 반드시 "지금 마음이 알려주는 것: "으로 시작하세요.
-- insights keyword는 정확히 "편안함의 조건", "마음의 경보", "감정의 공존" 순서로 작성하세요.
-- aiRecommendation은 반드시 "다음 감정 관찰: "로 시작하세요.
-- 추천은 감정을 바꾸는 과제가 아니라 한 번 관찰하고 기록할 수 있는 행동 하나여야 합니다.
+- 제목은 사용자의 취향이 구체적으로 드러나는 문장으로 작성하세요.
+- verdict는 반드시 "이번 여정에서 드러난 취향: "으로 시작하세요.
+- insights keyword는 정확히 "끌리는 경험", "좋아하는 조건", "취향의 경계" 순서로 작성하세요.
+- aiRecommendation은 반드시 "다음 취향 확인: "으로 시작하세요.
+- 추천은 지금까지 드러난 취향을 한 번 더 확인할 수 있는 작은 경험 하나만 제시하세요.
 `.trim();
   }
 }
@@ -629,7 +657,7 @@ function buildEssayPrompt(body: NormalizedEssayAiRequest) {
 {
   "persona": "entertainment_pd",
   "title": "오늘의 4컷: 에피소드 제목",
-  "content": "1컷부터 4컷까지의 대사와 자막을 정리한 대체 본문",
+  "content": "예능 PD 관점에서 실제 기록을 근거로 선택 패턴과 행동 성향을 분석한 글",
   "summary": "편집한 기록과 대비를 설명한 두 문장 이내 요약",
   "verdict": "오늘의 편집 포인트: 한 줄",
   "insights": [
@@ -701,7 +729,7 @@ function buildEssayPrompt(body: NormalizedEssayAiRequest) {
 {
   "persona": "${body.persona}",
   "title": "선택한 역할에 맞는 제목",
-  "content": "선택한 역할의 구조를 따른 전체 글",
+  "content": "선택한 AI가 실제 기록을 근거로 사용자의 감정·행동·선택 성향을 분석한 글",
   "summary": "핵심 판단을 두 문장 이내로 압축한 요약",
   "verdict": "선택한 역할에 맞는 최종 한 줄",
   "insights": [
@@ -724,17 +752,21 @@ function buildEssayPrompt(body: NormalizedEssayAiRequest) {
 `.trim();
 
   const systemPrompt = `
-당신은 사용자의 실제 여정 기록을 읽고, 선택된 역할에 맞는 한국어 결과를 만드는 편집자입니다.
-역할마다 목적, 문체, 구조와 최종 산출물이 확실히 달라야 합니다.
+당신은 사용자의 실제 여정 기록을 읽고 성향을 분석하는 AI 편집자입니다.
+역할마다 분석 관점과 말투는 달라야 하지만, 모든 역할의 content는 사용자가 직접 쓴 일기가 아니라 AI가 기록을 근거로 해석한 분석 글이어야 합니다.
 
 가장 중요한 공통 원칙:
+- 글의 화자는 항상 AI 분석자입니다. 사용자의 목소리를 흉내 내거나 사용자를 대신해 1인칭 일기를 쓰지 마세요.
+- content에서 "나는", "내가", "나의"를 화자의 표현으로 사용하지 마세요. 기록 속 문장을 짧게 인용해야 할 때만 인용 표시와 함께 제한적으로 사용하세요.
+- "기록에서 드러난 점", "이번 여정에서 확인되는 경향", "사용자는 ~한 상황에서"처럼 관찰과 근거가 드러나는 분석 문장으로 작성하세요.
+- 성향을 단정적인 성격 진단으로 만들지 말고, 이번 기록에서 반복되거나 대비된 행동·감정·선택의 경향으로 설명하세요.
 - 사용자가 기록하지 않은 사건, 장소, 행동, 관계, 감정, 사람 수, 분위기, 심리 상태를 만들지 마세요.
 - 기록에 있는 정보만 근거로 사용하세요.
 - 특정 기록을 언급할 때 미션 목표와 사용자의 실제 행동을 왜곡하지 마세요.
 - 미션 목표 달성과 자기 이해의 성과를 구분하세요.
 - 감정 자체는 성공이나 실패가 아닙니다.
 - 사용자가 통제할 수 없는 환경이나 타인의 행동을 사용자의 잘못으로 평가하지 마세요.
-- 기록 전체를 시간순으로 다시 쓰지 마세요.
+- 기록 전체를 시간순으로 다시 쓰거나 사용자의 하루를 일기처럼 재현하지 마세요.
 - 기록에서 검증하지 않은 횟수, 비율, 점수, 순위, 통계를 만들지 마세요.
 - 근거가 부족한 해석은 가능성 또는 판단 보류로 표현하세요.
 - 사용자를 심리 진단하거나 치료가 필요한 사람으로 단정하지 마세요.
@@ -742,6 +774,8 @@ function buildEssayPrompt(body: NormalizedEssayAiRequest) {
 - content와 verdict에 같은 문장을 반복하지 마세요.
 - aiRecommendation에는 행동 하나만 넣으세요.
 - ${getLengthInstruction(body.records.length, body.persona)}
+- content는 짧은 소제목과 여러 문단으로 나누고, 문단 사이에는 반드시 빈 줄을 한 줄 넣으세요.
+- 한 문단은 2~4문장 정도로 유지하고 하나의 긴 문단으로 몰아쓰지 마세요.
 
 ${getPersonaInstruction(body.persona)}
 
@@ -749,10 +783,11 @@ ${getPersonaInstruction(body.persona)}
 1. 중요한 주장과 농담에 실제 기록 근거가 있는가?
 2. 기록에 없는 숫자, 상황, 직접 대사를 사실처럼 만들지 않았는가?
 3. 불편한 감정 자체를 잘못으로 평가하지 않았는가?
-4. 선택한 역할의 구조가 다른 역할과 분명히 구분되는가?
-5. content와 verdict가 중복되지 않는가?
-6. aiRecommendation이 행동 하나인가?
-${isComic ? "7. comic.panels가 정확히 4개이고 모든 선택값이 허용 목록에 있는가?" : "7. comic 값이 null인가?"}
+4. content가 사용자의 1인칭 일기가 아니라 AI의 근거 기반 성향 분석 글인가?
+5. 선택한 역할의 구조가 다른 역할과 분명히 구분되는가?
+6. content와 verdict가 중복되지 않는가?
+7. aiRecommendation이 행동 하나인가?
+${isComic ? "8. comic.panels가 정확히 4개이고 모든 선택값이 허용 목록에 있는가?" : "8. comic 값이 null인가?"}
 하나라도 어기면 출력 전에 수정하세요.
 
 출력 규칙:
@@ -780,7 +815,12 @@ ${outputSchema}
 ${formatRecords(body.records)}
 
 [작성 요청]
-- 기록 전체를 읽은 뒤 선택한 역할에 가장 중요한 장면을 선별하세요.
+- 기록 전체를 읽은 뒤 선택한 역할의 관점으로 사용자의 감정, 행동, 선택 성향을 분석하세요.
+${body.persona === "emotion_interpreter"
+    ? "- 감정 통역사는 사용자가 선택한 미션 카테고리, 각 기록의 한글 감정, 기록 내용을 통합해 사용자의 취향을 구체적으로 알려주세요."
+    : ""}
+- 사용자가 직접 쓴 듯한 1인칭 일기나 회고문으로 작성하지 마세요.
+- 중요한 해석마다 어떤 기록에서 근거를 얻었는지 자연스럽게 드러내세요.
 - 기록을 전부 한 번씩 언급하려 하지 마세요.
 - 일부 기록만 보고 사용자의 성격 전체를 단정하지 마세요.
 - 미션 목표와 실제 행동을 비교하세요.
@@ -1090,6 +1130,49 @@ function comicToFallbackContent(comic: EntertainmentComic) {
     .join("\n\n");
 }
 
+function formatEssayContentForReadability(value: unknown) {
+  const normalized = toCleanString(value)
+    .replace(/\r\n?/g, "\n")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+
+  if (!normalized) return "";
+
+  const existingParagraphs = normalized
+    .split(/\n{2,}/)
+    .map((paragraph) => paragraph.trim())
+    .filter(Boolean);
+
+  if (existingParagraphs.length >= 3) {
+    return existingParagraphs.join("\n\n");
+  }
+
+  const lines = normalized
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  if (lines.length >= 3) {
+    return lines.join("\n\n");
+  }
+
+  const sentences = (
+    normalized.match(/[^.!?。！？]+[.!?。！？]+|[^.!?。！？]+$/g) ?? []
+  )
+    .map((sentence) => sentence.trim())
+    .filter(Boolean);
+
+  if (sentences.length <= 3) return normalized;
+
+  const paragraphs: string[] = [];
+  for (let index = 0; index < sentences.length; index += 2) {
+    paragraphs.push(sentences.slice(index, index + 2).join(" "));
+  }
+
+  return paragraphs.join("\n\n");
+}
+
 function normalizeEssayResult(
   raw: Record<string, unknown>,
   requestedPersona: EssayPersona,
@@ -1103,9 +1186,8 @@ function normalizeEssayResult(
     raw.title,
     comic ? `오늘의 4컷: ${comic.episodeTitle}` : "",
   );
-  const content = toCleanString(
-    raw.content ?? raw.summary,
-    comic ? comicToFallbackContent(comic) : "",
+  const content = formatEssayContentForReadability(
+    raw.content ?? raw.summary ?? (comic ? comicToFallbackContent(comic) : ""),
   );
   const summary = toCleanString(raw.summary, content.slice(0, 180));
   const verdict = toCleanString(
@@ -1155,21 +1237,43 @@ function normalizeEssayResult(
   };
 }
 
+function looksLikeFirstPersonDiary(content: string) {
+  const normalized = content
+    .replace(/[“”‘’]/g, '"')
+    .replace(/\s+/g, " ")
+    .trim();
+
+  const diarySentenceCount = (
+    normalized.match(
+      /(?:^|[.!?。！？]\s+)(?:나는|내가|나의|나에게|내 마음은|오늘 나는|이번에 나는)\b/g,
+    ) ?? []
+  ).length;
+  const analysisMarkerCount = (
+    normalized.match(
+      /사용자는|기록에서|이번 여정에서|기록을 보면|드러난 경향|선택 패턴|행동 패턴|감정의 조건|확인되는 점/g,
+    ) ?? []
+  ).length;
+
+  return (
+    diarySentenceCount >= 2 ||
+    (diarySentenceCount >= 1 && analysisMarkerCount === 0)
+  );
+}
+
 async function callUpstage(
   systemPrompt: string,
   userPrompt: string,
   requestId: string,
   persona: EssayPersona,
 ) {
-  const apiKey = toCleanString(Deno.env.get("UPSTAGE_API_KEY"));
+  const apiKey = toCleanString(denoRuntime.env.get("UPSTAGE_API_KEY"));
   if (!apiKey) {
     throw new Error("UPSTAGE_API_KEY가 설정되지 않았습니다.");
   }
 
-  const model = toCleanString(
-    Deno.env.get("UPSTAGE_MODEL"),
-    "solar-pro2",
-  );
+  // 해커톤 권장 기술인 Upstage Solar Pro를 항상 사용한다.
+  // 환경변수에 다른 모델명이 남아 있어도 다른 회사/계열 모델로 바뀌지 않게 고정한다.
+  const model = "solar-pro3";
 
   const controller = new AbortController();
   const timeoutId = setTimeout(
@@ -1180,6 +1284,7 @@ async function callUpstage(
 
   console.log(`[generate-essay][${requestId}] Upstage 요청 시작`, {
     model,
+    endpoint: UPSTAGE_API_URL,
     systemPromptLength: systemPrompt.length,
     userPromptLength: userPrompt.length,
   });
@@ -1252,7 +1357,7 @@ async function callUpstage(
   }
 }
 
-Deno.serve(async (req) => {
+denoRuntime.serve(async (req) => {
   const requestId = crypto.randomUUID().slice(0, 8);
   const startedAt = Date.now();
 
@@ -1294,11 +1399,42 @@ Deno.serve(async (req) => {
       body.persona,
     );
     const parsed = extractJsonObject(rawAiContent);
-    const result = normalizeEssayResult(
+    let result = normalizeEssayResult(
       parsed,
       body.persona,
       body.records.length,
     );
+
+    if (looksLikeFirstPersonDiary(result.content)) {
+      console.warn(`[generate-essay][${requestId}] 1인칭 일기형 응답 감지, 재작성 요청`);
+
+      const rewriteSystemPrompt = `${systemPrompt}
+
+[재작성 최우선 규칙]
+이전 생성 결과가 사용자가 직접 쓴 듯한 1인칭 일기 형식이었습니다. 이번 응답의 content는 반드시 AI 분석자가 사용자의 기록을 관찰해 쓴 성향 분석문이어야 합니다. 문단마다 '기록에서', '사용자는', '이번 여정에서 확인되는 경향'처럼 분석 주체와 근거가 드러나야 합니다. 화자로서 '나는', '내가', '나의'를 사용하지 마세요. 기록 속 표현을 인용할 때만 따옴표 안에서 제한적으로 허용합니다.`;
+      const rewriteUserPrompt = `${userPrompt}
+
+[반드시 재작성]
+시간순 일기나 감상문이 아니라, 기록 간 공통점과 대비를 근거로 사용자의 감정·행동·선택 성향을 분석하세요.`;
+      const rewrittenRaw = await callUpstage(
+        rewriteSystemPrompt,
+        rewriteUserPrompt,
+        `${requestId}-rewrite`,
+        body.persona,
+      );
+      const rewrittenParsed = extractJsonObject(rewrittenRaw);
+      result = normalizeEssayResult(
+        rewrittenParsed,
+        body.persona,
+        body.records.length,
+      );
+
+      if (looksLikeFirstPersonDiary(result.content)) {
+        throw new Error(
+          "AI가 분석형 문체 규칙을 지키지 못했습니다. 잠시 후 다시 시도해주세요.",
+        );
+      }
+    }
 
     console.log(`[generate-essay][${requestId}] 생성 성공`, {
       persona: body.persona,
