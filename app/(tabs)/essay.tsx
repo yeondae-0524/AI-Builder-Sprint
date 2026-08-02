@@ -24,7 +24,9 @@ import {
 } from "react-native";
 
 import {
+  ComicPanel,
   createEssayDraft,
+  EntertainmentComic,
   ESSAY_PERSONA_OPTIONS,
   EssayDashboardData,
   EssayDetail,
@@ -37,6 +39,7 @@ import {
   publishEssay,
   saveEssayDraft,
 } from "../../services/essay.service";
+
 
 type PersonaModalMode = "create" | "regenerate" | null;
 
@@ -281,6 +284,402 @@ function PersonaPickerOverlay({
         onClose={onClose}
         onSelect={onSelect}
       />
+    </View>
+  );
+}
+
+const COMIC_BACKGROUND_META: Record<
+  ComicPanel["background"],
+  {
+    label: string;
+    icon: keyof typeof Ionicons.glyphMap;
+    backgroundColor: string;
+  }
+> = {
+  street: {
+    label: "산책로",
+    icon: "walk-outline",
+    backgroundColor: "#DCEEE2",
+  },
+  restaurant: {
+    label: "식당",
+    icon: "restaurant-outline",
+    backgroundColor: "#F7E3C6",
+  },
+  exhibition: {
+    label: "전시장",
+    icon: "images-outline",
+    backgroundColor: "#E5E2F3",
+  },
+  bookstore: {
+    label: "서점",
+    icon: "book-outline",
+    backgroundColor: "#EADFCF",
+  },
+  workshop: {
+    label: "공방",
+    icon: "hammer-outline",
+    backgroundColor: "#E6D8CA",
+  },
+  home: {
+    label: "집",
+    icon: "home-outline",
+    backgroundColor: "#E2E8EA",
+  },
+  cafe: {
+    label: "카페",
+    icon: "cafe-outline",
+    backgroundColor: "#F1DFD0",
+  },
+  park: {
+    label: "공원",
+    icon: "leaf-outline",
+    backgroundColor: "#DCEBD8",
+  },
+  transit: {
+    label: "이동 중",
+    icon: "bus-outline",
+    backgroundColor: "#DDE8F2",
+  },
+  generic: {
+    label: "오늘의 현장",
+    icon: "sparkles-outline",
+    backgroundColor: "#EEE9DE",
+  },
+};
+
+function getBeginiImage(expression: ComicPanel["expression"]) {
+  switch (String(expression)) {
+    case "determined":
+      return require("../../assets/begini/expressions/begini_determined.png");
+
+    case "nervous":
+      return require("../../assets/begini/expressions/begini_nervous.png");
+
+    case "flustered":
+    case "embarrassed":
+      return require("../../assets/begini/expressions/begini_flustered.png");
+
+    case "blank":
+    case "tired":
+      return require("../../assets/begini/expressions/begini_blank.png");
+
+    case "relieved":
+    case "happy":
+      return require("../../assets/begini/expressions/begini_relieved.png");
+
+    case "proud":
+      return require("../../assets/begini/expressions/begini_proud.png");
+
+    case "shocked":
+    case "surprised":
+      return require("../../assets/begini/expressions/begini_shocked.png");
+
+    case "thinking":
+    default:
+      return require("../../assets/begini/expressions/begini_thinking.png");
+  }
+}
+
+const COMIC_EFFECT_LABELS: Record<ComicPanel["effect"], string> = {
+  none: "",
+  sweat: "식은땀",
+  shock: "충격",
+  zoom: "긴급 확대",
+  silence: "정적…",
+  black_and_white: "흑백 처리",
+  sparkle: "반짝",
+  question_marks: "물음표 대잔치",
+  speed_lines: "급전개",
+};
+
+const COMEDY_STYLE_LABELS: Record<
+  EntertainmentComic["comedyStyle"],
+  string
+> = {
+  grand_declaration: "거창한 선언",
+  production_caption: "제작진 자막",
+  breaking_news: "긴급 속보",
+  sports_commentary: "스포츠 중계",
+  documentary: "과몰입 다큐",
+  interview_cut: "솔직 인터뷰",
+  before_after: "몇 초 전·후",
+  plan_vs_reality: "계획과 현실",
+  sudden_silence: "갑작스러운 정적",
+  inner_voice: "속마음 공개",
+  replay_zoom: "결정적 장면 확대",
+  contract_renewal: "익숙함과 재계약",
+  emergency_meeting: "긴급회의",
+  plot_twist: "예상 밖 반전",
+  audience_reaction: "관객 반응",
+  subtitle_mismatch: "비장함과 자막의 온도차",
+  mission_failed_successfully: "실패했지만 성공",
+  tiny_victory: "작은 승리",
+  cliffhanger: "다음 화 떡밥",
+  expert_commentary: "전문가 과몰입 분석",
+};
+
+type ComicMemeTone = "red" | "dark" | "yellow" | "blue" | "green";
+
+function getComicPanelDividerStyle(panelNumber: ComicPanel["panelNumber"]) {
+  switch (panelNumber) {
+    case 1:
+      return {
+        borderRightWidth: 1.5,
+        borderBottomWidth: 1.5,
+      };
+    case 2:
+      return {
+        borderBottomWidth: 1.5,
+      };
+    case 3:
+      return {
+        borderRightWidth: 1.5,
+      };
+    case 4:
+    default:
+      return {};
+  }
+}
+
+function getComicMemeTag(
+  comedyStyle: EntertainmentComic["comedyStyle"],
+  panelNumber: ComicPanel["panelNumber"],
+): { text: string; tone: ComicMemeTone } | null {
+  switch (comedyStyle) {
+    case "grand_declaration":
+      return panelNumber === 1
+        ? { text: "비장한 선언", tone: "dark" }
+        : panelNumber === 3
+          ? { text: "선언 10초 후", tone: "yellow" }
+          : null;
+
+    case "production_caption":
+      return panelNumber === 2
+        ? { text: "제작진 관찰 중", tone: "green" }
+        : panelNumber === 3
+          ? { text: "제작진도 예상함", tone: "dark" }
+          : null;
+
+    case "breaking_news":
+      return panelNumber === 1
+        ? { text: "긴급 속보", tone: "red" }
+        : panelNumber === 3
+          ? { text: "현장 연결", tone: "red" }
+          : null;
+
+    case "sports_commentary":
+      return panelNumber === 1
+        ? { text: "전반전", tone: "blue" }
+        : panelNumber === 3
+          ? { text: "결정적 장면", tone: "red" }
+          : panelNumber === 4
+            ? { text: "경기 종료", tone: "dark" }
+            : null;
+
+    case "documentary":
+      return panelNumber === 1
+        ? { text: "극사실 관찰 다큐", tone: "dark" }
+        : panelNumber === 4
+          ? { text: "그렇게 하루가 갔다", tone: "green" }
+          : null;
+
+    case "interview_cut":
+      return panelNumber === 4
+        ? { text: "제작진 인터뷰", tone: "blue" }
+        : null;
+
+    case "before_after":
+      return panelNumber === 1
+        ? { text: "10초 전", tone: "green" }
+        : panelNumber === 3
+          ? { text: "10초 후", tone: "red" }
+          : null;
+
+    case "plan_vs_reality":
+      return panelNumber <= 2
+        ? { text: "계획", tone: "green" }
+        : { text: "현실", tone: "red" };
+
+    case "sudden_silence":
+      return panelNumber === 3
+        ? { text: "……", tone: "dark" }
+        : null;
+
+    case "inner_voice":
+      return panelNumber === 2 || panelNumber === 3
+        ? { text: "속마음 ON", tone: "blue" }
+        : null;
+
+    case "replay_zoom":
+      return panelNumber === 3
+        ? { text: "REPLAY", tone: "red" }
+        : null;
+
+    case "contract_renewal":
+      return panelNumber === 3
+        ? { text: "재계약 완료", tone: "yellow" }
+        : null;
+
+    case "emergency_meeting":
+      return panelNumber === 2
+        ? { text: "긴급회의 소집", tone: "red" }
+        : null;
+
+    case "plot_twist":
+      return panelNumber === 3
+        ? { text: "반전 발생", tone: "red" }
+        : null;
+
+    case "audience_reaction":
+      return panelNumber === 3
+        ? { text: "관객: 웅성웅성", tone: "blue" }
+        : null;
+
+    case "subtitle_mismatch":
+      return panelNumber === 1
+        ? { text: "표정은 결승전", tone: "dark" }
+        : panelNumber === 3
+          ? { text: "결과는 소박함", tone: "yellow" }
+          : null;
+
+    case "mission_failed_successfully":
+      return panelNumber === 4
+        ? { text: "실패했지만 성공", tone: "green" }
+        : null;
+
+    case "tiny_victory":
+      return panelNumber === 4
+        ? { text: "오늘의 MVP", tone: "yellow" }
+        : null;
+
+    case "cliffhanger":
+      return panelNumber === 4
+        ? { text: "TO BE CONTINUED", tone: "dark" }
+        : null;
+
+    case "expert_commentary":
+      return panelNumber === 3
+        ? { text: "전문가 분석 중", tone: "blue" }
+        : null;
+
+    default:
+      return null;
+  }
+}
+
+function ComicPanelCard({
+  panel,
+  comedyStyle,
+}: {
+  panel: ComicPanel;
+  comedyStyle: EntertainmentComic["comedyStyle"];
+}) {
+  const background =
+    COMIC_BACKGROUND_META[panel.background] ??
+    COMIC_BACKGROUND_META.generic;
+  const effectLabel = COMIC_EFFECT_LABELS[panel.effect];
+  const memeTag = getComicMemeTag(comedyStyle, panel.panelNumber);
+
+  return (
+    <View
+      style={[
+        styles.comicPanel,
+        { backgroundColor: background.backgroundColor },
+        getComicPanelDividerStyle(panel.panelNumber),
+      ]}
+    >
+      {memeTag ? (
+        <Text
+          style={[
+            styles.comicMemeNote,
+            memeTag.tone === "red" && styles.comicMemeNoteRed,
+            memeTag.tone === "blue" && styles.comicMemeNoteBlue,
+            memeTag.tone === "green" && styles.comicMemeNoteGreen,
+            memeTag.tone === "yellow" && styles.comicMemeNoteYellow,
+          ]}
+        >
+          {memeTag.text}
+        </Text>
+      ) : null}
+
+      {effectLabel ? (
+        <Text style={styles.comicEffectNote}>{effectLabel}</Text>
+      ) : null}
+
+      <View style={styles.comicSpeechBubble}>
+        <Text style={styles.comicDialogue}>{panel.dialogue}</Text>
+      </View>
+
+      <View style={styles.comicCharacterStage}>
+        <Image
+          source={getBeginiImage(panel.expression)}
+          style={styles.comicCharacterImage}
+          resizeMode="contain"
+        />
+      </View>
+
+      <Text style={styles.comicCaption}>{panel.caption}</Text>
+    </View>
+  );
+}
+
+function ComicSection({
+  detail,
+}: {
+  detail: EssayDetail;
+}) {
+  const comic = detail.selectedMeta.comic;
+  if (!comic) return null;
+
+  return (
+    <View style={styles.comicSection}>
+      <View style={styles.comicHeaderRow}>
+        <View style={styles.comicHeaderTextWrap}>
+          <Text style={styles.comicEyebrow}>인생 예능 PD 편집본</Text>
+          <Text style={styles.comicEpisodeTitle}>
+            {comic.episodeTitle}
+          </Text>
+        </View>
+        <View style={styles.comedyStyleBadge}>
+          <Text style={styles.comedyStyleText}>
+            {COMEDY_STYLE_LABELS[comic.comedyStyle] ?? "오늘의 예능"}
+          </Text>
+        </View>
+      </View>
+
+      <View style={styles.comicGrid}>
+        {comic.panels.map((panel) => (
+          <ComicPanelCard
+            key={panel.panelNumber}
+            panel={panel}
+            comedyStyle={comic.comedyStyle}
+          />
+        ))}
+      </View>
+
+      <View style={styles.comicHighlightCard}>
+        <Text style={styles.comicHighlightLabel}>오늘의 대표 자막</Text>
+        <Text style={styles.comicHighlightText}>
+          {comic.highlightCaption}
+        </Text>
+      </View>
+
+      <View style={styles.comicNextEpisodeCard}>
+        <Ionicons name="play-forward" size={18} color="#6E521F" />
+        <View style={styles.comicNextEpisodeTextWrap}>
+          <Text style={styles.comicNextEpisodeLabel}>다음 화 예고</Text>
+          <Text style={styles.comicNextEpisodeText}>
+            {comic.nextEpisode}
+          </Text>
+        </View>
+      </View>
+
+      {detail.selectedMeta.summary ? (
+        <Text style={styles.comicSummaryText}>
+          {detail.selectedMeta.summary}
+        </Text>
+      ) : null}
     </View>
   );
 }
@@ -785,19 +1184,25 @@ export default function EssayScreen() {
                     placeholderTextColor="#9AA49F"
                   />
 
-                  <Text style={styles.inputLabel}>본문</Text>
-                  <TextInput
-                    value={editContent}
-                    onChangeText={setEditContent}
-                    style={styles.contentInput}
-                    placeholder="에세이 본문"
-                    placeholderTextColor="#9AA49F"
-                    multiline
-                    scrollEnabled={false}
-                    textAlignVertical="top"
-                  />
+                  {selectedEssay.selectedMeta.comic ? (
+                    <ComicSection detail={selectedEssay} />
+                  ) : (
+                    <>
+                      <Text style={styles.inputLabel}>본문</Text>
+                      <TextInput
+                        value={editContent}
+                        onChangeText={setEditContent}
+                        style={styles.contentInput}
+                        placeholder="에세이 본문"
+                        placeholderTextColor="#9AA49F"
+                        multiline
+                        scrollEnabled={false}
+                        textAlignVertical="top"
+                      />
 
-                  <InsightSection detail={selectedEssay} />
+                      <InsightSection detail={selectedEssay} />
+                    </>
+                  )}
 
                   <View style={styles.actionRow}>
                     <Pressable
@@ -1552,6 +1957,186 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: "700",
     lineHeight: 20,
+  },
+
+  comicSection: {
+    gap: 14,
+    marginTop: 2,
+  },
+  comicHeaderRow: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+    gap: 12,
+  },
+  comicHeaderTextWrap: {
+    flex: 1,
+  },
+  comicEyebrow: {
+    color: "#7A6B55",
+    fontSize: 11,
+    fontWeight: "900",
+    letterSpacing: 0.5,
+  },
+  comicEpisodeTitle: {
+    color: "#26372E",
+    fontSize: 18,
+    fontWeight: "900",
+    lineHeight: 25,
+    marginTop: 4,
+  },
+  comedyStyleBadge: {
+    maxWidth: 112,
+    backgroundColor: "#283B32",
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+  },
+  comedyStyleText: {
+    color: "#FFFFFF",
+    fontSize: 10,
+    fontWeight: "800",
+    textAlign: "center",
+  },
+  comicGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    borderWidth: 3,
+    borderColor: "#25211D",
+    borderRadius: 6,
+    overflow: "hidden",
+    backgroundColor: "#25211D",
+  },
+  comicPanel: {
+    width: "50%",
+    minWidth: 0,
+    minHeight: 285,
+    borderColor: "#25211D",
+    overflow: "hidden",
+    paddingHorizontal: 9,
+    paddingTop: 10,
+    paddingBottom: 9,
+    position: "relative",
+  },
+  comicMemeNote: {
+    position: "absolute",
+    top: 7,
+    left: 8,
+    zIndex: 3,
+    color: "#2C2925",
+    fontSize: 10,
+    fontWeight: "900",
+    transform: [{ rotate: "-3deg" }],
+  },
+  comicMemeNoteRed: {
+    color: "#D43B30",
+  },
+  comicMemeNoteBlue: {
+    color: "#326893",
+  },
+  comicMemeNoteGreen: {
+    color: "#397054",
+  },
+  comicMemeNoteYellow: {
+    color: "#876114",
+  },
+  comicEffectNote: {
+    position: "absolute",
+    top: 8,
+    right: 8,
+    zIndex: 3,
+    color: "#5D554D",
+    fontSize: 9,
+    fontWeight: "800",
+    transform: [{ rotate: "4deg" }],
+  },
+  comicSpeechBubble: {
+    minHeight: 57,
+    marginTop: 20,
+    marginHorizontal: 2,
+    backgroundColor: "#FFFDF8",
+    borderWidth: 2,
+    borderColor: "#25211D",
+    borderRadius: 18,
+    paddingHorizontal: 9,
+    paddingVertical: 8,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  comicDialogue: {
+    color: "#211E1A",
+    fontSize: 12,
+    fontWeight: "800",
+    lineHeight: 17,
+    textAlign: "center",
+  },
+  comicCharacterStage: {
+    flex: 1,
+    minHeight: 135,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingTop: 3,
+    paddingBottom: 2,
+  },
+  comicCharacterImage: {
+    width: "96%",
+    height: 142,
+    alignSelf: "center",
+  },
+  comicCaption: {
+    minHeight: 36,
+    color: "#211E1A",
+    fontSize: 11,
+    fontWeight: "900",
+    lineHeight: 16,
+    textAlign: "center",
+    paddingHorizontal: 3,
+    paddingTop: 3,
+  },
+  comicHighlightCard: {
+    backgroundColor: "#2D4F40",
+    borderRadius: 17,
+    padding: 16,
+  },
+  comicHighlightLabel: {
+    color: "#BFD4C8",
+    fontSize: 10,
+    fontWeight: "900",
+    marginBottom: 6,
+  },
+  comicHighlightText: {
+    color: "#FFFFFF",
+    fontSize: 16,
+    fontWeight: "900",
+    lineHeight: 23,
+  },
+  comicNextEpisodeCard: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 10,
+    backgroundColor: "#FFF0C9",
+    borderRadius: 15,
+    padding: 14,
+  },
+  comicNextEpisodeTextWrap: {
+    flex: 1,
+  },
+  comicNextEpisodeLabel: {
+    color: "#80602A",
+    fontSize: 10,
+    fontWeight: "900",
+    marginBottom: 4,
+  },
+  comicNextEpisodeText: {
+    color: "#6E521F",
+    fontSize: 13,
+    fontWeight: "800",
+    lineHeight: 19,
+  },
+  comicSummaryText: {
+    color: "#66736C",
+    fontSize: 12,
+    lineHeight: 19,
   },
   actionRow: {
     flexDirection: "row",
