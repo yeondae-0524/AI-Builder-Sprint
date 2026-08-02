@@ -218,14 +218,11 @@ const LEVEL_LABEL: Record<BadgeLevel, string> = {
 };
 
 const SETTINGS: SettingItem[] = [
-  {
-    label: "알림 설정",
-    description: "추천 미션 · 근처 기록 · 에세이 완성",
-  },
+  
   {
     label: "계정 및 개인정보",
     description: "로그인 정보 · 기록 내보내기",
-  },
+  }
 ];
 
 function ProgressBar({
@@ -404,9 +401,12 @@ export default function MyScreen() {
             recordsResult,
             completedEssaysResult,
             discoverPostsResult,
+            likeCountResult,
             badgesResult,
             journeyResult,
           ] = await Promise.all([
+
+            
             supabase
               .from("mission_attempts")
               .select("id", { count: "exact", head: true })
@@ -428,6 +428,14 @@ export default function MyScreen() {
             supabase
               .from("discover_posts")
               .select("likes_count, source_kind, source_mission_id")
+              .eq("user_id", user.id),
+
+            supabase
+              .from("discover_post_likes")
+              .select("*", {
+                count: "exact",
+                head: true,
+              })
               .eq("user_id", user.id),
 
             getMyBadges()
@@ -503,7 +511,7 @@ export default function MyScreen() {
           const independentDiscoverRecordCount = myDiscoverPosts.filter(
             (post) => post.source_kind !== "mission" && !post.source_mission_id,
           ).length;
-          const totalExperienceRecordCount = records.length + independentDiscoverRecordCount;
+          const totalExperienceRecordCount = records.length;
           const receivedLikesCount = myDiscoverPosts.reduce(
             (sum, post) => sum + Math.max(0, Number(post.likes_count ?? 0)),
             0,
@@ -512,7 +520,7 @@ export default function MyScreen() {
           if (!isMounted) return;
 
           setStats([
-            { label: "좋아요", value: String(completedMissionsResult.count ?? 0) },
+            { label: "좋아요", value: String(likeCountResult.count ?? 0) },
             { label: "기록 경험", value: String(totalExperienceRecordCount) },
             { label: "발견 장소", value: String(discoveredPlaceCount) },
             { label: "완성 에세이", value: String(completedEssaysResult.count ?? 0) },
@@ -673,11 +681,11 @@ export default function MyScreen() {
   };
 
   const handleSettingPress = (setting: SettingItem) => {
-    Alert.alert(
-      setting.label,
-      `${setting.description}\n\n설정 상세 화면은 추후 연결할 예정입니다.`,
-    );
-  };
+  if (setting.label === "계정 및 개인정보") {
+    router.push("/my/account");
+    return;
+  }
+};
 
   const handleEquipTitle = async (badge: Badge) => {
     if (!badge.title) {
@@ -937,6 +945,7 @@ export default function MyScreen() {
                   case "획득 뱃지":
                     scrollViewRef.current?.scrollTo({ y: 700, animated: true });
                     break;
+                  
                 }
               }}
               style={({ pressed }) => [
