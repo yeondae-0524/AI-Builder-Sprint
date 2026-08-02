@@ -1,17 +1,15 @@
-# Expo SDK 54 Guidelines
+제출용 문서 적용 순서
 
-Before writing or modifying Expo-related code, read the exact versioned Expo SDK 54 documentation:
+1. 이 폴더의 README.md, AI_USAGE.md, .env.example을 프로젝트 최상위 폴더에 복사합니다.
+2. app.json은 기존 파일을 백업한 뒤 교체합니다. 변경점은 expo.name을 "Begin Again"으로 바꾼 것입니다.
+3. 배포 주소 https://logmapbeginagain.vercel.app/ 가 실제로 열리는지 확인합니다.
+4. 심사용 테스트 계정이 있다면 README의 안내와 구글폼에 계정 정보를 추가합니다.
+5. 다음 명령을 실행합니다.
 
-https://docs.expo.dev/versions/v54.0.0/
-
-Do not rely on documentation for a different Expo SDK version.
-
-# Repository Guidelines
-
-* PR, 이슈, 커밋은 원본 레포지토리가 아닌 팀에서 포크한 레포지토리에 생성한다.
-* 작업 기준 브랜치는 `develop`이다.
-* 기능 개발과 수정 작업은 별도의 `feature/*` 브랜치에서 진행한다.
-* 환경변수와 API 키가 포함된 `.env` 파일은 커밋하지 않는다.
-* 코드 수정 후 `npx tsc --noEmit`을 실행하여 TypeScript 오류를 확인한다.
-* Expo 관련 패키지는 가능하면 `npm install` 대신 `npx expo install`로 설치한다.
-* 제출 전 앱 실행과 주요 기능을 직접 테스트한다.
+npx tsc --noEmit
+npm run lint
+npm run web
+git status
+git add README.md AI_USAGE.md .env.example app.json
+git commit -m "docs: complete preliminary submission guide"
+git push origin develop
