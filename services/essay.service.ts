@@ -10,10 +10,97 @@ export type EssayGenerationState = "idle" | "generating" | "error";
 export type EssayVersionNo = 1 | 2 | 3;
 
 export type EssayPersona =
-  | "taste_profiler"
+  | "emotion_interpreter"
   | "strict_teacher"
   | "record_detective"
-  | "performance_reviewer";
+  | "entertainment_pd";
+
+export type ComicBackground =
+  | "street"
+  | "restaurant"
+  | "exhibition"
+  | "bookstore"
+  | "workshop"
+  | "home"
+  | "cafe"
+  | "park"
+  | "transit"
+  | "generic";
+
+export type ComicExpression =
+  | "determined"
+  | "nervous"
+  | "flustered"
+  | "blank"
+  | "relieved"
+  | "proud"
+  | "shocked"
+  | "thinking";
+
+export type ComicFraming =
+  | "wide"
+  | "medium"
+  | "close_up"
+  | "tiny";
+
+export type ComicProp =
+  | "none"
+  | "menu"
+  | "food"
+  | "book"
+  | "pottery"
+  | "phone"
+  | "painting"
+  | "earphones"
+  | "cup"
+  | "camera";
+
+export type ComicCharacterPosition =
+  | "left"
+  | "center"
+  | "right";
+
+export type ComedyStyle =
+  | "grand_declaration"
+  | "production_caption"
+  | "breaking_news"
+  | "sports_commentary"
+  | "documentary"
+  | "interview_cut"
+  | "before_after"
+  | "plan_vs_reality"
+  | "sudden_silence"
+  | "inner_voice"
+  | "replay_zoom"
+  | "contract_renewal"
+  | "emergency_meeting"
+  | "plot_twist"
+  | "audience_reaction"
+  | "subtitle_mismatch"
+  | "mission_failed_successfully"
+  | "tiny_victory"
+  | "cliffhanger"
+  | "expert_commentary";
+
+export type ComicPanel = {
+  panelNumber: 1 | 2 | 3 | 4;
+  background: ComicBackground;
+  expression: ComicExpression;
+  framing: ComicFraming;
+  prop: ComicProp;
+  characterPosition: ComicCharacterPosition;
+  dialogue: string | null;
+  caption: string | null;
+  recordIndexes: number[];
+};
+
+export type EntertainmentComic = {
+  episodeTitle: string;
+  comedyStyle: ComedyStyle;
+  panels: ComicPanel[];
+  highlightCaption: string;
+  nextEpisode: string;
+};
 
 export type EssayInsight = {
   keyword: string;
@@ -26,6 +113,7 @@ export type EssayGenerationMeta = {
   verdict: string;
   insights: EssayInsight[];
   aiRecommendation: string;
+  comic: EntertainmentComic | null;
 };
 
 export type EssayVersion = {
@@ -115,28 +203,28 @@ export const ESSAY_PERSONA_OPTIONS: ReadonlyArray<{
   icon: string;
 }> = [
   {
-    value: "taste_profiler",
-    title: "취향 프로파일러",
-    description: "반복되는 선택과 감정에서 나만의 취향을 찾아요.",
-    icon: "search-outline",
+    value: "emotion_interpreter",
+    title: "감정 통역사",
+    description: "기록 속 마음의 움직임을 다정한 언어로 정리해요.",
+    icon: "chatbubble-ellipses-outline",
   },
   {
     value: "strict_teacher",
     title: "팩트 폭격 담임",
-    description: "회피하거나 대충 넘긴 부분을 근거 있게 짚어요.",
+    description: "목표와 실제 행동이 어긋난 부분을 솔직하게 짚어요.",
     icon: "school-outline",
   },
   {
     value: "record_detective",
     title: "기록 탐정",
-    description: "기록 속 단서를 모아 숨은 행동 패턴을 추리해요.",
+    description: "기록 속 단서를 연결해 숨은 행동 패턴을 추리해요.",
     icon: "finger-print-outline",
   },
   {
-    value: "performance_reviewer",
-    title: "여정 인사평가",
-    description: "실행력과 꾸준함, 성장 가능성을 냉정하게 평가해요.",
-    icon: "clipboard-outline",
+    value: "entertainment_pd",
+    title: "인생 예능 PD",
+    description: "여정의 웃픈 명장면을 4컷 웹툰으로 편집해요.",
+    icon: "videocam-outline",
   },
 ];
 
@@ -238,16 +326,203 @@ function normalizeVersionNo(value: number | null): EssayVersionNo | null {
 }
 
 function normalizePersona(value: unknown): EssayPersona {
-  return value === "strict_teacher" ||
-      value === "record_detective" ||
-      value === "performance_reviewer"
-    ? value
-    : "taste_profiler";
+  if (value === "strict_teacher" || value === "record_detective") {
+    return value;
+  }
+
+  if (value === "entertainment_pd" || value === "performance_reviewer") {
+    return "entertainment_pd";
+  }
+
+  if (value === "emotion_interpreter" || value === "taste_profiler") {
+    return "emotion_interpreter";
+  }
+
+  return "emotion_interpreter";
 }
 
 export function getEssayPersonaLabel(persona: EssayPersona) {
   return ESSAY_PERSONA_OPTIONS.find((option) => option.value === persona)?.title ??
-    "취향 프로파일러";
+    "감정 통역사";
+}
+
+function normalizeStringArray(value: unknown) {
+  if (!Array.isArray(value)) return [];
+
+  return value
+    .map((item) => Number(item))
+    .filter((item) => Number.isInteger(item) && item >= 0)
+    .slice(0, 3);
+}
+
+function normalizeNullableComicText(value: unknown) {
+  const text = String(value ?? "").trim();
+  return text || null;
+}
+
+function normalizeComicBackground(value: unknown): ComicBackground {
+  const text = String(value ?? "").trim();
+
+  if (
+    text === "street" ||
+    text === "restaurant" ||
+    text === "exhibition" ||
+    text === "bookstore" ||
+    text === "workshop" ||
+    text === "home" ||
+    text === "cafe" ||
+    text === "park" ||
+    text === "transit"
+  ) {
+    return text;
+  }
+
+  return "generic";
+}
+
+function normalizeComicExpression(value: unknown): ComicExpression {
+  const text = String(value ?? "").trim();
+
+  if (text === "determined") return "determined";
+  if (text === "nervous") return "nervous";
+
+  if (text === "flustered" || text === "embarrassed") {
+    return "flustered";
+  }
+
+  if (text === "blank" || text === "tired") {
+    return "blank";
+  }
+
+  if (text === "relieved" || text === "happy") {
+    return "relieved";
+  }
+
+  if (text === "proud") return "proud";
+
+  if (text === "shocked" || text === "surprised") {
+    return "shocked";
+  }
+
+  return "thinking";
+}
+
+function normalizeComicFraming(
+  value: unknown,
+  panelNumber: 1 | 2 | 3 | 4,
+): ComicFraming {
+  const text = String(value ?? "").trim();
+
+  if (
+    text === "wide" ||
+    text === "medium" ||
+    text === "close_up" ||
+    text === "tiny"
+  ) {
+    return text;
+  }
+
+  if (panelNumber === 1) return "wide";
+  if (panelNumber === 2) return "close_up";
+  if (panelNumber === 3) return "medium";
+  return "tiny";
+}
+
+function normalizeComicProp(value: unknown): ComicProp {
+  const text = String(value ?? "").trim();
+
+  if (
+    text === "menu" ||
+    text === "food" ||
+    text === "book" ||
+    text === "pottery" ||
+    text === "phone" ||
+    text === "painting" ||
+    text === "earphones" ||
+    text === "cup" ||
+    text === "camera"
+  ) {
+    return text;
+  }
+
+  return "none";
+}
+
+function normalizeComicCharacterPosition(
+  value: unknown,
+): ComicCharacterPosition {
+  const text = String(value ?? "").trim();
+
+  if (text === "left" || text === "right") {
+    return text;
+  }
+
+  return "center";
+}
+
+function normalizeEntertainmentComic(
+  value: unknown,
+): EntertainmentComic | null {
+  if (!value || typeof value !== "object") return null;
+
+  const raw = value as Record<string, unknown>;
+  const rawPanels = Array.isArray(raw.panels) ? raw.panels : [];
+
+  const panels = rawPanels
+    .map((item, index) => {
+      if (!item || typeof item !== "object") return null;
+      if (index > 3) return null;
+
+      const panel = item as Record<string, unknown>;
+      const panelNumber = (index + 1) as 1 | 2 | 3 | 4;
+      const dialogue = normalizeNullableComicText(panel.dialogue);
+      const caption = normalizeNullableComicText(panel.caption);
+
+      if (!dialogue && !caption) return null;
+
+      return {
+        panelNumber,
+        background: normalizeComicBackground(panel.background),
+        expression: normalizeComicExpression(panel.expression),
+        framing: normalizeComicFraming(
+          panel.framing,
+          panelNumber,
+        ),
+        prop: normalizeComicProp(panel.prop),
+        characterPosition: normalizeComicCharacterPosition(
+          panel.characterPosition,
+        ),
+        dialogue,
+        caption,
+        recordIndexes: normalizeStringArray(panel.recordIndexes),
+      } satisfies ComicPanel;
+    })
+    .filter((item): item is ComicPanel => item !== null)
+    .slice(0, 4);
+
+  if (panels.length !== 4) return null;
+
+  const fallbackHighlight =
+    panels.find((panel) => panel.caption)?.caption ??
+    panels[2]?.dialogue ??
+    panels[0]?.dialogue ??
+    "분명 시작은 좋았습니다.";
+
+  return {
+    episodeTitle: String(
+      raw.episodeTitle ?? "예상과 현실 사이",
+    ).trim(),
+    comedyStyle: String(
+      raw.comedyStyle ?? "plan_vs_reality",
+    ) as ComedyStyle,
+    panels,
+    highlightCaption: String(
+      raw.highlightCaption ?? fallbackHighlight,
+    ).trim(),
+    nextEpisode: String(
+      raw.nextEpisode ?? "다음에는 작은 선택 하나를 바꿔봅니다.",
+    ).trim(),
+  };
 }
 
 function normalizeGenerationMeta(value: unknown): EssayGenerationMeta {
@@ -265,7 +540,7 @@ function normalizeGenerationMeta(value: unknown): EssayGenerationMeta {
           return keyword && description ? { keyword, description } : null;
         })
         .filter((item): item is EssayInsight => item !== null)
-        .slice(0, 4)
+        .slice(0, 3)
     : [];
 
   return {
@@ -274,6 +549,7 @@ function normalizeGenerationMeta(value: unknown): EssayGenerationMeta {
     verdict: String(raw.verdict ?? "").trim(),
     insights,
     aiRecommendation: String(raw.aiRecommendation ?? "").trim(),
+    comic: normalizeEntertainmentComic(raw.comic),
   };
 }
 
@@ -1236,6 +1512,7 @@ type EssayAiResult = {
   verdict?: unknown;
   insights?: unknown;
   aiRecommendation?: unknown;
+  comic?: unknown;
 };
 
 function normalizeEssayAiResult(
@@ -1249,6 +1526,7 @@ function normalizeEssayAiResult(
     verdict: result.verdict,
     insights: result.insights,
     aiRecommendation: result.aiRecommendation,
+    comic: result.comic,
   });
 
   const title = String(result.title ?? "").trim() ||
