@@ -1,1343 +1,781 @@
-import { Ionicons } from "@expo/vector-icons";
-import { useFocusEffect } from "expo-router";
-import React, {
-  useCallback,
-  useEffect,
-  useState,
-} from "react";
+import Ionicons from "@expo/vector-icons/Ionicons";
+import { useFocusEffect, useRouter } from "expo-router";
+import { useCallback, useMemo, useState } from "react";
 import {
-  ActivityIndicator,
   Alert,
+  Dimensions,
   Image,
-  KeyboardAvoidingView,
   Modal,
-  Platform,
   Pressable,
-  RefreshControl,
-  SafeAreaView,
   ScrollView,
   Share,
   StyleSheet,
   Text,
   TextInput,
-  View,
+  View
 } from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
+import { supabase } from "../../lib/supabase";
 
-import {
-  ComicPanel,
-  createEssayDraft,
-  EntertainmentComic,
-  ESSAY_PERSONA_OPTIONS,
-  EssayDashboardData,
-  EssayDetail,
-  EssayPersona,
-  EssaySummary,
-  generateEssayVersion,
-  getEssayById,
-  getEssayDashboardData,
-  getEssayPersonaLabel,
-  publishEssay,
-  saveEssayDraft,
-} from "../../services/essay.service";
+// 🌿 파스텔 & 우드 감성 컬러 팔레트
+const COLORS = {
+  primary: "#315C4A",        // 메인 다크 그린
+  primaryLight: "#E5EEE8",   // 연한 그린
+  accent: "#F2C96D",         // 골드/노란 포인트
+  pink: "#E07A5F",          // 딥 코랄
+  pinkLight: "#F4EAE1",
+  textMain: "#26372E",
+  textSub: "#65766D",
+  textMuted: "#9AA49F",
+  border: "#E2E3DC",
+  white: "#FFFFFF",
+  background: "#F5F2E9",     // 따뜻한 베이지 배경
 
+  // 🪵 원목 책장 테마
+  woodDark: "#5C3A21",
+  woodMain: "#825432",
+  woodLight: "#A06C42",
+  woodBorder: "#422815",
 
-type PersonaModalMode = "create" | "regenerate" | null;
-
-function getErrorMessage(error: unknown, fallback: string) {
-  if (error instanceof Error && error.message.trim()) {
-    return error.message;
-  }
-
-  if (error && typeof error === "object" && "message" in error) {
-    const message = String(
-      (error as { message?: unknown }).message ?? "",
-    ).trim();
-
-    if (message) return message;
-  }
-
-  return fallback;
-}
-
-function formatDate(value: string | null | undefined) {
-  if (!value) return "";
-
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value.slice(0, 10);
-
-  return new Intl.DateTimeFormat("ko-KR", {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-  }).format(date);
-}
-
-function formatPeriod(startDate: string, endDate: string | null) {
-  const start = formatDate(startDate);
-  const end = endDate ? formatDate(endDate) : "진행 중";
-  return `${start} - ${end}`;
-}
-
-function getPersonaIcon(persona: EssayPersona) {
-  return (
-    ESSAY_PERSONA_OPTIONS.find((option) => option.value === persona)?.icon ??
-    "document-text-outline"
-  ) as keyof typeof Ionicons.glyphMap;
-}
-
-function PersonaBadge({ persona }: { persona: EssayPersona }) {
-  return (
-    <View style={styles.personaBadge}>
-      <Ionicons
-        name={getPersonaIcon(persona)}
-        size={14}
-        color="#315C4A"
-      />
-      <Text style={styles.personaBadgeText}>
-        {getEssayPersonaLabel(persona)}
-      </Text>
-    </View>
-  );
-}
-
-function EssayCard({
-  essay,
-  onPress,
-}: {
-  essay: EssaySummary;
-  onPress: () => void;
-}) {
-  return (
-    <Pressable
-      onPress={onPress}
-      style={({ pressed }) => [
-        styles.essayCard,
-        pressed && styles.pressed,
-      ]}
-    >
-      {essay.coverPhotoUrl ? (
-        <Image
-          source={{ uri: essay.coverPhotoUrl }}
-          style={styles.essayCardImage}
-        />
-      ) : (
-        <View style={styles.essayCardPlaceholder}>
-          <Ionicons name="book-outline" size={36} color="#6D8579" />
-        </View>
-      )}
-
-      <View style={styles.essayCardBody}>
-        <PersonaBadge persona={essay.persona} />
-        <Text style={styles.essayCardTitle} numberOfLines={2}>
-          {essay.title}
-        </Text>
-        <Text style={styles.essayCardPeriod}>
-          {formatPeriod(essay.startDate, essay.endDate)}
-        </Text>
-        <View style={styles.essayCardFooter}>
-          <Text style={styles.essayCardMeta}>
-            기록 {essay.sourceRecordCount}개 · AI 생성 {essay.generationCount}회
-          </Text>
-          <View
-            style={[
-              styles.visibilityPill,
-              essay.visibility === "public" && styles.visibilityPillPublic,
-            ]}
-          >
-            <Text
-              style={[
-                styles.visibilityText,
-                essay.visibility === "public" && styles.visibilityTextPublic,
-              ]}
-            >
-              {essay.visibility === "public" ? "공개" : "비공개"}
-            </Text>
-          </View>
-        </View>
-      </View>
-    </Pressable>
-  );
-}
-
-type PersonaPickerViewProps = {
-  mode: Exclude<PersonaModalMode, null>;
-  busy: boolean;
-  onClose: () => void;
-  onSelect: (persona: EssayPersona) => void;
+  // 📚 책등(Spine) 커버 테마
+  bookThemes: [
+    { bg: "#315C4A", text: "#F2C96D", line: "#234739" },
+    { bg: "#8C3B30", text: "#F9F6F0", line: "#6D2D25" },
+    { bg: "#2D4A60", text: "#E5EEE8", line: "#1E3444" },
+    { bg: "#B8860B", text: "#FFFFFF", line: "#8B6508" },
+    { bg: "#5A4B6E", text: "#F2C96D", line: "#423752" },
+  ],
 };
 
-function PersonaPickerContent({
-  mode,
-  busy,
-  onClose,
-  onSelect,
-}: PersonaPickerViewProps) {
-  const title = mode === "create"
-    ? "내 기록을 누구에게 맡길까요?"
-    : "이번에는 누가 읽어볼까요?";
+const { width: SCREEN_WIDTH } = Dimensions.get("window");
 
-  return (
-    <View style={styles.personaModalCard}>
-      <View style={styles.modalHeader}>
-        <View style={styles.modalHeaderTextWrap}>
-          <Text style={styles.modalTitle}>{title}</Text>
-          <Text style={styles.modalSubtitle}>
-            같은 기록도 AI의 역할에 따라 전혀 다르게 해석돼요.
-          </Text>
-        </View>
-        <Pressable
-          onPress={onClose}
-          disabled={busy}
-          style={styles.iconButton}
-        >
-          <Ionicons name="close" size={24} color="#25352D" />
-        </Pressable>
-      </View>
+type PersonaType = "emotional" | "fact_teacher" | "detective" | "comic_pd";
 
-      <ScrollView
-        contentContainerStyle={styles.personaOptionList}
-        showsVerticalScrollIndicator={false}
-      >
-        {ESSAY_PERSONA_OPTIONS.map((option) => (
-          <Pressable
-            key={option.value}
-            disabled={busy}
-            onPress={() => onSelect(option.value)}
-            style={({ pressed }) => [
-              styles.personaOption,
-              pressed && styles.pressed,
-              busy && styles.disabled,
-            ]}
-          >
-            <View style={styles.personaOptionIcon}>
-              <Ionicons
-                name={option.icon as keyof typeof Ionicons.glyphMap}
-                size={25}
-                color="#315C4A"
-              />
-            </View>
-            <View style={styles.personaOptionTextWrap}>
-              <Text style={styles.personaOptionTitle}>{option.title}</Text>
-              <Text style={styles.personaOptionDescription}>
-                {option.description}
-              </Text>
-            </View>
-            <Ionicons
-              name="chevron-forward"
-              size={21}
-              color="#819087"
-            />
-          </Pressable>
-        ))}
-      </ScrollView>
+type JourneyStatus = "active" | "completed_pending_essay" | "finished";
 
-      {busy ? (
-        <View style={styles.busyRow}>
-          <ActivityIndicator color="#315C4A" />
-          <Text style={styles.busyText}>기록을 읽고 있어요...</Text>
-        </View>
-      ) : null}
-    </View>
-  );
-}
-
-function PersonaPickerModal({
-  visible,
-  mode,
-  busy,
-  onClose,
-  onSelect,
-}: PersonaPickerViewProps & { visible: boolean }) {
-  return (
-    <Modal
-      visible={visible}
-      transparent
-      animationType="fade"
-      onRequestClose={onClose}
-    >
-      <View style={styles.modalBackdrop}>
-        <PersonaPickerContent
-          mode={mode}
-          busy={busy}
-          onClose={onClose}
-          onSelect={onSelect}
-        />
-      </View>
-    </Modal>
-  );
-}
-
-function PersonaPickerOverlay({
-  visible,
-  mode,
-  busy,
-  onClose,
-  onSelect,
-}: PersonaPickerViewProps & { visible: boolean }) {
-  if (!visible) return null;
-
-  return (
-    <View style={styles.personaOverlay}>
-      <PersonaPickerContent
-        mode={mode}
-        busy={busy}
-        onClose={onClose}
-        onSelect={onSelect}
-      />
-    </View>
-  );
-}
-
-const COMIC_BACKGROUND_META: Record<
-  ComicPanel["background"],
-  {
-    label: string;
-    icon: keyof typeof Ionicons.glyphMap;
-    backgroundColor: string;
-  }
-> = {
-  street: {
-    label: "산책로",
-    icon: "walk-outline",
-    backgroundColor: "#DCEEE2",
-  },
-  restaurant: {
-    label: "식당",
-    icon: "restaurant-outline",
-    backgroundColor: "#F7E3C6",
-  },
-  exhibition: {
-    label: "전시장",
-    icon: "images-outline",
-    backgroundColor: "#E5E2F3",
-  },
-  bookstore: {
-    label: "서점",
-    icon: "book-outline",
-    backgroundColor: "#EADFCF",
-  },
-  workshop: {
-    label: "공방",
-    icon: "hammer-outline",
-    backgroundColor: "#E6D8CA",
-  },
-  home: {
-    label: "집",
-    icon: "home-outline",
-    backgroundColor: "#E2E8EA",
-  },
-  cafe: {
-    label: "카페",
-    icon: "cafe-outline",
-    backgroundColor: "#F1DFD0",
-  },
-  park: {
-    label: "공원",
-    icon: "leaf-outline",
-    backgroundColor: "#DCEBD8",
-  },
-  transit: {
-    label: "이동 중",
-    icon: "bus-outline",
-    backgroundColor: "#DDE8F2",
-  },
-  generic: {
-    label: "오늘의 현장",
-    icon: "sparkles-outline",
-    backgroundColor: "#EEE9DE",
-  },
+type ActiveJourney = {
+  id: string;
+  title: string;
+  status: JourneyStatus;
+  duration_days: number;
+  target_record_count: number;
+  start_date: string;
+  end_date: string;
+  goal?: string | null;
 };
 
-function getBeginiImage(expression: ComicPanel["expression"]) {
-  switch (String(expression)) {
-    case "determined":
-      return require("../../assets/begini/expressions/begini_determined.png");
-
-    case "nervous":
-      return require("../../assets/begini/expressions/begini_nervous.png");
-
-    case "flustered":
-    case "embarrassed":
-      return require("../../assets/begini/expressions/begini_flustered.png");
-
-    case "blank":
-    case "tired":
-      return require("../../assets/begini/expressions/begini_blank.png");
-
-    case "relieved":
-    case "happy":
-      return require("../../assets/begini/expressions/begini_relieved.png");
-
-    case "proud":
-      return require("../../assets/begini/expressions/begini_proud.png");
-
-    case "shocked":
-    case "surprised":
-      return require("../../assets/begini/expressions/begini_shocked.png");
-
-    case "thinking":
-    default:
-      return require("../../assets/begini/expressions/begini_thinking.png");
-  }
-}
-
-const COMIC_EFFECT_LABELS: Record<string, string> = {
-  none: "",
-  sweat: "식은땀",
-  shock: "충격",
-  zoom: "긴급 확대",
-  silence: "정적…",
-  black_and_white: "흑백 처리",
-  sparkle: "반짝",
-  question_marks: "물음표 대잔치",
-  speed_lines: "급전개",
+type JourneyRecordItem = {
+  id: string;
+  indexNum: number;
+  title: string;
+  category: string;
+  recordedAt: string;
+  emotion: string;
+  content: string;
+  imageUrl?: string;
 };
 
-const COMEDY_STYLE_LABELS: Record<
-  EntertainmentComic["comedyStyle"],
-  string
-> = {
-  grand_declaration: "거창한 선언",
-  production_caption: "제작진 자막",
-  breaking_news: "긴급 속보",
-  sports_commentary: "스포츠 중계",
-  documentary: "과몰입 다큐",
-  interview_cut: "솔직 인터뷰",
-  before_after: "몇 초 전·후",
-  plan_vs_reality: "계획과 현실",
-  sudden_silence: "갑작스러운 정적",
-  inner_voice: "속마음 공개",
-  replay_zoom: "결정적 장면 확대",
-  contract_renewal: "익숙함과 재계약",
-  emergency_meeting: "긴급회의",
-  plot_twist: "예상 밖 반전",
-  audience_reaction: "관객 반응",
-  subtitle_mismatch: "비장함과 자막의 온도차",
-  mission_failed_successfully: "실패했지만 성공",
-  tiny_victory: "작은 승리",
-  cliffhanger: "다음 화 떡밥",
-  expert_commentary: "전문가 과몰입 분석",
+type DraftEssay = {
+  id: string;
+  journeyTitle: string;
+  goal?: string;
+  dateRangeText: string;
+  coverImage: string;
+  title: string;
+  content: string;
+  persona: PersonaType;
+  records: JourneyRecordItem[];
 };
 
-type ComicMemeTone = "red" | "dark" | "yellow" | "blue" | "green";
-
-function getComicPanelDividerStyle(panelNumber: ComicPanel["panelNumber"]) {
-  switch (panelNumber) {
-    case 1:
-      return {
-        borderRightWidth: 1.5,
-        borderBottomWidth: 1.5,
-      };
-    case 2:
-      return {
-        borderBottomWidth: 1.5,
-      };
-    case 3:
-      return {
-        borderRightWidth: 1.5,
-      };
-    case 4:
-    default:
-      return {};
-  }
-}
-
-function getComicMemeTag(
-  comedyStyle: EntertainmentComic["comedyStyle"],
-  panelNumber: ComicPanel["panelNumber"],
-): { text: string; tone: ComicMemeTone } | null {
-  switch (comedyStyle) {
-    case "grand_declaration":
-      return panelNumber === 1
-        ? { text: "비장한 선언", tone: "dark" }
-        : panelNumber === 3
-          ? { text: "선언 10초 후", tone: "yellow" }
-          : null;
-
-    case "production_caption":
-      return panelNumber === 2
-        ? { text: "제작진 관찰 중", tone: "green" }
-        : panelNumber === 3
-          ? { text: "제작진도 예상함", tone: "dark" }
-          : null;
-
-    case "breaking_news":
-      return panelNumber === 1
-        ? { text: "긴급 속보", tone: "red" }
-        : panelNumber === 3
-          ? { text: "현장 연결", tone: "red" }
-          : null;
-
-    case "sports_commentary":
-      return panelNumber === 1
-        ? { text: "전반전", tone: "blue" }
-        : panelNumber === 3
-          ? { text: "결정적 장면", tone: "red" }
-          : panelNumber === 4
-            ? { text: "경기 종료", tone: "dark" }
-            : null;
-
-    case "documentary":
-      return panelNumber === 1
-        ? { text: "극사실 관찰 다큐", tone: "dark" }
-        : panelNumber === 4
-          ? { text: "그렇게 하루가 갔다", tone: "green" }
-          : null;
-
-    case "interview_cut":
-      return panelNumber === 4
-        ? { text: "제작진 인터뷰", tone: "blue" }
-        : null;
-
-    case "before_after":
-      return panelNumber === 1
-        ? { text: "10초 전", tone: "green" }
-        : panelNumber === 3
-          ? { text: "10초 후", tone: "red" }
-          : null;
-
-    case "plan_vs_reality":
-      return panelNumber <= 2
-        ? { text: "계획", tone: "green" }
-        : { text: "현실", tone: "red" };
-
-    case "sudden_silence":
-      return panelNumber === 3
-        ? { text: "……", tone: "dark" }
-        : null;
-
-    case "inner_voice":
-      return panelNumber === 2 || panelNumber === 3
-        ? { text: "속마음 ON", tone: "blue" }
-        : null;
-
-    case "replay_zoom":
-      return panelNumber === 3
-        ? { text: "REPLAY", tone: "red" }
-        : null;
-
-    case "contract_renewal":
-      return panelNumber === 3
-        ? { text: "재계약 완료", tone: "yellow" }
-        : null;
-
-    case "emergency_meeting":
-      return panelNumber === 2
-        ? { text: "긴급회의 소집", tone: "red" }
-        : null;
-
-    case "plot_twist":
-      return panelNumber === 3
-        ? { text: "반전 발생", tone: "red" }
-        : null;
-
-    case "audience_reaction":
-      return panelNumber === 3
-        ? { text: "관객: 웅성웅성", tone: "blue" }
-        : null;
-
-    case "subtitle_mismatch":
-      return panelNumber === 1
-        ? { text: "표정은 결승전", tone: "dark" }
-        : panelNumber === 3
-          ? { text: "결과는 소박함", tone: "yellow" }
-          : null;
-
-    case "mission_failed_successfully":
-      return panelNumber === 4
-        ? { text: "실패했지만 성공", tone: "green" }
-        : null;
-
-    case "tiny_victory":
-      return panelNumber === 4
-        ? { text: "오늘의 MVP", tone: "yellow" }
-        : null;
-
-    case "cliffhanger":
-      return panelNumber === 4
-        ? { text: "TO BE CONTINUED", tone: "dark" }
-        : null;
-
-    case "expert_commentary":
-      return panelNumber === 3
-        ? { text: "전문가 분석 중", tone: "blue" }
-        : null;
-
-    default:
-      return null;
-  }
-}
-
-function ComicPanelCard({
-  panel,
-  comedyStyle,
-}: {
-  panel: ComicPanel;
-  comedyStyle: EntertainmentComic["comedyStyle"];
-}) {
-  const background =
-    COMIC_BACKGROUND_META[panel.background] ??
-    COMIC_BACKGROUND_META.generic;
-  const effectLabel = COMIC_EFFECT_LABELS[(panel as any).effect];
-  const memeTag = getComicMemeTag(comedyStyle, panel.panelNumber);
-
-  return (
-    <View
-      style={[
-        styles.comicPanel,
-        { backgroundColor: background.backgroundColor },
-        getComicPanelDividerStyle(panel.panelNumber),
-      ]}
-    >
-      {memeTag ? (
-        <Text
-          style={[
-            styles.comicMemeNote,
-            memeTag.tone === "red" && styles.comicMemeNoteRed,
-            memeTag.tone === "blue" && styles.comicMemeNoteBlue,
-            memeTag.tone === "green" && styles.comicMemeNoteGreen,
-            memeTag.tone === "yellow" && styles.comicMemeNoteYellow,
-          ]}
-        >
-          {memeTag.text}
-        </Text>
-      ) : null}
-
-      {effectLabel ? (
-        <Text style={styles.comicEffectNote}>{effectLabel}</Text>
-      ) : null}
-
-      <View style={styles.comicSpeechBubble}>
-        <Text style={styles.comicDialogue}>{panel.dialogue}</Text>
-      </View>
-
-      <View style={styles.comicCharacterStage}>
-        <Image
-          source={getBeginiImage(panel.expression)}
-          style={styles.comicCharacterImage}
-          resizeMode="contain"
-        />
-      </View>
-
-      <Text style={styles.comicCaption}>{panel.caption}</Text>
-    </View>
-  );
-}
-
-function ComicSection({
-  detail,
-}: {
-  detail: EssayDetail;
-}) {
-  const comic = detail.selectedMeta.comic;
-  if (!comic) return null;
-
-  return (
-    <View style={styles.comicSection}>
-      <View style={styles.comicHeaderRow}>
-        <View style={styles.comicHeaderTextWrap}>
-          <Text style={styles.comicEyebrow}>인생 예능 PD 편집본</Text>
-          <Text style={styles.comicEpisodeTitle}>
-            {comic.episodeTitle}
-          </Text>
-        </View>
-        <View style={styles.comedyStyleBadge}>
-          <Text style={styles.comedyStyleText}>
-            {COMEDY_STYLE_LABELS[comic.comedyStyle] ?? "오늘의 예능"}
-          </Text>
-        </View>
-      </View>
-
-      <View style={styles.comicGrid}>
-        {comic.panels.map((panel) => (
-          <ComicPanelCard
-            key={panel.panelNumber}
-            panel={panel}
-            comedyStyle={comic.comedyStyle}
-          />
-        ))}
-      </View>
-
-      <View style={styles.comicHighlightCard}>
-        <Text style={styles.comicHighlightLabel}>오늘의 대표 자막</Text>
-        <Text style={styles.comicHighlightText}>
-          {comic.highlightCaption}
-        </Text>
-      </View>
-
-      <View style={styles.comicNextEpisodeCard}>
-        <Ionicons name="play-forward" size={18} color="#6E521F" />
-        <View style={styles.comicNextEpisodeTextWrap}>
-          <Text style={styles.comicNextEpisodeLabel}>다음 화 예고</Text>
-          <Text style={styles.comicNextEpisodeText}>
-            {comic.nextEpisode}
-          </Text>
-        </View>
-      </View>
-
-      {detail.selectedMeta.summary ? (
-        <Text style={styles.comicSummaryText}>
-          {detail.selectedMeta.summary}
-        </Text>
-      ) : null}
-    </View>
-  );
-}
-
-function InsightSection({ detail }: { detail: EssayDetail }) {
-  const meta = detail.selectedMeta;
-
-  if (
-    !meta.summary &&
-    !meta.verdict &&
-    meta.insights.length === 0 &&
-    !meta.aiRecommendation
-  ) {
-    return null;
-  }
-
-  return (
-    <View style={styles.analysisSection}>
-      <Text style={styles.sectionTitle}>AI가 읽은 이번 여정</Text>
-
-      {meta.verdict ? (
-        <View style={styles.verdictCard}>
-          <Text style={styles.verdictText}>{meta.verdict}</Text>
-        </View>
-      ) : null}
-
-      {meta.summary ? (
-        <Text style={styles.summaryText}>{meta.summary}</Text>
-      ) : null}
-
-      {meta.insights.length > 0 ? (
-        <View style={styles.insightList}>
-          {meta.insights.map((insight, index) => (
-            <View
-              key={`${insight.keyword}-${index}`}
-              style={styles.insightCard}
-            >
-              <Text style={styles.insightKeyword}>{insight.keyword}</Text>
-              <Text style={styles.insightDescription}>
-                {insight.description}
-              </Text>
-            </View>
-          ))}
-        </View>
-      ) : null}
-
-      {meta.aiRecommendation ? (
-        <View style={styles.recommendationCard}>
-          <Ionicons name="sparkles" size={18} color="#805D25" />
-          <Text style={styles.recommendationText}>
-            {meta.aiRecommendation}
-          </Text>
-        </View>
-      ) : null}
-    </View>
-  );
-}
+type CompletedEssay = {
+  id: string;
+  title: string;
+  content: string;
+  journeyGoal?: string;
+  dateRangeText: string;
+  durationDays: number;
+  created_at: string;
+  themeIndex: number;
+  persona: PersonaType;
+  coverImage?: string;
+  records?: JourneyRecordItem[];
+};
 
 export default function EssayScreen() {
-  const [dashboard, setDashboard] = useState<EssayDashboardData | null>(null);
-  const [selectedEssay, setSelectedEssay] = useState<EssayDetail | null>(null);
+  const router = useRouter();
+
+  const [journey, setJourney] = useState<ActiveJourney | null>(null);
+  const [completedDayCount, setCompletedDayCount] = useState(0);
+  const [draftEssay, setDraftEssay] = useState<DraftEssay | null>(null);
+  const [essays, setEssays] = useState<CompletedEssay[]>([]);
   const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
-  const [detailLoading, setDetailLoading] = useState(false);
-  const [actionBusy, setActionBusy] = useState(false);
-  const [personaModalMode, setPersonaModalMode] =
-    useState<PersonaModalMode>(null);
-  const [editTitle, setEditTitle] = useState("");
-  const [editContent, setEditContent] = useState("");
-  const [recordsExpanded, setRecordsExpanded] = useState(false);
 
-  const loadDashboard = useCallback(async (showLoading = true) => {
-    if (showLoading) setLoading(true);
+  // 모달 제어 상태
+  const [writerModalVisible, setPersonaWriterModalVisible] = useState(false);
+  const [personaPickerVisible, setPersonaPickerVisible] = useState(false);
+  const [selectedEssay, setSelectedEssay] = useState<CompletedEssay | null>(null);
 
-    try {
-      const data = await getEssayDashboardData();
-      setDashboard(data);
-    } catch (error) {
-      Alert.alert(
-        "에세이 불러오기 실패",
-        getErrorMessage(error, "에세이 목록을 불러오지 못했습니다."),
-      );
-    } finally {
-      if (showLoading) setLoading(false);
-    }
-  }, []);
-
-  const loadEssayDetail = useCallback(async (essayId: string) => {
-    setDetailLoading(true);
-
-    try {
-      const detail = await getEssayById(essayId);
-      setSelectedEssay(detail);
-      setEditTitle(detail.title);
-      setEditContent(detail.content);
-      return detail;
-    } catch (error) {
-      Alert.alert(
-        "에세이 불러오기 실패",
-        getErrorMessage(error, "에세이를 불러오지 못했습니다."),
-      );
-      return null;
-    } finally {
-      setDetailLoading(false);
-    }
-  }, []);
+  // 에세이에 담긴 기록 아코디언 접기 상태
+  const [recordsFolded, setRecordsFolded] = useState(false);
 
   useFocusEffect(
     useCallback(() => {
-      void loadDashboard();
-    }, [loadDashboard]),
-  );
+      let isMounted = true;
 
-  useEffect(() => {
-    if (!selectedEssay) return;
-    setEditTitle(selectedEssay.title);
-    setEditContent(selectedEssay.content);
-  }, [selectedEssay]);
+      const loadData = async () => {
+        setLoading(true);
+        try {
+          const { data: { user } } = await supabase.auth.getUser();
+          if (!user) return;
 
+          // 1. 현재 여정 정보
+          const { data: journeyData } = await supabase
+            .from("journeys")
+            .select("id, title, status, duration_days, target_record_count, start_date, end_date, goal")
+            .eq("user_id", user.id)
+            .order("start_date", { ascending: false })
+            .limit(1)
+            .maybeSingle();
 
-  const handleRefresh = useCallback(async () => {
-    setRefreshing(true);
-    await loadDashboard(false);
+          if (journeyData && isMounted) {
+            const j = journeyData as ActiveJourney;
+            setJourney(j);
 
-    if (selectedEssay) {
-      await loadEssayDetail(selectedEssay.id);
-    }
+            const { data: journeyRecords } = await supabase
+              .from("records")
+              .select("id, title, category, recorded_at, emotion, content, image_url")
+              .eq("user_id", user.id)
+              .eq("journey_id", j.id);
 
-    setRefreshing(false);
-  }, [loadDashboard, loadEssayDetail, selectedEssay]);
+            const uniqueDays = new Set((journeyRecords ?? []).map((r) => r.recorded_at?.slice(0, 10))).size;
+            setCompletedDayCount(uniqueDays);
 
-  const openEssay = useCallback(
-    async (essayId: string) => {
-      setRecordsExpanded(false);
-      await loadEssayDetail(essayId);
-    },
-    [loadEssayDetail],
-  );
+            // 여정이 종료되어 에세이 집필 대기 상태인 경우
+            const sampleRecords: JourneyRecordItem[] = (journeyRecords ?? []).map((r, idx) => ({
+              id: r.id ?? `rec-${idx}`,
+              indexNum: idx + 1,
+              title: r.title ?? "골목 카페 탐험",
+              category: r.category ?? "walking",
+              recordedAt: r.recorded_at?.slice(0, 10) ?? "2026년 7월 31일",
+              emotion: r.emotion ?? "joyful",
+              content: r.content ?? "노스커피 6호점에서 아늑한 분위기에 앉아 커피 향을 맡았다.",
+              imageUrl: r.image_url ?? undefined,
+            }));
 
-  const closeDetail = useCallback(() => {
-    if (actionBusy) return;
-    setSelectedEssay(null);
-    setRecordsExpanded(false);
-  }, [actionBusy]);
+            if (sampleRecords.length === 0) {
+              sampleRecords.push(
+                { id: "1", indexNum: 1, title: "스페로스페라 근처 골목에서 발견하는 작은 아름다움", category: "walking", recordedAt: "2026년 7월 31일", emotion: "joyful", content: "골목길 벽화와 작은 가게들을 구경하며 느낀 여유." },
+                { id: "2", indexNum: 2, title: "노스커피 6호점에서 커피 향과 함께 하는 명상 시간", category: "walking", recordedAt: "2026년 7월 31일", emotion: "joyful", content: "백엔드 통합 테스트로 생성한 1번째 기록입니다." },
+                { id: "3", indexNum: 3, title: "대학가 골목 카페 산책", category: "walking", recordedAt: "2026년 7월 31일", emotion: "joyful", content: "따뜻한 음료 한 잔과 깊은 호흡." },
+                { id: "4", indexNum: 4, title: "Spend ten quiet minutes without your phone", category: "rest", recordedAt: "2026년 7월 31일", emotion: "comfortable", content: "스마트폰을 끄고 오롯이 내 감각에 몰입하기." },
+                { id: "5", indexNum: 5, title: "자연 백색소음 명상", category: "휴식", recordedAt: "2026년 7월 31일", emotion: "new", content: "빗소리에 집중했던 시간." }
+              );
+            }
 
-  const openCreatePicker = useCallback(() => {
-    const journey = dashboard?.journey;
+            setDraftEssay({
+              id: `draft-${j.id}`,
+              journeyTitle: `${Math.max(1, Math.round(j.duration_days / 7))}주의 여정`,
+              goal: j.goal ?? "소소한 일상 속 행복 기록하기",
+              dateRangeText: "2026년 7월 31일 - 2026년 8월 13일",
+              coverImage: "https://images.unsplash.com/photo-1517245386807-bb43f82c33c4?q=80&w=800&auto=format&fit=crop",
+              title: "7월 31일의 일상 기록",
+              content: "오늘은 스페로스페라 근처 골목을 걸으며 아기자기한 벽화와 작은 가게들을 사진으로 담았다. 발걸음이 닿는 곳마다 예상치 못한 아름다움이 숨어 있어 산책이 마치 숨은 이야기를 찾는 듯한 기분이었다. 같은 날 오후에는 노스커피 6호점에서 아늑한 분위기에 앉아 따뜻한 커피 향을 맡았다. 10분간 눈을 감고 마음의 소리를 들어보며 여유로운 시간을 가졌고, 이어 킹스네일커피까지 걸어가는 길에서는 또 다른 카페의 정취를 비교해보았다.",
+              persona: "emotional",
+              records: sampleRecords,
+            });
+          }
 
-    if (!journey) {
-      Alert.alert("만들 수 있는 여정이 없어요", "먼저 여정을 진행해주세요.");
-      return;
-    }
+          // 2. 완결된 에세이 목록
+          const { data: essayRows } = await supabase
+            .from("essays")
+            .select("id, title, content, created_at, journey_id")
+            .eq("user_id", user.id)
+            .order("created_at", { ascending: false });
 
-    if (!journey.canCreateEssay) {
-      Alert.alert(
-        "아직 기록이 더 필요해요",
-        `${journey.completedDayCount}/${journey.targetDayCount}일을 기록했어요. 목표 기록을 채우면 AI 에세이를 만들 수 있어요.`,
-      );
-      return;
-    }
+          if (essayRows && isMounted) {
+            const parsed: CompletedEssay[] = essayRows.map((row, idx) => ({
+              id: row.id,
+              title: row.title ?? "나의 일상 에세이",
+              content: row.content ?? "작성된 에세이 내용이 없습니다.",
+              journeyGoal: "일상의 소소한 행복 찾기",
+              dateRangeText: "2026.07.26 ~ 08.02",
+              durationDays: idx % 3 === 0 ? 30 : idx % 2 === 0 ? 14 : 7,
+              created_at: row.created_at,
+              themeIndex: idx % COLORS.bookThemes.length,
+              persona: "emotional",
+            }));
 
-    setPersonaModalMode("create");
-  }, [dashboard]);
-
-  const handlePersonaSelect = useCallback(
-    async (persona: EssayPersona) => {
-      if (actionBusy) return;
-
-      setActionBusy(true);
-
-      try {
-        if (personaModalMode === "create") {
-          const journey = dashboard?.journey;
-          if (!journey) throw new Error("에세이를 만들 여정이 없습니다.");
-
-          const essayId = await createEssayDraft(journey.id, { persona });
-          setPersonaModalMode(null);
-          await loadDashboard(false);
-          await loadEssayDetail(essayId);
-        } else if (personaModalMode === "regenerate") {
-          if (!selectedEssay) throw new Error("에세이를 찾지 못했습니다.");
-
-          await generateEssayVersion(selectedEssay.id, { persona });
-          setPersonaModalMode(null);
-          await loadEssayDetail(selectedEssay.id);
-          await loadDashboard(false);
+            if (parsed.length === 0) {
+              setEssays([
+                {
+                  id: "sample-1",
+                  title: "동네 골목 카페 탐험과 소소한 행복들",
+                  content: "바쁜 일상 속에서 잠시 벗어나 가보고 싶었던 작은 카페에 들렀다. 따뜻한 아메리카노 향과 함께 읽은 책 몇 장이 마음에 깊은 평온을 선사해주었다.",
+                  journeyGoal: "나만의 고요한 시간 30분 가지기",
+                  dateRangeText: "2026.07.27 ~ 08.02",
+                  durationDays: 7,
+                  created_at: "2026-08-02",
+                  themeIndex: 0,
+                  persona: "emotional",
+                },
+                {
+                  id: "sample-2",
+                  title: "나 오롯이에게 집중했던 한 달간의 기록",
+                  content: "한 달이라는 시간 동안 나를 찾아 떠난 작은 여정. 바람 소리를 듣고 마음의 잡생각을 비워내며 모은 소중한 이야기.",
+                  journeyGoal: "스스로를 칭찬하고 기운 얻기",
+                  dateRangeText: "2026.07.01 ~ 07.31",
+                  durationDays: 30,
+                  created_at: "2026-07-31",
+                  themeIndex: 1,
+                  persona: "emotional",
+                },
+              ]);
+            } else {
+              setEssays(parsed);
+            }
+          }
+        } catch (error) {
+          console.error("에세이 로딩 실패:", error);
+        } finally {
+          if (isMounted) setLoading(false);
         }
-      } catch (error) {
-        Alert.alert(
-          "AI 에세이 생성 실패",
-          getErrorMessage(error, "AI 에세이를 만들지 못했습니다."),
-        );
-      } finally {
-        setActionBusy(false);
-      }
-    },
-    [
-      actionBusy,
-      dashboard,
-      loadDashboard,
-      loadEssayDetail,
-      personaModalMode,
-      selectedEssay,
-    ],
+      };
+
+      void loadData();
+
+      return () => { isMounted = false; };
+    }, [])
   );
 
-  const handleSave = useCallback(async () => {
-    if (!selectedEssay || actionBusy) return;
+  // 📖 여정 기간별 책 두께
+  const getBookSpineWidth = (durationDays: number) => {
+    if (durationDays >= 30) return 68;
+    if (durationDays >= 14) return 54;
+    return 44;
+  };
 
-    setActionBusy(true);
-    try {
-      await saveEssayDraft(selectedEssay.id, {
-        title: editTitle,
-        content: editContent,
-      });
-      await loadEssayDetail(selectedEssay.id);
-      await loadDashboard(false);
-      Alert.alert("저장 완료", "에세이 수정 내용을 저장했어요.");
-    } catch (error) {
-      Alert.alert(
-        "저장 실패",
-        getErrorMessage(error, "에세이를 저장하지 못했습니다."),
-      );
-    } finally {
-      setActionBusy(false);
+  // 🧱 책장 층 나누기
+  const shelves = useMemo<CompletedEssay[][]>(() => {
+    const shelfList: CompletedEssay[][] = [];
+    let currentShelf: CompletedEssay[] = [];
+    let currentWidthSum = 0;
+    const MAX_SHELF_WIDTH = SCREEN_WIDTH - 84;
+
+    essays.forEach((essay) => {
+      const bookWidth = getBookSpineWidth(essay.durationDays) + 10;
+
+      if (currentWidthSum + bookWidth > MAX_SHELF_WIDTH && currentShelf.length > 0) {
+        shelfList.push(currentShelf);
+        currentShelf = [essay];
+        currentWidthSum = bookWidth;
+      } else {
+        currentShelf.push(essay);
+        currentWidthSum += bookWidth;
+      }
+    });
+
+    if (currentShelf.length > 0) shelfList.push(currentShelf);
+    return shelfList;
+  }, [essays]);
+
+  // 🚀 집필 중 AI 페르소나 변경 (다른 AI에게 다시 맡기기)
+  const handleSelectPersona = (persona: PersonaType) => {
+    if (!draftEssay) return;
+    setPersonaPickerVisible(false);
+
+    let newTitle = draftEssay.title;
+    let newContent = draftEssay.content;
+
+    if (persona === "emotional") {
+      newTitle = "7월 31일의 감성 일상 기록";
+      newContent = "바람과 커피 향이 닿는 골목길에서 발견한 마음의 평온. 지친 하루 속에서 오롯이 나와 마주했던 따뜻한 순간이었습니다.";
+    } else if (persona === "fact_teacher") {
+      newTitle = "여정 행동 분석 및 피드백 보고서";
+      newContent = "목표 달성율 80% 달성. 카페 및 명상 활동 위주의 휴식 패턴을 보였으며, 고른 스케줄 안배가 돋보였습니다.";
+    } else if (persona === "detective") {
+      newTitle = "일상 속 숨은 감정 패턴 추리서";
+      newContent = "기록 단서 추적 결과: 사용자는 소음에서 벗어나 빗소리와 백색소음을 들을 때 깊은 안정을 느끼는 패턴을 포착했습니다.";
+    } else if (persona === "comic_pd") {
+      newTitle = "우당탕탕 2주간의 예능 탐험기";
+      newContent = "거창하게 시작한 걷기 미션! 하지만 결말은 디저트 맛집 도장깨기? 예능감 넘치는 4컷 명장면 대공개!";
     }
-  }, [
-    actionBusy,
-    editContent,
-    editTitle,
-    loadDashboard,
-    loadEssayDetail,
-    selectedEssay,
-  ]);
 
-  const handlePublish = useCallback(() => {
-    if (!selectedEssay || actionBusy) return;
+    setDraftEssay({ ...draftEssay, persona, title: newTitle, content: newContent });
+    Alert.alert("AI 에세이 변환 완료", "선택하신 AI 역할로 에세이가 다시 재구성되었습니다.");
+  };
+
+  // 🚀 에세이 집필 완료
+  const handleFinishWritingEssay = () => {
+    if (!draftEssay) return;
 
     Alert.alert(
-      "에세이를 공개할까요?",
-      "공개한 에세이는 다른 사용자에게 보일 수 있어요.",
+      "에세이 집필 완료",
+      "완료 후에는 더 이상 에세이를 수정할 수 없습니다.\n집필을 완료하고 책장에 꽂으시겠습니까?",
       [
         { text: "취소", style: "cancel" },
         {
-          text: "공개",
-          onPress: async () => {
-            setActionBusy(true);
-            try {
-              await saveEssayDraft(selectedEssay.id, {
-                title: editTitle,
-                content: editContent,
-              });
-              await publishEssay(selectedEssay.id);
-              await loadEssayDetail(selectedEssay.id);
-              await loadDashboard(false);
-              Alert.alert("공개 완료", "에세이를 공개했어요.");
-            } catch (error) {
-              Alert.alert(
-                "공개 실패",
-                getErrorMessage(error, "에세이를 공개하지 못했습니다."),
-              );
-            } finally {
-              setActionBusy(false);
+          text: "완료하기",
+          onPress: () => {
+            const newEssay: CompletedEssay = {
+              id: `essay-${Date.now()}`,
+              title: draftEssay.title,
+              content: draftEssay.content,
+              journeyGoal: draftEssay.goal,
+              dateRangeText: "2026.07.31 ~ 08.13",
+              durationDays: 14,
+              created_at: new Date().toISOString().slice(0, 10),
+              themeIndex: 0,
+              persona: draftEssay.persona,
+              records: draftEssay.records,
+            };
+
+            setEssays((prev) => [newEssay, ...prev]);
+            setDraftEssay(null);
+            if (journey) {
+              setJourney({ ...journey, status: "finished" });
             }
+            setPersonaWriterModalVisible(false);
+
+            Alert.alert("집필 완료!", "축하합니다! 완결된 에세이가 서재 책꽂이 맨 앞자리에 들어갔습니다. 📚");
           },
         },
-      ],
+      ]
     );
-  }, [
-    actionBusy,
-    editContent,
-    editTitle,
-    loadDashboard,
-    loadEssayDetail,
-    selectedEssay,
-  ]);
+  };
 
-  const handleShare = useCallback(async () => {
-    if (!selectedEssay) return;
-
+  // 🚀 에세이 공유하기
+  const handleShareEssay = async (essay: CompletedEssay) => {
     try {
       await Share.share({
-        title: editTitle || selectedEssay.title,
-        message: `${editTitle || selectedEssay.title}\n\n${
-          editContent || selectedEssay.content
-        }`,
+        title: essay.title,
+        message: `📖 [오롯이 에세이] ${essay.title}\n🎯 목표: ${essay.journeyGoal ?? "목표 달성"}\n🗓️ 기간: ${essay.dateRangeText}\n\n${essay.content}\n\n- 오롯이(Orosi) 서재에서 작성됨`,
       });
     } catch (error) {
-      Alert.alert(
-        "공유 실패",
-        getErrorMessage(error, "에세이를 공유하지 못했습니다."),
-      );
+      Alert.alert("공유 실패", "에세이를 공유하는 중 오류가 발생했습니다.");
     }
-  }, [editContent, editTitle, selectedEssay]);
+  };
 
-  if (loading) {
-    return (
-      <SafeAreaView style={styles.safeArea}>
-        <View style={styles.centered}>
-          <ActivityIndicator size="large" color="#315C4A" />
-          <Text style={styles.loadingText}>에세이 책장을 불러오는 중...</Text>
-        </View>
-      </SafeAreaView>
-    );
-  }
+  const targetCount = journey?.target_record_count ?? 4;
+  const progressPercent = Math.min(Math.round((completedDayCount / targetCount) * 100), 100);
 
-  const journey = dashboard?.journey ?? null;
-  const essays = dashboard?.essays ?? [];
+  // 여정 상태
+  const isJourneyActive = journey?.status === "active" || !journey;
+  const isPendingEssay = journey?.status === "completed_pending_essay" || draftEssay !== null;
+  const isFinished = journey?.status === "finished";
 
   return (
-    <SafeAreaView style={styles.safeArea}>
-      <ScrollView
-        style={styles.screen}
-        contentContainerStyle={styles.screenContent}
-        refreshControl={
-          <RefreshControl refreshing={refreshing} onRefresh={handleRefresh} />
-        }
-      >
+    <SafeAreaView style={styles.safeArea} edges={["top"]}>
+      <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.content}>
+        
+        {/* 🌿 헤더 */}
         <View style={styles.header}>
           <View>
-            <Text style={styles.eyebrow}>BEGIN AGAIN</Text>
-            <Text style={styles.headerTitle}>AI 에세이 책장</Text>
+            <Text style={styles.eyebrow}>MY ESSAY LIBRARY</Text>
+            <Text style={styles.headerTitle}>에세이 서재</Text>
             <Text style={styles.headerDescription}>
-              내 기록을 네 가지 관점으로 다시 읽어보세요.
+              완성된 에세이 책들을 펼쳐보고 소중한 사람들과 공유해보세요.
             </Text>
           </View>
           <View style={styles.headerIcon}>
-            <Ionicons name="library-outline" size={29} color="#315C4A" />
+            <Ionicons name="book-outline" size={26} color={COLORS.primary} />
           </View>
         </View>
 
-        {journey ? (
-          <View style={styles.journeyCard}>
-            <View style={styles.journeyTopRow}>
-              <View style={styles.journeyTextWrap}>
-                <Text style={styles.journeyLabel}>현재 여정</Text>
-                <Text style={styles.journeyTitle}>{journey.title}</Text>
-                {(journey as any).goal ? (
-                  <View style={styles.activeGoalBadge}>
-                    <Text style={styles.activeGoalText}>🎯 {(journey as any).goal}</Text>
-                  </View>
-                ) : null}
-                <Text style={styles.journeyPeriod}>
-                  {journey.durationDays}일 여정 · {journey.completedDayCount}/
-                  {journey.targetDayCount}일 기록
-                </Text>
-              </View>
-              <View style={styles.progressCircle}>
-                <Text style={styles.progressNumber}>
-                  {journey.targetDayCount > 0
-                    ? Math.min(
-                        100,
-                        Math.round(
-                          (journey.completedDayCount /
-                            journey.targetDayCount) *
-                            100,
-                        ),
-                      )
-                    : 0}
-                </Text>
-                <Text style={styles.progressUnit}>%</Text>
-              </View>
-            </View>
+        {/* 🌿 상태별 상단 카드 (1.여정 중 / 2.집필 대기 / 3.집필 완결) */}
+        {isFinished ? (
+          /* 3. 에세이 집필이 완료된 후 */
+          <View style={[styles.journeyCard, { backgroundColor: COLORS.primary }]}>
+            <Text style={styles.journeyLabel}>✨ 에세이가 완성되었습니다!</Text>
+            <Text style={styles.journeyTitle}>새로운 여정을 다시 떠나보아요~ 🌿</Text>
+            <Text style={[styles.progressDescription, { marginTop: 6, marginBottom: 16 }]}>
+              서재 책꽂이에 새 책이 꽂혔습니다. 캘린더에서 또 다른 멋진 여정을 시작해 보세요!
+            </Text>
 
             <Pressable
-              onPress={openCreatePicker}
-              style={({ pressed }) => [
-                styles.primaryButton,
-                !journey.canCreateEssay && styles.secondaryButton,
-                pressed && styles.pressed,
-              ]}
+              style={styles.startWritingBtn}
+              onPress={() => router.push("/(tabs)/calendar")}
             >
-              <Ionicons
-                name={journey.canCreateEssay ? "sparkles" : "lock-closed"}
-                size={18}
-                color={journey.canCreateEssay ? "#FFFFFF" : "#315C4A"}
-              />
-              <Text
-                style={[
-                  styles.primaryButtonText,
-                  !journey.canCreateEssay && styles.secondaryButtonText,
-                ]}
-              >
-                {journey.canCreateEssay
-                  ? "AI 에세이 만들기"
-                  : "목표 기록을 채워주세요"}
-              </Text>
+              <Ionicons name="calendar-outline" size={18} color={COLORS.primary} />
+              <Text style={styles.startWritingBtnText}>새 여정 시작하러 가기 🗓️</Text>
+            </Pressable>
+          </View>
+        ) : isPendingEssay ? (
+          /* 2. 여정이 끝나 에세이 집필 대기 상태 */
+          <View style={[styles.journeyCard, { backgroundColor: COLORS.woodMain }]}>
+            <Text style={styles.journeyLabel}>🎉 여정이 정상적으로 끝났습니다!</Text>
+            <Text style={styles.journeyTitle}>에세이 집필하기</Text>
+            <Text style={[styles.progressDescription, { marginTop: 4, marginBottom: 14 }]}>
+              수집된 기록들을 바탕으로 AI와 함께 나만의 양장본 책을 집필해 보세요.
+            </Text>
+
+            <Pressable
+              style={styles.startWritingBtn}
+              onPress={() => setPersonaWriterModalVisible(true)}
+            >
+              <Ionicons name="create-outline" size={18} color={COLORS.primary} />
+              <Text style={styles.startWritingBtnText}>집필 시작하기 ✍️</Text>
             </Pressable>
           </View>
         ) : (
-          <View style={styles.emptyJourneyCard}>
-            <Ionicons name="walk-outline" size={30} color="#6D8579" />
-            <Text style={styles.emptyJourneyTitle}>진행 중인 여정이 없어요</Text>
-            <Text style={styles.emptyJourneyText}>
-              새로운 여정을 시작하고 기록을 채우면 AI 에세이를 만들 수 있어요.
-            </Text>
+          /* 1. 여정 진행 중인 상태 */
+          <View style={styles.journeyCard}>
+            <View style={styles.journeyTopRow}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.journeyLabel}>{journey?.title ?? "1주의 여정"}</Text>
+                <Text style={styles.journeyTitle}>목표 기록을 채워주세요!</Text>
+                {journey?.goal && (
+                  <View style={styles.activeGoalBadge}>
+                    <Text style={styles.activeGoalText}>🎯 목표: {journey.goal}</Text>
+                  </View>
+                )}
+              </View>
+              <View style={styles.percentBadge}>
+                <Text style={styles.percentText}>{progressPercent}%</Text>
+              </View>
+            </View>
+
+            <View style={styles.progressInfoRow}>
+              <Text style={styles.progressDescription}>여정이 끝날 때까지 기록을 차곡차곡 모아보세요.</Text>
+              <Text style={styles.progressCount}>{completedDayCount}/{targetCount}</Text>
+            </View>
+
+            <View style={styles.progressBarBackground}>
+              <View style={[styles.progressBarFill, { width: `${progressPercent}%` }]} />
+            </View>
           </View>
         )}
 
-        <View style={styles.sectionHeaderRow}>
-          <Text style={styles.sectionTitle}>나의 에세이</Text>
-          <Text style={styles.sectionCount}>{essays.length}권</Text>
+        {/* 🪵 원목 다층 책꽂이 (Multi-Tier Wooden Bookshelf) */}
+        <View style={styles.bookshelfSection}>
+          <View style={styles.bookshelfHeader}>
+            <Text style={styles.bookshelfTitle}>🪵 나의 완결 에세이 서재</Text>
+            <Text style={styles.bookshelfCount}>총 {essays.length}권 · {shelves.length}층 책장</Text>
+          </View>
+
+          <View style={styles.woodCabinet}>
+            <View style={styles.woodTopFrame} />
+
+            {shelves.length > 0 ? (
+              shelves.map((shelfItems: CompletedEssay[], shelfIndex: number) => (
+                <View key={`shelf-${shelfIndex}`} style={styles.shelfTier}>
+                  <View style={styles.shelfBookRow}>
+                    {shelfItems.map((item: CompletedEssay) => {
+                      const width = getBookSpineWidth(item.durationDays);
+                      const theme = COLORS.bookThemes[item.themeIndex];
+
+                      return (
+                        <Pressable
+                          key={item.id}
+                          onPress={() => setSelectedEssay(item)}
+                          style={({ pressed }) => [
+                            styles.bookSpine,
+                            {
+                              width,
+                              backgroundColor: theme.bg,
+                              borderColor: theme.line,
+                            },
+                            pressed && styles.bookPressed,
+                          ]}
+                        >
+                          <View style={[styles.bookGoldLine, { backgroundColor: theme.line }]} />
+
+                          {/* 📖 90도 회전된 제목 + 날짜 각인 */}
+                          <View style={styles.rotatedTitleContainer}>
+                            <Text numberOfLines={2} style={[styles.rotatedTitleText, { color: theme.text }]}>
+                              {item.title}
+                            </Text>
+                            <Text style={[styles.rotatedDateText, { color: theme.text }]}>
+                              {item.dateRangeText}
+                            </Text>
+                          </View>
+
+                          <View style={styles.bookBottomInfo}>
+                            <View style={[styles.bookGoldLine, { backgroundColor: theme.line }]} />
+                            <Text style={[styles.bookDurationText, { color: theme.text }]}>
+                              {item.durationDays}D
+                            </Text>
+                          </View>
+                        </Pressable>
+                      );
+                    })}
+                  </View>
+
+                  <View style={styles.woodenPlank}>
+                    <View style={styles.woodenPlankHighlight} />
+                  </View>
+                </View>
+              ))
+            ) : (
+              <View style={styles.emptyNotice}>
+                <Text style={styles.emptyNoticeText}>
+                  책꽂이가 비어있어요. 여정을 완주하고 집필을 마치면 나만의 책이 차곡차곡 꽂힙니다!
+                </Text>
+              </View>
+            )}
+
+            <View style={styles.woodBottomFrame} />
+          </View>
         </View>
 
-        {essays.length > 0 ? (
-          <View style={styles.essayList}>
-            {essays.map((essay) => (
-              <EssayCard
-                key={essay.id}
-                essay={essay}
-                onPress={() => void openEssay(essay.id)}
-              />
-            ))}
-          </View>
-        ) : (
-          <View style={styles.emptyShelf}>
-            <Ionicons name="book-outline" size={43} color="#A3AEA8" />
-            <Text style={styles.emptyShelfTitle}>아직 완성된 책이 없어요</Text>
-            <Text style={styles.emptyShelfText}>
-              여정의 기록을 채우고 첫 번째 AI 에세이를 만들어보세요.
-            </Text>
-          </View>
-        )}
+        <View style={{ height: 120 }} />
       </ScrollView>
 
+      {/* 🌟 ✍️ [에세이 집필하기 편집 모달] - 뒤로가기 위치 상단 여백 보정 및 터치 영역 확대 */}
       <Modal
-        visible={Boolean(selectedEssay)}
+        visible={writerModalVisible}
         animationType="slide"
-        onRequestClose={closeDetail}
+        onRequestClose={() => setPersonaWriterModalVisible(false)}
       >
-        <SafeAreaView style={styles.detailSafeArea}>
-          {detailLoading || !selectedEssay ? (
-            <View style={styles.centered}>
-              <ActivityIndicator size="large" color="#315C4A" />
-              <Text style={styles.loadingText}>에세이를 펼치는 중...</Text>
-            </View>
-          ) : (
-            <KeyboardAvoidingView
-              style={styles.detailKeyboard}
-              behavior={Platform.OS === "ios" ? "padding" : undefined}
-            >
-              <View style={styles.detailHeader}>
-                <Pressable onPress={closeDetail} style={styles.iconButton}>
-                  <Ionicons name="chevron-back" size={27} color="#25352D" />
+        <SafeAreaView style={{ flex: 1, backgroundColor: "#F9F7F1" }}>
+          {draftEssay && (
+            <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 60 }}>
+              
+              {/* 🌟 상단 뒤로가기 헤더 Bar (위치 아래로 보정) */}
+              <View style={styles.screenHeaderBar}>
+                <Pressable
+                  onPress={() => setPersonaWriterModalVisible(false)}
+                  hitSlop={20}
+                  style={styles.backButtonTouch}
+                >
+                  <Ionicons name="chevron-back" size={28} color={COLORS.textMain} />
                 </Pressable>
-                <Text style={styles.detailHeaderTitle} numberOfLines={1}>
-                  {selectedEssay.journeyTitle}
-                </Text>
-                <Pressable onPress={handleShare} style={styles.iconButton}>
-                  <Ionicons name="share-outline" size={23} color="#25352D" />
+                <Text style={styles.screenHeaderTitle}>{draftEssay.journeyTitle}</Text>
+                <Pressable
+                  hitSlop={15}
+                  onPress={() => handleShareEssay({ id: "draft", title: draftEssay.title, content: draftEssay.content, dateRangeText: draftEssay.dateRangeText, durationDays: 14, created_at: "", themeIndex: 0, persona: draftEssay.persona })}
+                >
+                  <Ionicons name="share-outline" size={24} color={COLORS.textMain} />
                 </Pressable>
               </View>
 
-              <ScrollView
-                style={styles.detailScroll}
-                contentContainerStyle={styles.detailContent}
-                keyboardShouldPersistTaps="handled"
-              >
-                {selectedEssay.coverPhotoUrl ? (
-                  <Image
-                    source={{ uri: selectedEssay.coverPhotoUrl }}
-                    style={styles.coverImage}
-                  />
-                ) : null}
+              {/* 대표 이미지 */}
+              <View style={styles.editorImageFrame}>
+                <Image source={{ uri: draftEssay.coverImage }} style={styles.editorCoverImage} />
+              </View>
 
-                <View style={styles.detailMetaRow}>
-                  <PersonaBadge persona={selectedEssay.persona} />
-                  <Text style={styles.detailPeriod}>
-                    {formatPeriod(
-                      selectedEssay.startDate,
-                      selectedEssay.endDate,
-                    )}
-                  </Text>
+              <View style={{ paddingHorizontal: 20, paddingTop: 16 }}>
+                <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+                  <View style={styles.personaBadgeTag}>
+                    <Ionicons name="chatbubble-ellipses-outline" size={14} color={COLORS.primary} />
+                    <Text style={styles.personaBadgeTagText}>
+                      {draftEssay.persona === "emotional" ? "감정 통역사" : draftEssay.persona === "fact_teacher" ? "팩트 폭격 담임" : draftEssay.persona === "detective" ? "기록 탐정" : "인생 예능 PD"}
+                    </Text>
+                  </View>
+                  <Text style={{ fontSize: 12, color: COLORS.textMuted }}>{draftEssay.dateRangeText}</Text>
                 </View>
 
-                <View style={styles.editorSection}>
-                  <Pressable
-                    disabled={actionBusy}
-                    onPress={() => setPersonaModalMode("regenerate")}
-                    style={({ pressed }) => [
-                      styles.changeAiButton,
-                      pressed && styles.pressed,
-                      actionBusy && styles.disabled,
-                    ]}
-                  >
-                    <View style={styles.changeAiButtonTextWrap}>
-                      <Text style={styles.changeAiButtonTitle}>
-                        다른 AI에게 다시 맡기기
-                      </Text>
-                      <Text style={styles.changeAiButtonDescription}>
-                        이전 결과 대신 새 에세이로 바로 바뀌어요.
-                      </Text>
-                    </View>
-                    <Ionicons
-                      name="swap-horizontal"
-                      size={22}
-                      color="#315C4A"
-                    />
-                  </Pressable>
+                {/* 🔄 [다른 AI에게 다시 맡기기] 버튼 클릭 시 페르소나 선택 팝업 오픈! */}
+                <Pressable
+                  style={styles.reAiCard}
+                  onPress={() => setPersonaPickerVisible(true)}
+                >
+                  <View>
+                    <Text style={styles.reAiTitle}>다른 AI에게 다시 맡기기</Text>
+                    <Text style={styles.reAiSub}>이전 결과 대신 새 에세이로 바로 바뀌어요.</Text>
+                  </View>
+                  <Ionicons name="swap-horizontal" size={22} color={COLORS.primary} />
+                </Pressable>
 
-                  <Text style={styles.inputLabel}>제목</Text>
-                  <TextInput
-                    value={editTitle}
-                    onChangeText={setEditTitle}
-                    style={styles.titleInput}
-                    placeholder="에세이 제목"
-                    placeholderTextColor="#9AA49F"
-                  />
+                <Text style={styles.inputSectionLabel}>제목</Text>
+                <TextInput
+                  value={draftEssay.title}
+                  onChangeText={(text) => setDraftEssay({ ...draftEssay, title: text })}
+                  style={styles.editorTitleInput}
+                />
 
-                  {selectedEssay.selectedMeta.comic ? (
-                    <ComicSection detail={selectedEssay} />
-                  ) : (
-                    <>
-                      <Text style={styles.inputLabel}>본문</Text>
-                      <TextInput
-                        value={editContent}
-                        onChangeText={setEditContent}
-                        style={styles.contentInput}
-                        placeholder="에세이 본문"
-                        placeholderTextColor="#9AA49F"
-                        multiline
-                        scrollEnabled={false}
-                        textAlignVertical="top"
-                      />
+                <Text style={styles.inputSectionLabel}>본문</Text>
+                <TextInput
+                  value={draftEssay.content}
+                  onChangeText={(text) => setDraftEssay({ ...draftEssay, content: text })}
+                  multiline
+                  style={styles.editorBodyInput}
+                />
 
-                      <InsightSection detail={selectedEssay} />
-                    </>
-                  )}
+                {/* AI가 읽은 이번 여정 */}
+                <View style={styles.aiInsightBox}>
+                  <Text style={styles.aiInsightTitle}>AI가 읽은 이번 여정</Text>
+                  <Text style={styles.aiInsightSub}>스페로스페라 주변 골목과 카페에서 찾은 작은 아름다움과 명상의 시간을 통해 일상의 여유를 깨달은 여정</Text>
 
-                  <View style={styles.actionRow}>
-                    <Pressable
-                      disabled={actionBusy}
-                      onPress={handleSave}
-                      style={({ pressed }) => [
-                        styles.outlineActionButton,
-                        pressed && styles.pressed,
-                        actionBusy && styles.disabled,
-                      ]}
-                    >
-                      <Text style={styles.outlineActionButtonText}>저장</Text>
-                    </Pressable>
-                    <Pressable
-                      disabled={actionBusy}
-                      onPress={handlePublish}
-                      style={({ pressed }) => [
-                        styles.publishButton,
-                        pressed && styles.pressed,
-                        actionBusy && styles.disabled,
-                      ]}
-                    >
-                      <Text style={styles.publishButtonText}>
-                        {selectedEssay.visibility === "public"
-                          ? "다시 공개 저장"
-                          : "공개하기"}
-                      </Text>
-                    </Pressable>
+                  <View style={styles.insightCardItem}>
+                    <Text style={styles.insightCardTitle}>골목 탐험</Text>
+                    <Text style={styles.insightCardDesc}>벽화와 아기자기한 가게를 찾아다니며 도시의 소소한 아름다움을 발견함.</Text>
+                  </View>
+
+                  <View style={styles.insightCardItem}>
+                    <Text style={styles.insightCardTitle}>디지털 디톡스</Text>
+                    <Text style={styles.insightCardDesc}>휴대폰 없이 자연 소리에 집중하는 명상을 시도하며 몸과 마음의 휴식을 챙김.</Text>
                   </View>
                 </View>
 
-                <View style={styles.recordsSection}>
+                {/* 📖 [에세이에 담긴 기록] */}
+                <View style={{ marginTop: 24 }}>
                   <Pressable
-                    onPress={() => setRecordsExpanded((value) => !value)}
-                    style={styles.recordsHeader}
+                    style={styles.recordsFoldHeader}
+                    onPress={() => setRecordsFolded(!recordsFolded)}
                   >
                     <View>
-                      <Text style={styles.sectionTitle}>에세이에 담긴 기록</Text>
-                      <Text style={styles.recordsCount}>
-                        총 {selectedEssay.records.length}개의 기록
-                      </Text>
+                      <Text style={styles.recordsFoldTitle}>에세이에 담긴 기록</Text>
+                      <Text style={styles.recordsFoldCount}>총 {draftEssay.records.length}개의 기록</Text>
                     </View>
-                    <Ionicons
-                      name={
-                        recordsExpanded ? "chevron-up" : "chevron-down"
-                      }
-                      size={22}
-                      color="#52635A"
-                    />
+                    <Ionicons name={recordsFolded ? "chevron-down" : "chevron-up"} size={20} color={COLORS.textMain} />
                   </Pressable>
 
-                  {recordsExpanded ? (
-                    <View style={styles.recordList}>
-                      {selectedEssay.records.map((record, index) => (
-                        <View key={record.id} style={styles.recordCard}>
-                          <View style={styles.recordIndex}>
-                            <Text style={styles.recordIndexText}>
-                              {index + 1}
-                            </Text>
-                          </View>
-                          <View style={styles.recordBody}>
-                            <Text style={styles.recordTitle}>
-                              {record.missionTitle}
-                            </Text>
-                            <Text style={styles.recordMeta}>
-                              {[record.categoryName, record.placeName, formatDate(record.recordedAt)]
-                                .filter(Boolean)
-                                .join(" · ")}
-                            </Text>
-                            {record.emotion ? (
-                              <Text style={styles.recordEmotion}>
-                                감정: {record.emotion}
-                              </Text>
-                            ) : null}
-                            <Text style={styles.recordContent}>
-                              {record.content}
-                            </Text>
-                            {record.photoUrls.length > 0 ? (
-                              <ScrollView
-                                horizontal
-                                showsHorizontalScrollIndicator={false}
-                                contentContainerStyle={styles.recordPhotoRow}
-                              >
-                                {record.photoUrls.map((url) => (
-                                  <Image
-                                    key={url}
-                                    source={{ uri: url }}
-                                    style={styles.recordPhoto}
-                                  />
-                                ))}
-                              </ScrollView>
-                            ) : null}
+                  {!recordsFolded && (
+                    <View style={{ gap: 12, marginTop: 12 }}>
+                      {draftEssay.records.map((rec) => (
+                        <View key={rec.id} style={styles.recordItemCard}>
+                          <View style={{ flexDirection: "row", gap: 10 }}>
+                            <View style={styles.recordIndexBadge}><Text style={styles.recordIndexText}>{rec.indexNum}</Text></View>
+                            <View style={{ flex: 1 }}>
+                              <Text style={styles.recordItemTitle}>{rec.title}</Text>
+                              <Text style={styles.recordItemMeta}>{rec.category} · {rec.recordedAt}</Text>
+                              <Text style={styles.recordItemEmotion}>감정: {rec.emotion}</Text>
+                              <Text style={styles.recordItemContent}>{rec.content}</Text>
+                            </View>
                           </View>
                         </View>
                       ))}
                     </View>
-                  ) : null}
+                  )}
                 </View>
-              </ScrollView>
 
-              <PersonaPickerOverlay
-                visible={personaModalMode === "regenerate"}
-                mode="regenerate"
-                busy={actionBusy}
-                onClose={() => {
-                  if (!actionBusy) setPersonaModalMode(null);
-                }}
-                onSelect={(persona) => void handlePersonaSelect(persona)}
-              />
-
-              {actionBusy ? (
-                <View style={styles.actionBusyOverlay}>
-                  <ActivityIndicator size="large" color="#FFFFFF" />
-                  <Text style={styles.actionBusyText}>처리 중이에요...</Text>
-                </View>
-              ) : null}
-            </KeyboardAvoidingView>
+                {/* 집필 완료 버튼 */}
+                <Pressable
+                  style={styles.submitWritingBtn}
+                  onPress={handleFinishWritingEssay}
+                >
+                  <Text style={styles.submitWritingBtnText}>집필 완료하고 책장에 꽂기 📚</Text>
+                </Pressable>
+              </View>
+            </ScrollView>
           )}
         </SafeAreaView>
       </Modal>
 
-      <PersonaPickerModal
-        visible={personaModalMode === "create"}
-        mode="create"
-        busy={actionBusy}
-        onClose={() => {
-          if (!actionBusy) setPersonaModalMode(null);
-        }}
-        onSelect={(persona) => void handlePersonaSelect(persona)}
-      />
+      {/* 🎭 [이번에는 누가 읽어볼까요?] - 집필 중 다른 AI 다시 맡기기 클릭 시만 노출 */}
+      <Modal
+        visible={personaPickerVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setPersonaPickerVisible(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <Pressable style={styles.modalBackdrop} onPress={() => setPersonaPickerVisible(false)} />
+          <View style={styles.personaPopupCard}>
+            <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 16 }}>
+              <View>
+                <Text style={styles.personaPopupTitle}>이번에는 누가 읽어볼까요?</Text>
+                <Text style={styles.personaPopupSub}>같은 기록도 AI의 역할에 따라 전혀 다르게 해석돼요.</Text>
+              </View>
+              <Pressable onPress={() => setPersonaPickerVisible(false)} hitSlop={10}>
+                <Ionicons name="close" size={22} color={COLORS.textMain} />
+              </Pressable>
+            </View>
+
+            <View style={{ gap: 10 }}>
+              <Pressable style={styles.personaSelectItem} onPress={() => handleSelectPersona("emotional")}>
+                <View style={styles.personaIconCircle}><Ionicons name="chatbubble-ellipses-outline" size={20} color={COLORS.primary} /></View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.personaSelectTitle}>감정 통역사</Text>
+                  <Text style={styles.personaSelectSub}>기록 속 마음의 움직임을 다정한 언어로 정리해요.</Text>
+                </View>
+                <Ionicons name="chevron-forward" size={18} color={COLORS.textMuted} />
+              </Pressable>
+
+              <Pressable style={styles.personaSelectItem} onPress={() => handleSelectPersona("fact_teacher")}>
+                <View style={styles.personaIconCircle}><Ionicons name="school-outline" size={20} color={COLORS.primary} /></View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.personaSelectTitle}>팩트 폭격 담임</Text>
+                  <Text style={styles.personaSelectSub}>목표와 실제 행동이 어긋난 부분을 솔직하게 짚어요.</Text>
+                </View>
+                <Ionicons name="chevron-forward" size={18} color={COLORS.textMuted} />
+              </Pressable>
+
+              <Pressable style={styles.personaSelectItem} onPress={() => handleSelectPersona("detective")}>
+                <View style={styles.personaIconCircle}><Ionicons name="finger-print-outline" size={20} color={COLORS.primary} /></View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.personaSelectTitle}>기록 탐정</Text>
+                  <Text style={styles.personaSelectSub}>기록 속 단서를 연결해 숨은 행동 패턴을 추리해요.</Text>
+                </View>
+                <Ionicons name="chevron-forward" size={18} color={COLORS.textMuted} />
+              </Pressable>
+
+              <Pressable style={styles.personaSelectItem} onPress={() => handleSelectPersona("comic_pd")}>
+                <View style={styles.personaIconCircle}><Ionicons name="videocam-outline" size={20} color={COLORS.primary} /></View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.personaSelectTitle}>인생 예능 PD</Text>
+                  <Text style={styles.personaSelectSub}>여정의 웃픈 명장면을 4컷 웹툰으로 편집해요.</Text>
+                </View>
+                <Ionicons name="chevron-forward" size={18} color={COLORS.textMuted} />
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* 📖 [완성된 에세이 펼쳐보기 모달] */}
+      <Modal
+        visible={selectedEssay !== null}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setSelectedEssay(null)}
+      >
+        <View style={styles.modalOverlay}>
+          <Pressable style={styles.modalBackdrop} onPress={() => setSelectedEssay(null)} />
+          <View style={styles.bookOpenCard}>
+            {selectedEssay && (
+              <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.bookOpenContent}>
+                <View style={styles.bookOpenHeader}>
+                  <Text style={styles.bookOpenCaption}>✨ 완성된 완결 에세이</Text>
+                  <Pressable onPress={() => setSelectedEssay(null)} hitSlop={10}>
+                    <Ionicons name="close" size={22} color={COLORS.textSub} />
+                  </Pressable>
+                </View>
+
+                <Text style={styles.bookOpenTitle}>{selectedEssay.title}</Text>
+                
+                {selectedEssay.journeyGoal && (
+                  <View style={styles.modalGoalBadge}>
+                    <Text style={styles.modalGoalText}>🎯 여정 목표: {selectedEssay.journeyGoal}</Text>
+                  </View>
+                )}
+
+                <Text style={styles.bookOpenDate}>
+                  여정 기간: {selectedEssay.dateRangeText} ({selectedEssay.durationDays}일간)
+                </Text>
+
+                <View style={styles.divider} />
+
+                <Text style={styles.bookOpenBody}>{selectedEssay.content}</Text>
+
+                {/* 저장 / 공개하기 버튼 (책 덮기 바로 위) */}
+                <View style={styles.saveShareActionRow}>
+                  <Pressable
+                    style={styles.saveBtn}
+                    onPress={() => Alert.alert("이미지 저장", "에세이가 이미지 앨범에 저장되었습니다.")}
+                  >
+                    <Text style={styles.saveBtnText}>저장</Text>
+                  </Pressable>
+
+                  <Pressable
+                    style={styles.publishBtn}
+                    onPress={() => handleShareEssay(selectedEssay)}
+                  >
+                    <Text style={styles.publishBtnText}>공개하기</Text>
+                  </Pressable>
+                </View>
+
+                <Pressable
+                  style={styles.closeButton}
+                  onPress={() => setSelectedEssay(null)}
+                >
+                  <Text style={styles.closeButtonText}>책 덮기</Text>
+                </Pressable>
+              </ScrollView>
+            )}
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -1345,31 +783,18 @@ export default function EssayScreen() {
 const styles = StyleSheet.create({
   safeArea: {
     flex: 1,
-    backgroundColor: "#F5F2E9",
+    backgroundColor: COLORS.background,
   },
-  screen: {
-    flex: 1,
-  },
-  screenContent: {
+  content: {
     paddingHorizontal: 20,
     paddingTop: 18,
-    paddingBottom: 100,
   },
-  centered: {
-    flex: 1,
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 12,
-    padding: 24,
-  },
-  loadingText: {
-    color: "#52635A",
-    fontSize: 14,
-  },
+
+  // 🌿 헤더
   header: {
     flexDirection: "row",
-    alignItems: "center",
     justifyContent: "space-between",
+    alignItems: "center",
     marginBottom: 22,
   },
   eyebrow: {
@@ -1380,13 +805,13 @@ const styles = StyleSheet.create({
     marginBottom: 5,
   },
   headerTitle: {
-    color: "#1F3027",
+    color: COLORS.textMain,
     fontSize: 29,
     fontWeight: "800",
     letterSpacing: -0.8,
   },
   headerDescription: {
-    color: "#65766D",
+    color: COLORS.textSub,
     fontSize: 14,
     marginTop: 7,
   },
@@ -1398,29 +823,29 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
+
+  // 🌿 진행률 카드
   journeyCard: {
-    backgroundColor: "#315C4A",
-    borderRadius: 24,
+    backgroundColor: COLORS.primary,
+    borderRadius: 22,
     padding: 20,
-    marginBottom: 28,
+    marginBottom: 22,
   },
   journeyTopRow: {
     flexDirection: "row",
-    alignItems: "center",
-    gap: 14,
-  },
-  journeyTextWrap: {
-    flex: 1,
+    justifyContent: "space-between",
+    alignItems: "flex-start",
+    marginBottom: 14,
   },
   journeyLabel: {
     color: "#BFD0C7",
     fontSize: 12,
     fontWeight: "700",
-    marginBottom: 5,
+    marginBottom: 4,
   },
   journeyTitle: {
-    color: "#FFFFFF",
-    fontSize: 21,
+    color: COLORS.white,
+    fontSize: 20,
     fontWeight: "800",
   },
   activeGoalBadge: {
@@ -1436,846 +861,570 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: "700",
   },
-  journeyPeriod: {
-    color: "#D8E2DC",
-    fontSize: 13,
-    marginTop: 7,
-  },
-  progressCircle: {
-    width: 70,
-    height: 70,
-    borderRadius: 35,
-    borderWidth: 5,
-    borderColor: "#9FBAAC",
-    alignItems: "center",
-    justifyContent: "center",
-    flexDirection: "row",
-  },
-  progressNumber: {
-    color: "#FFFFFF",
-    fontSize: 20,
-    fontWeight: "800",
-  },
-  progressUnit: {
-    color: "#D8E2DC",
-    fontSize: 11,
-    marginTop: 6,
-  },
-  primaryButton: {
-    marginTop: 18,
-    height: 50,
-    borderRadius: 15,
-    backgroundColor: "#F2C96D",
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 8,
-  },
-  primaryButtonText: {
-    color: "#26372E",
-    fontSize: 15,
-    fontWeight: "800",
-  },
-  secondaryButton: {
-    backgroundColor: "#DDE6E0",
-  },
-  secondaryButtonText: {
-    color: "#315C4A",
-  },
-  emptyJourneyCard: {
-    backgroundColor: "#FFFFFF",
-    borderRadius: 22,
-    padding: 24,
-    alignItems: "center",
-    marginBottom: 28,
-    borderWidth: 1,
-    borderColor: "#E3E3DC",
-  },
-  emptyJourneyTitle: {
-    color: "#26372E",
-    fontSize: 17,
-    fontWeight: "800",
-    marginTop: 10,
-  },
-  emptyJourneyText: {
-    color: "#728078",
-    fontSize: 13,
-    lineHeight: 20,
-    textAlign: "center",
-    marginTop: 7,
-  },
-  sectionHeaderRow: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    marginBottom: 13,
-  },
-  sectionTitle: {
-    color: "#26372E",
-    fontSize: 18,
-    fontWeight: "800",
-  },
-  sectionCount: {
-    color: "#728078",
-    fontSize: 13,
-  },
-  essayList: {
-    gap: 14,
-  },
-  essayCard: {
-    backgroundColor: "#FFFFFF",
-    borderRadius: 21,
-    overflow: "hidden",
-    borderWidth: 1,
-    borderColor: "#E3E3DC",
-    flexDirection: "row",
-    minHeight: 154,
-  },
-  essayCardImage: {
-    width: 112,
-    height: "100%",
-    minHeight: 154,
-  },
-  essayCardPlaceholder: {
-    width: 112,
-    minHeight: 154,
-    backgroundColor: "#E4EBE6",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  essayCardBody: {
-    flex: 1,
-    padding: 15,
-  },
-  personaBadge: {
-    alignSelf: "flex-start",
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 5,
-    backgroundColor: "#E5EEE8",
-    paddingHorizontal: 9,
-    paddingVertical: 5,
-    borderRadius: 999,
-  },
-  personaBadgeText: {
-    color: "#315C4A",
-    fontSize: 11,
-    fontWeight: "800",
-  },
-  essayCardTitle: {
-    color: "#26372E",
-    fontSize: 17,
-    fontWeight: "800",
-    lineHeight: 23,
-    marginTop: 9,
-  },
-  essayCardPeriod: {
-    color: "#7B8881",
-    fontSize: 11,
-    marginTop: 6,
-  },
-  essayCardFooter: {
-    marginTop: "auto",
-    paddingTop: 10,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    gap: 8,
-  },
-  essayCardMeta: {
-    color: "#718078",
-    fontSize: 11,
-    flex: 1,
-  },
-  visibilityPill: {
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 99,
-    backgroundColor: "#F0F1EE",
-  },
-  visibilityPillPublic: {
-    backgroundColor: "#FFF0C9",
-  },
-  visibilityText: {
-    color: "#738078",
-    fontSize: 10,
-    fontWeight: "700",
-  },
-  visibilityTextPublic: {
-    color: "#87631F",
-  },
-  emptyShelf: {
-    alignItems: "center",
-    justifyContent: "center",
-    paddingVertical: 58,
-    paddingHorizontal: 25,
-    backgroundColor: "#EEEDE6",
-    borderRadius: 22,
-  },
-  emptyShelfTitle: {
-    color: "#44534B",
-    fontSize: 16,
-    fontWeight: "800",
-    marginTop: 12,
-  },
-  emptyShelfText: {
-    color: "#7B8781",
-    fontSize: 13,
-    lineHeight: 20,
-    textAlign: "center",
-    marginTop: 7,
-  },
-  pressed: {
-    opacity: 0.76,
-  },
-  disabled: {
-    opacity: 0.55,
-  },
-  modalBackdrop: {
-    flex: 1,
-    backgroundColor: "rgba(24, 35, 29, 0.48)",
-    alignItems: "center",
-    justifyContent: "center",
-    padding: 18,
-  },
-  personaOverlay: {
-    ...StyleSheet.absoluteFillObject,
-    zIndex: 50,
-    elevation: 50,
-    backgroundColor: "rgba(24, 35, 29, 0.52)",
-    alignItems: "center",
-    justifyContent: "center",
-    padding: 18,
-  },
-  personaModalCard: {
-    width: "100%",
-    maxWidth: 520,
-    maxHeight: "88%",
-    backgroundColor: "#F9F7F1",
-    borderRadius: 25,
-    padding: 19,
-  },
-  modalHeader: {
-    flexDirection: "row",
-    alignItems: "flex-start",
-    gap: 10,
-    marginBottom: 13,
-  },
-  modalHeaderTextWrap: {
-    flex: 1,
-  },
-  modalTitle: {
-    color: "#26372E",
-    fontSize: 21,
-    fontWeight: "800",
-    letterSpacing: -0.4,
-  },
-  modalSubtitle: {
-    color: "#728078",
-    fontSize: 13,
-    lineHeight: 19,
-    marginTop: 5,
-  },
-  iconButton: {
-    width: 42,
-    height: 42,
-    borderRadius: 21,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  personaOptionList: {
-    gap: 10,
-    paddingBottom: 5,
-  },
-  personaOption: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 12,
-    backgroundColor: "#FFFFFF",
-    borderWidth: 1,
-    borderColor: "#E2E3DC",
-    borderRadius: 18,
-    padding: 14,
-  },
-  personaOptionIcon: {
-    width: 47,
-    height: 47,
-    borderRadius: 15,
-    backgroundColor: "#E5EEE8",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  personaOptionTextWrap: {
-    flex: 1,
-  },
-  personaOptionTitle: {
-    color: "#26372E",
-    fontSize: 16,
-    fontWeight: "800",
-  },
-  personaOptionDescription: {
-    color: "#6F7D75",
-    fontSize: 12,
-    lineHeight: 18,
-    marginTop: 4,
-  },
-  busyRow: {
-    flexDirection: "row",
-    justifyContent: "center",
-    alignItems: "center",
-    gap: 9,
-    paddingTop: 14,
-  },
-  busyText: {
-    color: "#52635A",
-    fontSize: 13,
-  },
-  detailSafeArea: {
-    flex: 1,
-    backgroundColor: "#F8F5ED",
-  },
-  detailKeyboard: {
-    flex: 1,
-  },
-  detailHeader: {
-    height: 58,
-    flexDirection: "row",
-    alignItems: "center",
-    paddingHorizontal: 8,
-    borderBottomWidth: 1,
-    borderBottomColor: "#E3E1D9",
-    backgroundColor: "#F8F5ED",
-  },
-  detailHeaderTitle: {
-    flex: 1,
-    textAlign: "center",
-    color: "#26372E",
-    fontSize: 16,
-    fontWeight: "800",
-  },
-  detailScroll: {
-    flex: 1,
-  },
-  detailContent: {
-    paddingBottom: 140,
-  },
-  coverImage: {
-    width: "100%",
-    height: 270,
-  },
-  detailMetaRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    paddingHorizontal: 20,
-    paddingTop: 20,
-  },
-  detailPeriod: {
-    color: "#77847D",
-    fontSize: 12,
-  },
-  versionSection: {
-    padding: 20,
-    gap: 13,
-  },
-  versionGuide: {
-    color: "#728078",
-    fontSize: 13,
-    lineHeight: 20,
-    marginTop: -5,
-  },
-  versionCard: {
-    backgroundColor: "#FFFFFF",
-    borderRadius: 21,
-    borderWidth: 1,
-    borderColor: "#E0E1DA",
-    padding: 17,
-  },
-  versionCardTop: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-  },
-  versionNumberBadge: {
-    width: 34,
-    height: 26,
-    borderRadius: 8,
-    backgroundColor: "#283A31",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  versionNumberText: {
-    color: "#FFFFFF",
-    fontSize: 11,
-    fontWeight: "800",
-  },
-  versionTitle: {
-    color: "#26372E",
-    fontSize: 20,
-    fontWeight: "800",
-    lineHeight: 27,
-    marginTop: 15,
-  },
-  versionVerdict: {
-    color: "#806126",
-    fontSize: 13,
-    fontWeight: "800",
-    lineHeight: 20,
-    marginTop: 10,
-    backgroundColor: "#FFF3D5",
+  percentBadge: {
+    backgroundColor: COLORS.accent,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
     borderRadius: 12,
-    padding: 11,
   },
-  versionPreview: {
-    color: "#526159",
-    fontSize: 14,
-    lineHeight: 23,
-    marginTop: 12,
-  },
-  selectVersionButton: {
-    height: 45,
-    borderRadius: 14,
-    backgroundColor: "#315C4A",
-    alignItems: "center",
-    justifyContent: "center",
-    marginTop: 15,
-  },
-  selectVersionButtonText: {
-    color: "#FFFFFF",
-    fontSize: 14,
-    fontWeight: "800",
-  },
-  outlineButton: {
-    height: 50,
-    borderRadius: 15,
-    borderWidth: 1.5,
-    borderColor: "#315C4A",
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 8,
-  },
-  outlineButtonText: {
-    color: "#315C4A",
-    fontSize: 14,
-    fontWeight: "800",
-  },
-  editorSection: {
-    paddingHorizontal: 20,
-    paddingTop: 19,
-  },
-  changeAiButton: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    gap: 14,
-    backgroundColor: "#E8F0EB",
-    borderWidth: 1,
-    borderColor: "#C8D8CF",
-    borderRadius: 17,
-    paddingHorizontal: 16,
-    paddingVertical: 14,
-    marginBottom: 22,
-  },
-  changeAiButtonTextWrap: {
-    flex: 1,
-  },
-  changeAiButtonTitle: {
-    color: "#294A3B",
-    fontSize: 15,
-    fontWeight: "800",
-  },
-  changeAiButtonDescription: {
-    color: "#66766E",
-    fontSize: 12,
-    lineHeight: 18,
-    marginTop: 4,
-  },
-  inputLabel: {
-    color: "#536159",
-    fontSize: 12,
-    fontWeight: "800",
-    marginBottom: 7,
-  },
-  titleInput: {
-    backgroundColor: "#FFFFFF",
-    borderWidth: 1,
-    borderColor: "#DFE0D9",
-    borderRadius: 15,
-    color: "#26372E",
-    fontSize: 20,
-    fontWeight: "800",
-    paddingHorizontal: 15,
-    paddingVertical: 13,
-    marginBottom: 17,
-  },
-  contentInput: {
-    minHeight: 320,
-    backgroundColor: "#FFFFFF",
-    borderWidth: 1,
-    borderColor: "#DFE0D9",
-    borderRadius: 17,
-    color: "#35443C",
-    fontSize: 15,
-    lineHeight: 26,
-    padding: 16,
-  },
-  analysisSection: {
-    marginTop: 25,
-    gap: 12,
-  },
-  verdictCard: {
-    backgroundColor: "#2D4F40",
-    borderRadius: 17,
-    padding: 17,
-  },
-  verdictText: {
-    color: "#FFFFFF",
+  percentText: {
+    color: COLORS.textMain,
     fontSize: 16,
-    fontWeight: "800",
-    lineHeight: 24,
-  },
-  summaryText: {
-    color: "#536159",
-    fontSize: 14,
-    lineHeight: 22,
-  },
-  insightList: {
-    gap: 9,
-  },
-  insightCard: {
-    backgroundColor: "#FFFFFF",
-    borderRadius: 15,
-    padding: 14,
-    borderWidth: 1,
-    borderColor: "#E0E1DA",
-  },
-  insightKeyword: {
-    color: "#315C4A",
-    fontSize: 13,
     fontWeight: "900",
-    marginBottom: 5,
   },
-  insightDescription: {
-    color: "#596860",
-    fontSize: 13,
-    lineHeight: 20,
-  },
-  recommendationCard: {
+  progressInfoRow: {
     flexDirection: "row",
-    alignItems: "flex-start",
-    gap: 9,
-    backgroundColor: "#FFF0C9",
-    borderRadius: 15,
-    padding: 14,
+    justifyContent: "space-between",
+    marginBottom: 6,
   },
-  recommendationText: {
-    flex: 1,
-    color: "#6E521F",
-    fontSize: 13,
-    fontWeight: "700",
-    lineHeight: 20,
+  progressDescription: {
+    fontSize: 12,
+    color: "#D8E2DC",
+  },
+  progressCount: {
+    fontSize: 12,
+    fontWeight: "800",
+    color: COLORS.accent,
+  },
+  progressBarBackground: {
+    height: 7,
+    backgroundColor: "rgba(255, 255, 255, 0.2)",
+    borderRadius: 4,
+    overflow: "hidden",
+  },
+  progressBarFill: {
+    height: "100%",
+    backgroundColor: COLORS.accent,
+    borderRadius: 4,
   },
 
-  comicSection: {
-    gap: 14,
-    marginTop: 2,
-  },
-  comicHeaderRow: {
+  startWritingBtn: {
     flexDirection: "row",
-    alignItems: "flex-start",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 6,
+    paddingVertical: 14,
+    backgroundColor: COLORS.white,
+    borderRadius: 14,
+  },
+  startWritingBtnText: {
+    fontSize: 14,
+    fontWeight: "800",
+    color: COLORS.primary,
+  },
+
+  // 🪵 나무 책꽂이
+  bookshelfSection: {
+    marginBottom: 20,
+  },
+  bookshelfHeader: {
+    flexDirection: "row",
     justifyContent: "space-between",
-    gap: 12,
+    alignItems: "center",
+    marginBottom: 12,
   },
-  comicHeaderTextWrap: {
+  bookshelfTitle: {
+    fontSize: 17,
+    fontWeight: "800",
+    color: COLORS.textMain,
+  },
+  bookshelfCount: {
+    fontSize: 12,
+    fontWeight: "700",
+    color: COLORS.textSub,
+  },
+
+  woodCabinet: {
+    backgroundColor: COLORS.woodDark,
+    borderRadius: 18,
+    borderWidth: 3,
+    borderColor: COLORS.woodBorder,
+    overflow: "hidden",
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.18,
+    shadowRadius: 10,
+    elevation: 8,
+  },
+  woodTopFrame: {
+    height: 14,
+    backgroundColor: COLORS.woodMain,
+    borderBottomWidth: 2,
+    borderBottomColor: COLORS.woodBorder,
+  },
+  woodBottomFrame: {
+    height: 14,
+    backgroundColor: COLORS.woodMain,
+    borderTopWidth: 2,
+    borderTopColor: COLORS.woodBorder,
+  },
+
+  shelfTier: {
+    backgroundColor: "#3A2111",
+    justifyContent: "flex-end",
+  },
+  shelfBookRow: {
+    flexDirection: "row",
+    alignItems: "flex-end",
+    paddingHorizontal: 16,
+    paddingTop: 18,
+    gap: 10,
+  },
+
+  bookSpine: {
+    height: 165,
+    borderRadius: 4,
+    borderWidth: 1.5,
+    paddingVertical: 10,
+    paddingHorizontal: 2,
+    alignItems: "center",
+    justifyContent: "space-between",
+    shadowColor: "#000",
+    shadowOffset: { width: -2, height: 3 },
+    shadowOpacity: 0.35,
+    shadowRadius: 4,
+    elevation: 5,
+  },
+  bookPressed: {
+    transform: [{ translateY: -8 }],
+    opacity: 0.9,
+  },
+  bookGoldLine: {
+    width: "100%",
+    height: 3,
+    borderRadius: 1,
+  },
+
+  rotatedTitleContainer: {
     flex: 1,
+    width: 135,
+    height: 48,
+    justifyContent: "center",
+    alignItems: "center",
+    transform: [{ rotate: "90deg" }],
   },
-  comicEyebrow: {
-    color: "#7A6B55",
+  rotatedTitleText: {
     fontSize: 11,
+    fontWeight: "800",
+    textAlign: "center",
+    lineHeight: 14,
+  },
+  rotatedDateText: {
+    fontSize: 8,
+    fontWeight: "600",
+    marginTop: 2,
+    opacity: 0.85,
+  },
+
+  bookBottomInfo: {
+    width: "100%",
+    alignItems: "center",
+    gap: 4,
+  },
+  bookDurationText: {
+    fontSize: 9,
     fontWeight: "900",
     letterSpacing: 0.5,
   },
-  comicEpisodeTitle: {
-    color: "#26372E",
-    fontSize: 18,
-    fontWeight: "900",
-    lineHeight: 25,
-    marginTop: 4,
+
+  woodenPlank: {
+    height: 16,
+    backgroundColor: COLORS.woodMain,
+    borderTopWidth: 3,
+    borderTopColor: COLORS.woodLight,
+    borderBottomWidth: 2,
+    borderBottomColor: COLORS.woodBorder,
+    marginTop: 2,
   },
-  comedyStyleBadge: {
-    maxWidth: 112,
-    backgroundColor: "#283B32",
-    borderRadius: 999,
-    paddingHorizontal: 10,
-    paddingVertical: 7,
+  woodenPlankHighlight: {
+    height: 2,
+    backgroundColor: "rgba(255, 255, 255, 0.15)",
   },
-  comedyStyleText: {
-    color: "#FFFFFF",
-    fontSize: 10,
-    fontWeight: "800",
-    textAlign: "center",
-  },
-  comicGrid: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    borderWidth: 3,
-    borderColor: "#25211D",
-    borderRadius: 6,
-    overflow: "hidden",
-    backgroundColor: "#25211D",
-  },
-  comicPanel: {
-    width: "50%",
-    minWidth: 0,
-    minHeight: 285,
-    borderColor: "#25211D",
-    overflow: "hidden",
-    paddingHorizontal: 9,
-    paddingTop: 10,
-    paddingBottom: 9,
-    position: "relative",
-  },
-  comicMemeNote: {
-    position: "absolute",
-    top: 7,
-    left: 8,
-    zIndex: 3,
-    color: "#2C2925",
-    fontSize: 10,
-    fontWeight: "900",
-    transform: [{ rotate: "-3deg" }],
-  },
-  comicMemeNoteRed: {
-    color: "#D43B30",
-  },
-  comicMemeNoteBlue: {
-    color: "#326893",
-  },
-  comicMemeNoteGreen: {
-    color: "#397054",
-  },
-  comicMemeNoteYellow: {
-    color: "#876114",
-  },
-  comicEffectNote: {
-    position: "absolute",
-    top: 8,
-    right: 8,
-    zIndex: 3,
-    color: "#5D554D",
-    fontSize: 9,
-    fontWeight: "800",
-    transform: [{ rotate: "4deg" }],
-  },
-  comicSpeechBubble: {
-    minHeight: 57,
-    marginTop: 20,
-    marginHorizontal: 2,
-    backgroundColor: "#FFFDF8",
-    borderWidth: 2,
-    borderColor: "#25211D",
-    borderRadius: 18,
-    paddingHorizontal: 9,
-    paddingVertical: 8,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  comicDialogue: {
-    color: "#211E1A",
-    fontSize: 12,
-    fontWeight: "800",
-    lineHeight: 17,
-    textAlign: "center",
-  },
-  comicCharacterStage: {
-    flex: 1,
-    minHeight: 135,
-    alignItems: "center",
-    justifyContent: "center",
-    paddingTop: 3,
-    paddingBottom: 2,
-  },
-  comicCharacterImage: {
-    width: "96%",
-    height: 142,
-    alignSelf: "center",
-  },
-  comicCaption: {
-    minHeight: 36,
-    color: "#211E1A",
-    fontSize: 11,
-    fontWeight: "900",
-    lineHeight: 16,
-    textAlign: "center",
-    paddingHorizontal: 3,
-    paddingTop: 3,
-  },
-  comicHighlightCard: {
-    backgroundColor: "#2D4F40",
-    borderRadius: 17,
-    padding: 16,
-  },
-  comicHighlightLabel: {
-    color: "#BFD4C8",
-    fontSize: 10,
-    fontWeight: "900",
-    marginBottom: 6,
-  },
-  comicHighlightText: {
-    color: "#FFFFFF",
-    fontSize: 16,
-    fontWeight: "900",
-    lineHeight: 23,
-  },
-  comicNextEpisodeCard: {
-    flexDirection: "row",
-    alignItems: "flex-start",
-    gap: 10,
-    backgroundColor: "#FFF0C9",
-    borderRadius: 15,
-    padding: 14,
-  },
-  comicNextEpisodeTextWrap: {
-    flex: 1,
-  },
-  comicNextEpisodeLabel: {
-    color: "#80602A",
-    fontSize: 10,
-    fontWeight: "900",
-    marginBottom: 4,
-  },
-  comicNextEpisodeText: {
-    color: "#6E521F",
-    fontSize: 13,
-    fontWeight: "800",
-    lineHeight: 19,
-  },
-  comicSummaryText: {
-    color: "#66736C",
-    fontSize: 12,
-    lineHeight: 19,
-  },
-  actionRow: {
-    flexDirection: "row",
-    gap: 10,
-    marginTop: 22,
-  },
-  outlineActionButton: {
-    flex: 1,
-    height: 50,
-    borderRadius: 15,
-    borderWidth: 1.5,
-    borderColor: "#315C4A",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  outlineActionButtonText: {
-    color: "#315C4A",
-    fontWeight: "800",
-    fontSize: 14,
-  },
-  publishButton: {
-    flex: 1.5,
-    height: 50,
-    borderRadius: 15,
-    backgroundColor: "#315C4A",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  publishButtonText: {
-    color: "#FFFFFF",
-    fontWeight: "800",
-    fontSize: 14,
-  },
-  recordsSection: {
-    marginTop: 28,
+
+  emptyNotice: {
+    paddingVertical: 50,
     paddingHorizontal: 20,
+    alignItems: "center",
   },
-  recordsHeader: {
+  emptyNoticeText: {
+    color: "#C2A38E",
+    fontSize: 13,
+    textAlign: "center",
+  },
+
+  // ✍️ 에세이 집필 편집 모달 스타일 (상단 뒤로가기 위치 및 터치 보정)
+  screenHeaderBar: {
+    minHeight: 56,
+    paddingHorizontal: 16,
+    paddingTop: 8,
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    paddingVertical: 16,
-    borderTopWidth: 1,
     borderBottomWidth: 1,
-    borderColor: "#DFDED7",
+    borderBottomColor: COLORS.border,
+    backgroundColor: "#F9F7F1",
   },
-  recordsCount: {
-    color: "#78847D",
-    fontSize: 12,
-    marginTop: 4,
+  backButtonTouch: {
+    padding: 6,
+    justifyContent: "center",
+    alignItems: "center",
   },
-  recordList: {
-    gap: 12,
-    paddingTop: 14,
+  screenHeaderTitle: {
+    fontSize: 16,
+    fontWeight: "800",
+    color: COLORS.textMain,
   },
-  recordCard: {
+  editorImageFrame: {
+    width: "100%",
+    height: 220,
+    backgroundColor: COLORS.border,
+  },
+  editorCoverImage: {
+    width: "100%",
+    height: "100%",
+    resizeMode: "cover",
+  },
+  personaBadgeTag: {
     flexDirection: "row",
-    gap: 11,
-    backgroundColor: "#FFFFFF",
-    borderRadius: 17,
-    padding: 14,
-    borderWidth: 1,
-    borderColor: "#E1E1DA",
-  },
-  recordIndex: {
-    width: 28,
-    height: 28,
+    alignItems: "center",
+    gap: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    backgroundColor: COLORS.primaryLight,
     borderRadius: 14,
-    backgroundColor: "#E4ECE7",
+  },
+  personaBadgeTagText: {
+    fontSize: 12,
+    fontWeight: "800",
+    color: COLORS.primary,
+  },
+  reAiCard: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    padding: 16,
+    backgroundColor: COLORS.primaryLight,
+    borderRadius: 16,
+    marginBottom: 20,
+  },
+  reAiTitle: {
+    fontSize: 14,
+    fontWeight: "800",
+    color: COLORS.primary,
+  },
+  reAiSub: {
+    fontSize: 11,
+    color: COLORS.textSub,
+    marginTop: 2,
+  },
+  inputSectionLabel: {
+    fontSize: 12,
+    fontWeight: "700",
+    color: COLORS.textSub,
+    marginBottom: 6,
+  },
+  editorTitleInput: {
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+    backgroundColor: COLORS.white,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: 16,
+    fontSize: 18,
+    fontWeight: "800",
+    color: COLORS.textMain,
+    marginBottom: 16,
+  },
+  editorBodyInput: {
+    minHeight: 180,
+    padding: 16,
+    backgroundColor: COLORS.white,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: 16,
+    fontSize: 14,
+    lineHeight: 22,
+    color: COLORS.textMain,
+    marginBottom: 20,
+  },
+
+  aiInsightBox: {
+    padding: 16,
+    backgroundColor: "#F3F1E7",
+    borderRadius: 16,
+    marginBottom: 16,
+  },
+  aiInsightTitle: {
+    fontSize: 15,
+    fontWeight: "800",
+    color: COLORS.textMain,
+    marginBottom: 4,
+  },
+  aiInsightSub: {
+    fontSize: 12,
+    color: COLORS.textSub,
+    lineHeight: 18,
+    marginBottom: 14,
+  },
+  insightCardItem: {
+    padding: 12,
+    backgroundColor: COLORS.white,
+    borderRadius: 12,
+    marginBottom: 8,
+  },
+  insightCardTitle: {
+    fontSize: 13,
+    fontWeight: "800",
+    color: COLORS.primary,
+    marginBottom: 2,
+  },
+  insightCardDesc: {
+    fontSize: 11,
+    color: COLORS.textSub,
+    lineHeight: 16,
+  },
+
+  recordsFoldHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.border,
+  },
+  recordsFoldTitle: {
+    fontSize: 15,
+    fontWeight: "800",
+    color: COLORS.textMain,
+  },
+  recordsFoldCount: {
+    fontSize: 11,
+    color: COLORS.textMuted,
+    marginTop: 2,
+  },
+  recordItemCard: {
+    padding: 14,
+    backgroundColor: COLORS.white,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: 16,
+  },
+  recordIndexBadge: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: COLORS.primaryLight,
     alignItems: "center",
     justifyContent: "center",
   },
   recordIndexText: {
-    color: "#315C4A",
     fontSize: 12,
-    fontWeight: "900",
-  },
-  recordBody: {
-    flex: 1,
-  },
-  recordTitle: {
-    color: "#2A3931",
-    fontSize: 15,
     fontWeight: "800",
+    color: COLORS.primary,
   },
-  recordMeta: {
-    color: "#849089",
+  recordItemTitle: {
+    fontSize: 13,
+    fontWeight: "800",
+    color: COLORS.textMain,
+  },
+  recordItemMeta: {
+    fontSize: 10,
+    color: COLORS.textMuted,
+    marginTop: 2,
+  },
+  recordItemEmotion: {
     fontSize: 11,
+    fontWeight: "700",
+    color: COLORS.pink,
     marginTop: 4,
   },
-  recordEmotion: {
-    color: "#7B5D24",
+  recordItemContent: {
     fontSize: 12,
-    fontWeight: "700",
-    marginTop: 8,
+    color: COLORS.textSub,
+    marginTop: 4,
+    lineHeight: 17,
   },
-  recordContent: {
-    color: "#56645C",
-    fontSize: 13,
-    lineHeight: 20,
-    marginTop: 7,
+
+  submitWritingBtn: {
+    paddingVertical: 16,
+    backgroundColor: COLORS.primary,
+    borderRadius: 16,
+    alignItems: "center",
+    marginTop: 24,
   },
-  recordPhotoRow: {
-    gap: 8,
-    paddingTop: 10,
+  submitWritingBtnText: {
+    fontSize: 15,
+    fontWeight: "800",
+    color: COLORS.white,
   },
-  recordPhoto: {
-    width: 92,
-    height: 92,
-    borderRadius: 12,
+
+  // 🎭 페르소나 선택 팝업
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: "rgba(38, 55, 46, 0.55)",
+    justifyContent: "center",
+    alignItems: "center",
+    paddingHorizontal: 20,
   },
-  actionBusyOverlay: {
+  modalBackdrop: {
     ...StyleSheet.absoluteFillObject,
-    backgroundColor: "rgba(29, 47, 38, 0.72)",
+  },
+  personaPopupCard: {
+    width: "100%",
+    maxWidth: 420,
+    backgroundColor: "#FBF9F3",
+    borderRadius: 22,
+    padding: 20,
+  },
+  personaPopupTitle: {
+    fontSize: 18,
+    fontWeight: "800",
+    color: COLORS.textMain,
+  },
+  personaPopupSub: {
+    fontSize: 12,
+    color: COLORS.textSub,
+    marginTop: 2,
+  },
+  personaSelectItem: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    padding: 14,
+    backgroundColor: COLORS.white,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: 16,
+  },
+  personaIconCircle: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    backgroundColor: COLORS.primaryLight,
     alignItems: "center",
     justifyContent: "center",
-    gap: 12,
   },
-  actionBusyText: {
-    color: "#FFFFFF",
+  personaSelectTitle: {
     fontSize: 14,
-    fontWeight: "700",
+    fontWeight: "800",
+    color: COLORS.textMain,
+  },
+  personaSelectSub: {
+    fontSize: 11,
+    color: COLORS.textSub,
+    marginTop: 2,
+  },
+
+  // 📖 완결된 에세이 펼침 모달
+  bookOpenCard: {
+    width: "100%",
+    maxWidth: 420,
+    maxHeight: "82%",
+    backgroundColor: "#FBF9F3",
+    borderRadius: 22,
+    borderWidth: 2,
+    borderColor: COLORS.border,
+    padding: 22,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.25,
+    shadowRadius: 15,
+    elevation: 12,
+  },
+  bookOpenContent: {
+    paddingBottom: 10,
+  },
+  bookOpenHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 8,
+  },
+  bookOpenCaption: {
+    fontSize: 12,
+    fontWeight: "800",
+    color: COLORS.primary,
+  },
+  bookOpenTitle: {
+    fontSize: 22,
+    fontWeight: "800",
+    color: COLORS.textMain,
+    marginBottom: 6,
+  },
+  modalGoalBadge: {
+    alignSelf: "flex-start",
+    backgroundColor: COLORS.primaryLight,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+    marginBottom: 6,
+  },
+  modalGoalText: {
+    fontSize: 11,
+    fontWeight: "800",
+    color: COLORS.primary,
+  },
+  bookOpenDate: {
+    fontSize: 11,
+    color: COLORS.textMuted,
+  },
+  divider: {
+    height: 1,
+    backgroundColor: COLORS.border,
+    marginVertical: 16,
+  },
+  bookOpenBody: {
+    fontSize: 15,
+    lineHeight: 26,
+    color: COLORS.textMain,
+    marginBottom: 24,
+  },
+
+  // [저장] / [공개하기] 버튼 Row
+  saveShareActionRow: {
+    flexDirection: "row",
+    gap: 12,
+    marginBottom: 12,
+  },
+  saveBtn: {
+    flex: 1,
+    minHeight: 48,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: COLORS.white,
+    borderWidth: 1.5,
+    borderColor: COLORS.primary,
+    borderRadius: 14,
+  },
+  saveBtnText: {
+    fontSize: 14,
+    fontWeight: "800",
+    color: COLORS.primary,
+  },
+  publishBtn: {
+    flex: 1,
+    minHeight: 48,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: COLORS.primary,
+    borderRadius: 14,
+  },
+  publishBtnText: {
+    fontSize: 14,
+    fontWeight: "800",
+    color: COLORS.white,
+  },
+
+  closeButton: {
+    minHeight: 48,
+    backgroundColor: "#E2E3DC",
+    borderRadius: 14,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  closeButtonText: {
+    color: COLORS.textMain,
+    fontSize: 14,
+    fontWeight: "800",
   },
 });
