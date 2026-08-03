@@ -2,23 +2,24 @@ import Ionicons from "@expo/vector-icons/Ionicons";
 import { router } from "expo-router";
 import React, { useState } from "react";
 import {
-    ActivityIndicator,
-    Alert,
-    Modal,
-    Pressable,
-    ScrollView,
-    StyleSheet,
-    Text,
-    TextInput,
-    View,
+  ActivityIndicator,
+  Alert,
+  Modal,
+  Platform,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import {
-    deleteAccount,
-    exportMyRecords,
-    requestPasswordReset,
-    signOut,
-    updatePassword,
+  deleteAccount,
+  exportMyRecords,
+  requestPasswordReset,
+  signOut,
+  updatePassword,
 } from "../../services/auth.service";
 
 const COLORS = {
@@ -96,26 +97,60 @@ export default function AccountScreen() {
   };
 
   // 3. 로그아웃
-  const handleLogout = () => {
-    Alert.alert("로그아웃", "정말 로그아웃하시겠어요?", [
-      { text: "취소", style: "cancel" },
+  const executeLogout = async () => {
+  try {
+    setLoading(true);
+
+    await signOut();
+
+    router.replace("/(auth)/login" as any);
+  } catch (error) {
+    console.error("로그아웃 실패:", error);
+
+    if (Platform.OS === "web") {
+      window.alert("로그아웃에 실패했습니다. 다시 시도해 주세요.");
+    } else {
+      Alert.alert(
+        "로그아웃 실패",
+        "다시 시도해 주세요.",
+      );
+    }
+  } finally {
+    setLoading(false);
+  }
+};
+
+const handleLogout = () => {
+  if (Platform.OS === "web") {
+    const confirmed = window.confirm(
+      "정말 로그아웃하시겠어요?",
+    );
+
+    if (confirmed) {
+      void executeLogout();
+    }
+
+    return;
+  }
+
+  Alert.alert(
+    "로그아웃",
+    "정말 로그아웃하시겠어요?",
+    [
+      {
+        text: "취소",
+        style: "cancel",
+      },
       {
         text: "로그아웃",
         style: "destructive",
-        onPress: async () => {
-          try {
-            setLoading(true);
-            await signOut();
-            router.replace("/(auth)/login" as any);
-          } catch (error) {
-            Alert.alert("로그아웃 실패", "다시 시도해 주세요.");
-          } finally {
-            setLoading(false);
-          }
+        onPress: () => {
+          void executeLogout();
         },
       },
-    ]);
-  };
+    ],
+  );
+};
 
   // 4. 회원 탈퇴
   const handleDeleteAccount = () => {

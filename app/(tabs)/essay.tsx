@@ -967,6 +967,18 @@ export default function EssayScreen() {
     return MIN_HEIGHT + (Math.abs(hash) % HEIGHT_RANGE);
   };
 
+  const getBookSpineTitle = (title: string) => {
+    const normalized = String(title ?? "")
+    .replace(/\s+/g, " ")
+    .trim();
+      
+    if (normalized.length <= 11) {
+      return normalized;
+    }
+      
+    return `${normalized.slice(0, 11)}…`;
+  };
+
   const shelves = useMemo<CompletedEssay[][]>(() => {
     const shelfList: CompletedEssay[][] = [];
     let currentShelf: CompletedEssay[] = [];
@@ -1267,120 +1279,220 @@ export default function EssayScreen() {
   };
 
   // 🚀 에세이 집필 완료 → 실제 DB 저장
-  const handleFinishWritingEssay = () => {
-    if (!draftEssay || !journey) return;
+  // 실제 에세이 저장 처리
+const executeFinishWritingEssay = async () => {
+  if (!draftEssay || !journey || finishing) {
+    return;
+  }
 
-    if (!draftEssay.title || !draftEssay.content) {
-      Alert.alert("아직 완성되지 않았어요", "먼저 AI 역할을 선택해 분석 글을 생성해주세요.");
-      return;
+  setFinishing(true);
+
+  try {
+    const {
+      data: { user },
+      error: userError,
+    } = await supabase.auth.getUser();
+
+    if (userError) {
+      throw userError;
     }
 
-    Alert.alert(
-      "에세이 집필 완료",
-      "책장에 꽂은 뒤에는 같은 여정으로 다시 만들 수 없습니다.\n현재 분석 결과로 완료하시겠습니까?",
-      [
-        { text: "취소", style: "cancel" },
-        {
-          text: "완료하기",
-          onPress: async () => {
-            setFinishing(true);
-            try {
-              const { data: { user } } = await supabase.auth.getUser();
-              if (!user) throw new Error("로그인이 필요합니다.");
+    if (!user) {
+      throw new Error("로그인이 필요합니다.");
+    }
 
-              const coverPath = await resolveEssayCoverPath(user.id);
-              const selectedPayload = {
-                persona: draftEssay.persona,
-                summary: draftEssay.summary,
-                verdict: draftEssay.verdict,
-                insights: draftEssay.insights,
-                aiRecommendation: draftEssay.aiRecommendation,
-                comic: draftEssay.comic,
-                goal: draftEssay.goal ?? null,
-                dateRangeText: draftEssay.dateRangeText,
-                durationDays: draftEssay.durationDays,
-                sourcePhotoCount: draftEssay.records.reduce(
-                  (count, record) => count + record.photoUrls.length,
-                  0,
-                ),
-              };
+    const coverPath =
+      await resolveEssayCoverPath(user.id);
 
-              const { data: insertedEssay, error: insertError } = await supabase
-                .from("essays")
-                .insert({
-                  user_id: user.id,
-                  journey_id: journey.id,
-                  title: draftEssay.title,
-                  content: draftEssay.content,
-                  cover_photo_path: coverPath,
-                  visibility: "private",
-                  status: "completed",
-                  essay_type: "taste_report",
-                  generation_count: 1,
-                  selected_version_no: 1,
-                  generation_state: "idle",
-                  published_at: null,
-                  selected_payload: selectedPayload,
-                })
-                .select("id")
-                .single();
+    const selectedPayload = {
+      persona: draftEssay.persona,
+      summary: draftEssay.summary,
+      verdict: draftEssay.verdict,
+      insights: draftEssay.insights,
+      aiRecommendation:
+        draftEssay.aiRecommendation,
+      comic: draftEssay.comic,
+      goal: draftEssay.goal ?? null,
+      dateRangeText:
+        draftEssay.dateRangeText,
+      durationDays:
+        draftEssay.durationDays,
+      sourcePhotoCount:
+        draftEssay.records.reduce(
+          (count, record) =>
+            count + record.photoUrls.length,
+          0,
+        ),
+    };
 
-              if (insertError) throw insertError;
+    const {
+      data: insertedEssay,
+      error: insertError,
+    } = await supabase
+      .from("essays")
+      .insert({
+        user_id: user.id,
+        journey_id: journey.id,
+        title: draftEssay.title.trim(),
+        content: draftEssay.content.trim(),
+        cover_photo_path: coverPath,
+        visibility: "private",
+        status: "completed",
+        essay_type: "taste_report",
+        generation_count: 1,
+        selected_version_no: 1,
+        generation_state: "idle",
+        published_at: null,
+        selected_payload: selectedPayload,
+      })
+      .select("id")
+      .single();
 
-              const { error: essayItemsError } = await supabase
-                .from("essay_items")
-                .insert(
-                  draftEssay.records.map((record, index) => ({
-                    essay_id: insertedEssay.id,
-                    record_id: record.id,
-                    sort_order: index,
-                    ai_bridge_text: "",
-                  })),
-                );
+    if (insertError) {
+      throw insertError;
+    }
 
-              if (essayItemsError) {
-                await supabase.from("essays").delete().eq("id", insertedEssay.id);
-                throw new Error(
-                  `에세이와 원본 기록을 연결하지 못했습니다: ${essayItemsError.message}`,
-                );
-              }
+    if (!insertedEssay) {
+      throw new Error(
+        "저장된 에세이 정보를 확인하지 못했습니다.",
+      );
+    }
 
-              const { error: journeyCompleteError } = await supabase.rpc(
-                "complete_journey_after_essay",
-                {
-                  p_journey_id: journey.id,
-                  p_essay_id: insertedEssay.id,
-                },
-              );
+    const { error: essayItemsError } =
+      await supabase
+        .from("essay_items")
+        .insert(
+          draftEssay.records.map(
+            (record, index) => ({
+              essay_id: insertedEssay.id,
+              record_id: record.id,
+              sort_order: index,
+              ai_bridge_text: "",
+            }),
+          ),
+        );
 
-              if (journeyCompleteError) {
-                throw new Error(
-                  `에세이는 저장됐지만 여정 종료에 실패했습니다: ${journeyCompleteError.message}`,
-                );
-              }
+    if (essayItemsError) {
+      await supabase
+        .from("essays")
+        .delete()
+        .eq("id", insertedEssay.id);
 
-              setPersonaWriterModalVisible(false);
-              setPersonaPickerVisible(false);
-              setPersonaPickerMode(null);
-              setDraftEssay(null);
-              await loadData();
+      throw new Error(
+        `에세이와 원본 기록을 연결하지 못했습니다: ${essayItemsError.message}`,
+      );
+    }
 
-              Alert.alert(
-                "집필 완료!",
-                "선택한 분석 결과가 서재에 저장되고 여정이 종료됐습니다. 📚",
-              );
-            } catch (error) {
-              const message = getErrorMessage(error, "에세이를 저장하지 못했습니다.");
-              console.error("에세이 저장 실패 상세:", error);
-              Alert.alert("저장 실패", message);
-            } finally {
-              setFinishing(false);
-            }
-          },
-        },
-      ],
+    const {
+      error: journeyCompleteError,
+    } = await supabase.rpc(
+      "complete_journey_after_essay",
+      {
+        p_journey_id: journey.id,
+        p_essay_id: insertedEssay.id,
+      },
     );
-  };
+
+    if (journeyCompleteError) {
+      throw new Error(
+        `에세이는 저장됐지만 여정 종료에 실패했습니다: ${journeyCompleteError.message}`,
+      );
+    }
+
+    setPersonaWriterModalVisible(false);
+    setPersonaPickerVisible(false);
+    setPersonaPickerMode(null);
+    setDraftEssay(null);
+
+    await loadData();
+
+    if (Platform.OS === "web") {
+      window.alert(
+        "집필이 완료되었습니다!\n선택한 분석 결과가 서재에 저장되고 여정이 종료됐습니다.",
+      );
+    } else {
+      Alert.alert(
+        "집필 완료!",
+        "선택한 분석 결과가 서재에 저장되고 여정이 종료됐습니다. 📚",
+      );
+    }
+  } catch (error) {
+    const message = getErrorMessage(
+      error,
+      "에세이를 저장하지 못했습니다.",
+    );
+
+    console.error(
+      "에세이 저장 실패 상세:",
+      error,
+    );
+
+    if (Platform.OS === "web") {
+      window.alert(`저장 실패\n${message}`);
+    } else {
+      Alert.alert("저장 실패", message);
+    }
+  } finally {
+    setFinishing(false);
+  }
+};
+
+// 집필 완료 버튼 클릭 처리
+const handleFinishWritingEssay = () => {
+  if (!draftEssay || !journey) {
+    return;
+  }
+
+  if (
+    !draftEssay.title.trim() ||
+    !draftEssay.content.trim()
+  ) {
+    const message =
+      "먼저 AI 역할을 선택해 분석 글을 생성해주세요.";
+
+    if (Platform.OS === "web") {
+      window.alert(message);
+    } else {
+      Alert.alert(
+        "아직 완성되지 않았어요",
+        message,
+      );
+    }
+
+    return;
+  }
+
+  const confirmMessage =
+    "책장에 꽂은 뒤에는 같은 여정으로 다시 만들 수 없습니다.\n현재 분석 결과로 완료하시겠습니까?";
+
+  if (Platform.OS === "web") {
+    const confirmed =
+      window.confirm(confirmMessage);
+
+    if (confirmed) {
+      void executeFinishWritingEssay();
+    }
+
+    return;
+  }
+
+  Alert.alert(
+    "에세이 집필 완료",
+    confirmMessage,
+    [
+      {
+        text: "취소",
+        style: "cancel",
+      },
+      {
+        text: "완료하기",
+        onPress: () => {
+          void executeFinishWritingEssay();
+        },
+      },
+    ],
+  );
+};
 
   const shareEssayAsText = async (essay: CompletedEssay) => {
     await Share.share({
@@ -1654,8 +1766,15 @@ export default function EssayScreen() {
                           <View style={[styles.bookGoldLine, { backgroundColor: theme.line }]} />
 
                           <View style={styles.rotatedTitleContainer}>
-                            <Text numberOfLines={2} style={[styles.rotatedTitleText, { color: theme.text }]}>
-                              {item.title}
+                            <Text 
+                              numberOfLines={1} 
+                              ellipsizeMode="clip" 
+                              style={[
+                                styles.rotatedTitleText,
+                                { color: theme.text }
+                              ]}
+                            >
+                              {getBookSpineTitle(item.title)}
                             </Text>
                             <Text style={[styles.rotatedDateText, { color: theme.text }]}>
                               {item.dateRangeText}
@@ -1956,83 +2075,122 @@ export default function EssayScreen() {
         <View style={styles.modalOverlay}>
           <Pressable style={styles.modalBackdrop} onPress={() => setSelectedEssay(null)} />
           <View style={styles.bookOpenCard}>
-            {selectedEssay && (
-              <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.bookOpenContent}>
-                <View style={styles.bookOpenHeader}>
-                  <Text style={styles.bookOpenCaption}>✨ 완성된 완결 에세이</Text>
-                  <Pressable onPress={() => setSelectedEssay(null)} hitSlop={10}>
-                    <Ionicons name="close" size={22} color={COLORS.textSub} />
-                  </Pressable>
-                </View>
+  {selectedEssay && (
+    <>
+      <ScrollView
+        style={styles.bookOpenScroll}
+        showsVerticalScrollIndicator
+        nestedScrollEnabled
+        contentContainerStyle={styles.bookOpenContent}
+      >
+        <View style={styles.bookOpenHeader}>
+          <Text style={styles.bookOpenCaption}>
+            ✨ 완성된 완결 에세이
+          </Text>
 
-                {selectedEssay.coverImage && (
-                  <Image source={{ uri: selectedEssay.coverImage }} style={{ width: "100%", height: 170, borderRadius: 14, marginBottom: 14 }} />
-                )}
+          <Pressable
+            onPress={() => setSelectedEssay(null)}
+            hitSlop={10}
+          >
+            <Ionicons
+              name="close"
+              size={22}
+              color={COLORS.textSub}
+            />
+          </Pressable>
+        </View>
 
-                <Text style={styles.bookOpenTitle}>{selectedEssay.title}</Text>
-                
-                {selectedEssay.journeyGoal && (
-                  <View style={styles.modalGoalBadge}>
-                    <Text style={styles.modalGoalText}>🎯 여정 목표: {selectedEssay.journeyGoal}</Text>
-                  </View>
-                )}
+        {selectedEssay.coverImage ? (
+          <Image
+            source={{ uri: selectedEssay.coverImage }}
+            style={styles.bookOpenCover}
+          />
+        ) : null}
 
-                <Text style={styles.bookOpenDate}>
-                  여정 기간: {selectedEssay.dateRangeText} ({selectedEssay.durationDays}일간)
-                </Text>
+        <Text
+          style={styles.bookOpenTitle}
+          numberOfLines={2}
+          ellipsizeMode="tail"
+        >
+          {selectedEssay.title}
+        </Text>
 
-                <View style={styles.divider} />
-
-                {selectedEssay.comic ? (
-                  <View
-                    ref={sharedComicRef}
-                    collapsable={false}
-                    renderToHardwareTextureAndroid
-                    style={styles.comicShareCapture}
-                  >
-                    <ComicStrip comic={selectedEssay.comic} compact />
-                  </View>
-                ) : null}
-
-                <Text style={styles.bookOpenBody}>{selectedEssay.content}</Text>
-
-                <View style={styles.saveShareActionRow}>
-                  <Pressable
-                    style={styles.saveBtn}
-                    onPress={() => Alert.alert("이미지 저장", "에세이가 이미지 앨범에 저장되었습니다.")}
-                  >
-                    <Text style={styles.saveBtnText}>저장</Text>
-                  </Pressable>
-
-                  <Pressable
-                    style={[
-                      styles.publishBtn,
-                      sharingEssayId === selectedEssay.id &&
-                        styles.shareButtonDisabled,
-                    ]}
-                    onPress={() => void handleShareEssay(selectedEssay)}
-                    disabled={sharingEssayId === selectedEssay.id}
-                  >
-                    {sharingEssayId === selectedEssay.id ? (
-                      <View style={styles.shareButtonLoadingContent}>
-                        <ActivityIndicator size="small" color={COLORS.white} />
-                        <Text style={styles.publishBtnText}>이미지 만드는 중</Text>
-                      </View>
-                    ) : (
-                      <Text style={styles.publishBtnText}>공유하기</Text>
-                    )}
-                  </Pressable>
-                </View>
-
-                <Pressable
-                  style={styles.closeButton}
-                  onPress={() => setSelectedEssay(null)}
-                >
-                  <Text style={styles.closeButtonText}>책 덮기</Text>
-                </Pressable>
-              </ScrollView>
-            )}
+        {selectedEssay.journeyGoal ? (
+          <View style={styles.modalGoalBadge}>
+            <Text style={styles.modalGoalText}>
+              🎯 여정 목표: {selectedEssay.journeyGoal}
+            </Text>
           </View>
+        ) : null}
+
+        <Text style={styles.bookOpenDate}>
+          여정 기간: {selectedEssay.dateRangeText}
+          {" "}
+          ({selectedEssay.durationDays}일간)
+        </Text>
+
+        <View style={styles.divider} />
+
+        {selectedEssay.comic ? (
+          <View
+            ref={sharedComicRef}
+            collapsable={false}
+            renderToHardwareTextureAndroid
+            style={styles.comicShareCapture}
+          >
+            <ComicStrip
+              comic={selectedEssay.comic}
+              compact
+            />
+          </View>
+        ) : null}
+
+        <Text selectable style={styles.bookOpenBody}>
+          {selectedEssay.content}
+        </Text>
+      </ScrollView>
+
+      <View style={styles.bookOpenActions}>
+        <View style={styles.saveShareActionRow}>
+  <Pressable
+    style={[
+      styles.publishBtn,
+      sharingEssayId === selectedEssay.id &&
+        styles.shareButtonDisabled,
+    ]}
+    onPress={() => void handleShareEssay(selectedEssay)}
+    disabled={sharingEssayId === selectedEssay.id}
+  >
+    {sharingEssayId === selectedEssay.id ? (
+      <View style={styles.shareButtonLoadingContent}>
+        <ActivityIndicator
+          size="small"
+          color={COLORS.white}
+        />
+        <Text style={styles.publishBtnText}>
+          이미지 만드는 중
+        </Text>
+      </View>
+    ) : (
+      <Text style={styles.publishBtnText}>
+        공유하기
+      </Text>
+    )}
+  </Pressable>
+</View>
+
+        <Pressable
+          style={styles.closeButton}
+          onPress={() => setSelectedEssay(null)}
+        >
+          <Text style={styles.closeButtonText}>
+            책 덮기
+          </Text>
+        </Pressable>
+      </View>
+    </>
+  )}
+</View>
         </View>
       </Modal>
     </SafeAreaView>
@@ -2265,13 +2423,13 @@ const styles = StyleSheet.create({
   },
 
   rotatedTitleContainer: {
-    flex: 1,
-    width: 135,
-    height: 48,
-    justifyContent: "center",
-    alignItems: "center",
-    transform: [{ rotate: "90deg" }],
-  },
+  flex: 1,
+  width: 125,
+  height: 42,
+  justifyContent: "center",
+  alignItems: "center",
+  transform: [{ rotate: "90deg" }],
+},
   rotatedTitleText: {
     fontSize: 11,
     fontWeight: "800",
@@ -2834,23 +2992,41 @@ const styles = StyleSheet.create({
   },
 
   bookOpenCard: {
-    width: "100%",
-    maxWidth: 420,
-    maxHeight: "82%",
-    backgroundColor: "#FBF9F3",
-    borderRadius: 22,
-    borderWidth: 2,
-    borderColor: COLORS.border,
-    padding: 22,
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 10 },
-    shadowOpacity: 0.25,
-    shadowRadius: 15,
-    elevation: 12,
-  },
+  width: "100%",
+  maxWidth: 520,
+  height: "88%",
+  maxHeight: 820,
+  backgroundColor: "#FBF9F3",
+  borderRadius: 22,
+  borderWidth: 2,
+  borderColor: COLORS.border,
+  overflow: "hidden",
+  shadowColor: "#000",
+  shadowOffset: { width: 0, height: 10 },
+  shadowOpacity: 0.25,
+  shadowRadius: 15,
+  elevation: 12,
+},
   bookOpenContent: {
-    paddingBottom: 10,
-  },
+  paddingHorizontal: 22,
+  paddingTop: 22,
+  paddingBottom: 30,
+},
+bookOpenActions: {
+  flexShrink: 0,
+  paddingHorizontal: 22,
+  paddingTop: 14,
+  paddingBottom: 18,
+  borderTopWidth: 1,
+  borderTopColor: COLORS.border,
+  backgroundColor: "#FBF9F3",
+},
+bookOpenCover: {
+  width: "100%",
+  height: 170,
+  borderRadius: 14,
+  marginBottom: 14,
+},
   bookOpenHeader: {
     flexDirection: "row",
     justifyContent: "space-between",
@@ -2863,11 +3039,12 @@ const styles = StyleSheet.create({
     color: COLORS.primary,
   },
   bookOpenTitle: {
-    fontSize: 22,
-    fontWeight: "800",
-    color: COLORS.textMain,
-    marginBottom: 6,
-  },
+  fontSize: 22,
+  lineHeight: 29,
+  fontWeight: "800",
+  color: COLORS.textMain,
+  marginBottom: 8,
+},
   modalGoalBadge: {
     alignSelf: "flex-start",
     backgroundColor: COLORS.primaryLight,
@@ -2891,12 +3068,14 @@ const styles = StyleSheet.create({
     marginVertical: 16,
   },
   bookOpenBody: {
-    fontSize: 15,
-    lineHeight: 28,
-    color: COLORS.textMain,
-    marginBottom: 24,
-  },
-
+  fontSize: 15,
+  lineHeight: 28,
+  color: COLORS.textMain,
+},
+bookOpenScroll: {
+  flex: 1,
+  minHeight: 0,
+},
   comicShareCapture: {
     width: "100%",
     aspectRatio: 4 / 5,
@@ -2914,10 +3093,10 @@ const styles = StyleSheet.create({
   },
 
   saveShareActionRow: {
-    flexDirection: "row",
-    gap: 12,
-    marginBottom: 12,
-  },
+  flexDirection: "row",
+  gap: 12,
+  marginBottom: 10,
+},
   saveBtn: {
     flex: 1,
     minHeight: 48,
