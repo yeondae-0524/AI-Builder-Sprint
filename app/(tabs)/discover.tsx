@@ -529,6 +529,7 @@ function isFiniteNumber(value: unknown): value is number {
 
 function RecordLocationPickerMap({ center, pickedLocation, guideText, onSelect }: { center: Coordinate; pickedLocation: Coordinate | null; guideText: string; onSelect: (coordinate: Coordinate) => void; }) {
   const webViewRef = useRef<any>(null);
+  const iframeRef = useRef<any>(null);
   const mapReadyRef = useRef(false);
   const escapedGuideText = guideText.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
@@ -595,6 +596,21 @@ function RecordLocationPickerMap({ center, pickedLocation, guideText, onSelect }
       window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'recordLocationMapReady' }));
     });
   </script>
+  <script>
+    window.ReactNativeWebView =
+      window.ReactNativeWebView || {
+        postMessage: function (message) {
+          window.parent.postMessage(
+            {
+              source:
+                "discover-record-location-picker",
+              payload: message
+            },
+            "*"
+          );
+        }
+      };
+  </script>
 </body>
 </html>`, [center.lat, center.lng, escapedGuideText]);
 
@@ -625,35 +641,124 @@ const syncPickedLocation = useCallback(
   [pickedLatitude, pickedLongitude],
 );
 
+const handleRecordLocationMessage = useCallback(
+  (rawMessage: string) => {
+    try {
+      const message = JSON.parse(rawMessage) as {
+        type?: string;
+        lat?: number;
+        lng?: number;
+      };
+
+      if (message.type === "recordLocationMapReady") {
+        mapReadyRef.current = true;
+        syncPickedLocation(false);
+        return;
+      }
+
+      if (
+        message.type === "recordLocation" &&
+        isFiniteNumber(message.lat) &&
+        isFiniteNumber(message.lng)
+      ) {
+        onSelect({
+          lat: message.lat,
+          lng: message.lng,
+        });
+      }
+    } catch {
+      // 지도에서 전달된 다른 메시지는 무시한다.
+    }
+  },
+  [onSelect, syncPickedLocation],
+);
+
 useEffect(() => {
   syncPickedLocation(true);
 }, [syncPickedLocation]);
 
-  useEffect(() => { syncPickedLocation(true); }, [syncPickedLocation]);
+useEffect(() => {
+  if (Platform.OS !== "web") {
+    return;
+  }
 
-  return (
-    <WebView
-      ref={webViewRef}
-      originWhitelist={["*"]}
-      source={{ html }}
-      javaScriptEnabled
-      domStorageEnabled
-      mixedContentMode="always"
-      onLoadStart={() => { mapReadyRef.current = false; }}
-      onMessage={(event) => {
-        try {
-          const message = JSON.parse(event.nativeEvent.data);
-          if (message.type === "recordLocationMapReady") {
-            mapReadyRef.current = true; syncPickedLocation(false); return;
-          }
-          if (message.type === "recordLocation" && isFiniteNumber(message.lat) && isFiniteNumber(message.lng)) {
-            onSelect({ lat: message.lat, lng: message.lng });
-          }
-        } catch {}
-      }}
-      style={styles.recordLocationPickerMap}
-    />
+  const handleWebMessage = (event: MessageEvent) => {
+    if (
+      iframeRef.current?.contentWindow &&
+      event.source !== iframeRef.current.contentWindow
+    ) {
+      return;
+    }
+
+    const data = event.data as
+      | {
+          source?: string;
+          payload?: unknown;
+        }
+      | undefined;
+
+    if (
+      data?.source !==
+        "discover-record-location-picker" ||
+      typeof data.payload !== "string"
+    ) {
+      return;
+    }
+
+    handleRecordLocationMessage(data.payload);
+  };
+
+  window.addEventListener(
+    "message",
+    handleWebMessage,
   );
+
+  return () => {
+    window.removeEventListener(
+      "message",
+      handleWebMessage,
+    );
+  };
+}, [handleRecordLocationMessage]);
+
+if (Platform.OS === "web") {
+  return (
+    <View style={styles.recordLocationPickerMap}>
+      <iframe
+        ref={iframeRef}
+        title="발견 기록 장소 선택 지도"
+        srcDoc={html}
+        style={{
+          width: "100%",
+          height: "100%",
+          border: 0,
+          display: "block",
+        }}
+        allow="geolocation"
+      />
+    </View>
+  );
+}
+
+return (
+  <WebView
+    ref={webViewRef}
+    originWhitelist={["*"]}
+    source={{ html }}
+    javaScriptEnabled
+    domStorageEnabled
+    mixedContentMode="always"
+    onLoadStart={() => {
+      mapReadyRef.current = false;
+    }}
+    onMessage={(event) => {
+      handleRecordLocationMessage(
+        event.nativeEvent.data,
+      );
+    }}
+    style={styles.recordLocationPickerMap}
+  />
+);
 }
 
 function inferRecordCategory(text: string): string {
