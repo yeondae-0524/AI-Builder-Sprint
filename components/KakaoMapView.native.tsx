@@ -238,7 +238,7 @@ export function KakaoMapView({
             left: calc(100% + 3px);
             right: auto;
             bottom: auto;
-            z-index: 5;
+            z-index: 8;
             min-width: 28px;
             height: 22px;
             display: flex;
@@ -597,7 +597,12 @@ export function KakaoMapView({
               };
 
               window.focusMapMarker = function (id, lat, lng, offsetY) {
-                selectedMarkerKey = id == null ? null : String(id);
+                const nextSelectedMarkerKey =
+                  id == null ? null : String(id);
+                const selectionChanged =
+                  nextSelectedMarkerKey !== selectedMarkerKey;
+
+                selectedMarkerKey = nextSelectedMarkerKey;
 
                 Object.keys(markerEntries).forEach(function (key) {
                   const entry = markerEntries[key];
@@ -609,6 +614,12 @@ export function KakaoMapView({
 
                 // 카드를 닫을 때는 선택 표시만 해제하고 지도 중심은 그대로 둔다.
                 if (!selectedMarkerKey) {
+                  return;
+                }
+
+                // 같은 마커가 이미 선택된 상태에서 부모가 다시 렌더링되더라도
+                // 사용자가 조절한 지도 확대 수준과 중심을 건드리지 않는다.
+                if (!selectionChanged) {
                   return;
                 }
 
@@ -732,10 +743,10 @@ export function KakaoMapView({
                   icon.style.backgroundColor = '#E4E6EA';
                   icon.style.backgroundImage = "url('" + m.photo + "')";
 
-                  if (m.count) {
+                  if (Number(m.count) > 1) {
                     countBadge = document.createElement('div');
                     countBadge.className = 'marker-count';
-                    countBadge.textContent = '+' + m.count;
+                    countBadge.textContent = '+' + String(m.count);
                   }
                 } else {
                   icon.style.backgroundColor = m.locationFlexible
@@ -745,8 +756,9 @@ export function KakaoMapView({
                 }
 
                 content.appendChild(icon);
+
                 if (countBadge) {
-                  // 사진 내부가 아니라 마커 컨테이너에 붙여 독립된 배지로 표시합니다.
+                  // 사진 안이 아니라 사진 오른쪽 바깥에 독립 배지로 표시한다.
                   content.appendChild(countBadge);
                 }
 
@@ -1012,14 +1024,7 @@ export function KakaoMapView({
       </body>
     </html>
   `,
-    [
-      markersJson,
-      userLocationJson,
-      pickedLocationJson,
-      fitAllMarkers,
-      latitude,
-      longitude,
-    ],
+    [markersJson, userLocationJson, pickedLocationJson, fitAllMarkers],
   );
 
   const webViewSource = useMemo(() => ({ html }), [html]);

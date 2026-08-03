@@ -1535,9 +1535,26 @@ useEffect(() => {
 
   const handleMapIdle = useCallback((lat: number, lng: number) => {
     if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+
+    const previousCenter = mapCenterRef.current;
     const nextCenter = { lat, lng };
+    const movedFromPreviousCenter =
+      haversineM(
+        previousCenter.lat,
+        previousCenter.lng,
+        lat,
+        lng,
+      ) >= 2;
+
+    // 마커 선택으로 지도가 프로그램상 이동한 경우에는
+    // 이미 mapCenterRef에 목표 좌표를 넣어뒀으므로 React state를
+    // 다시 갱신하지 않는다. 이 왕복 갱신이 선택 카드 애니메이션을
+    // 반복 실행해 화면이 두근거리듯 흔들리게 만들었다.
     mapCenterRef.current = nextCenter;
-    setMapCenter(nextCenter);
+
+    if (movedFromPreviousCenter) {
+      setMapCenter(nextCenter);
+    }
 
     if (isArchiveFilter(activeFilterRef.current) || isPersonalMapFilter(activeFilterRef.current)) {
       if (activeFilterRef.current === "내 기록") {
@@ -1643,8 +1660,10 @@ useEffect(() => {
       return;
     }
     const nextCenter = { lat: bubble.lat, lng: bubble.lng };
+
+    // selectedMarkerId 변경만으로 KakaoMapView가 해당 마커에 포커스한다.
+    // 여기서 setMapCenter까지 호출하면 map idle 이벤트와 서로 되먹임된다.
     mapCenterRef.current = nextCenter;
-    setMapCenter(nextCenter);
     setFitMyRecordMarkers(false);
     setFocusedMyRecordKey(record.key);
     setSelectedMapBubbleId(String(bubble.id));
@@ -2308,19 +2327,30 @@ useEffect(() => {
   };
 
   const handleDiscoverMarkerPress = useCallback((id: string | number) => {
-    const bubble = groupedMapBubbles.find((item) => String(item.id) === String(id));
+    const bubble = groupedMapBubbles.find(
+      (item) => String(item.id) === String(id),
+    );
     if (!bubble) return;
+
     const nextCenter = { lat: bubble.lat, lng: bubble.lng };
     mapCenterRef.current = nextCenter;
-    setMapCenter(nextCenter);
     setFitMyRecordMarkers(false);
-    setSelectedMapBubbleId(String(bubble.id));
     setActiveBubble(null);
     setSheetBubble(null);
 
-    if (bubble.multi && bubble.groupRecords && bubble.groupRecords.length > 1) {
+    // 같은 장소에 여러 기록이 있으면 지도 내부 카드는 선택하지 않고
+    // 장소별 기록 하단 슬라이드만 연다.
+    if (
+      bubble.multi &&
+      bubble.groupRecords &&
+      bubble.groupRecords.length > 1
+    ) {
+      setSelectedMapBubbleId(null);
       setPlaceGroupName(bubble.place);
-      setPlaceGroupRecords(sortDiscoverRecords(bubble.groupRecords));
+      setPlaceGroupRecords(
+        sortDiscoverRecords(bubble.groupRecords),
+      );
+
       sheetTranslateY.stopAnimation();
       sheetTranslateY.setValue(SHEET_CLOSE_POSITION);
       Animated.spring(sheetTranslateY, {
@@ -2334,25 +2364,33 @@ useEffect(() => {
 
     setPlaceGroupName("");
     setPlaceGroupRecords([]);
+    setSelectedMapBubbleId(String(bubble.id));
 
     if (activeFilter === "내 기록") {
       const matchingRecord = visibleMyRecords.find((record) => {
-        const markerId = record.discoverPostId ?? `mission-record-${record.id}`;
+        const markerId =
+          record.discoverPostId ??
+          `mission-record-${record.id}`;
         return String(markerId) === String(id);
       });
+
       if (matchingRecord) {
         setFocusedMyRecordKey(matchingRecord.key);
-        myRecordsListRef.current?.scrollTo({ y: 0, animated: true });
+        myRecordsListRef.current?.scrollTo({
+          y: 0,
+          animated: true,
+        });
       }
+
       openMyRecordsSheet(false);
     }
   }, [
-  activeFilter,
-  groupedMapBubbles,
-  openMyRecordsSheet,
-  sheetTranslateY,
-  visibleMyRecords,
-]);
+    activeFilter,
+    groupedMapBubbles,
+    openMyRecordsSheet,
+    sheetTranslateY,
+    visibleMyRecords,
+  ]);
 
   const handleDiscoverMarkerClose = useCallback(() => {
     // 선택 카드만 닫고 현재 지도 중심과 확대 수준은 그대로 유지한다.
@@ -2407,7 +2445,11 @@ const handleDiscoverMarkerDelete = useCallback(
         longitude={mapCenter.lng}
         userLocation={userLocation}
         fitAllMarkers={activeFilter === "내 기록" && fitMyRecordMarkers}
-        selectedMarkerId={selectedMapBubbleId}
+        selectedMarkerId={
+          placeGroupRecords.length > 1
+            ? null
+            : selectedMapBubbleId
+        }
         markers={groupedMapBubbles.map((b) => ({
           id: b.id, lat: b.lat, lng: b.lng, photo: b.photo, count: b.multi ? b.count : undefined,
           category: b.category, cardVariant: "record" as const, title: b.mission, description: b.note,
