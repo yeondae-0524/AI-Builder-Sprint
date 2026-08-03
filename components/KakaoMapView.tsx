@@ -234,16 +234,28 @@ export function KakaoMapView({
 
           .marker-count {
             position: absolute;
-            right: -5px;
-            bottom: -5px;
-            z-index: 4;
-            padding: 1px 5px;
-            border: 2px solid #ffffff;
-            border-radius: 9px;
-            background: #3d5afe;
-            color: #ffffff;
+            top: 50%;
+            left: calc(100% + 3px);
+            right: auto;
+            bottom: auto;
+            z-index: 5;
+            min-width: 28px;
+            height: 22px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 0 7px;
+            border: 2px solid #315c4a;
+            border-radius: 999px;
+            background: #ffffff;
+            color: #315c4a;
+            box-shadow: 0 2px 7px rgba(15, 23, 42, 0.18);
             font-size: 10px;
-            font-weight: 800;
+            line-height: 1;
+            font-weight: 850;
+            white-space: nowrap;
+            pointer-events: none;
+            transform: translateY(-50%);
           }
 
           .marker-card-content {
@@ -709,6 +721,7 @@ export function KakaoMapView({
 
                 const icon = document.createElement('div');
                 icon.className = 'marker-icon';
+                let countBadge = null;
 
                 if (m.photo) {
                   content.classList.add('photo-marker');
@@ -720,10 +733,9 @@ export function KakaoMapView({
                   icon.style.backgroundImage = "url('" + m.photo + "')";
 
                   if (m.count) {
-                    const badge = document.createElement('div');
-                    badge.className = 'marker-count';
-                    badge.textContent = '+' + m.count;
-                    icon.appendChild(badge);
+                    countBadge = document.createElement('div');
+                    countBadge.className = 'marker-count';
+                    countBadge.textContent = '+' + m.count;
                   }
                 } else {
                   icon.style.backgroundColor = m.locationFlexible
@@ -733,6 +745,10 @@ export function KakaoMapView({
                 }
 
                 content.appendChild(icon);
+                if (countBadge) {
+                  // 사진 내부가 아니라 마커 컨테이너에 붙여 독립된 배지로 표시합니다.
+                  content.appendChild(countBadge);
+                }
 
                 const card = document.createElement('div');
                 card.className = 'marker-card-content';

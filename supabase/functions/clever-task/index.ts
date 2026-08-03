@@ -54,6 +54,12 @@ type RequestBody = {
   categories?: string[];
   preferredCategories?: string[];
   interests?: string[];
+  initialInterests?: string[];
+  journeyGoal?: string;
+  likedCategories?: string[];
+  dislikedCategories?: string[];
+  likedMissionExamples?: string[];
+  dislikedMissionExamples?: string[];
   cost?: CostFilter;
   time?: string;
   estimatedDuration?: string;
@@ -1137,13 +1143,11 @@ denoRuntime.serve(async (req) => {
 
     const body = (await req.json().catch(() => ({}))) as RequestBody;
 
+    // categories는 사용자가 허용한 생성 범위이고,
+    // 관심사와 호불호는 그 범위 안에서 우선순위를 정하는 신호다.
     const requestedCategories = Array.from(
       new Set(
-        [
-          ...normalizeStringArray(body.categories),
-          ...normalizeStringArray(body.preferredCategories),
-          ...normalizeStringArray(body.interests),
-        ]
+        normalizeStringArray(body.categories)
           .map((category) => normalizeCategory(category, category))
           .filter(Boolean),
       ),
@@ -1158,6 +1162,56 @@ denoRuntime.serve(async (req) => {
         : requestedCategories.length > 0
           ? requestedCategories
           : [...ALL_CATEGORIES];
+
+    const initialInterests = Array.from(
+      new Set(
+        [
+          ...normalizeStringArray(body.initialInterests),
+          ...normalizeStringArray(body.interests),
+        ]
+          .map((category) => normalizeCategory(category, category))
+          .filter((category) => categories.includes(category)),
+      ),
+    );
+    const likedCategories = Array.from(
+      new Set(
+        normalizeStringArray(body.likedCategories)
+          .map((category) => normalizeCategory(category, category))
+          .filter((category) => categories.includes(category)),
+      ),
+    );
+    const dislikedCategories = Array.from(
+      new Set(
+        normalizeStringArray(body.dislikedCategories)
+          .map((category) => normalizeCategory(category, category))
+          .filter((category) => categories.includes(category)),
+      ),
+    );
+    const preferredCategories = Array.from(
+      new Set(
+        [
+          ...normalizeStringArray(body.preferredCategories),
+          ...likedCategories,
+          ...initialInterests,
+        ]
+          .map((category) => normalizeCategory(category, category))
+          .filter(
+            (category) =>
+              categories.includes(category) &&
+              !dislikedCategories.includes(category),
+          ),
+      ),
+    );
+    const journeyGoal = String(body.journeyGoal ?? "")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 200);
+    const likedMissionExamples = normalizeStringArray(
+      body.likedMissionExamples,
+    ).slice(0, 6);
+    const dislikedMissionExamples = normalizeStringArray(
+      body.dislikedMissionExamples,
+    ).slice(0, 6);
 
     const requestedLimit = toFiniteNumber(body.limit) ?? 10;
     const missionCount = clamp(Math.round(requestedLimit), 4, 10);
@@ -1215,6 +1269,10 @@ denoRuntime.serve(async (req) => {
     );
 
     console.log("요청 카테고리:", categories.join(", "));
+    console.log("초기 관심 카테고리:", initialInterests.join(", "));
+    console.log("최근 선호 카테고리:", likedCategories.join(", "));
+    console.log("최근 비선호 카테고리:", dislikedCategories.join(", "));
+    console.log("이번 여정 목표:", journeyGoal || "없음");
     console.log("요청 좌표:", latitude, longitude);
     console.log("카카오 상세 카테고리 적용 후 장소 수:", places.length);
 
@@ -1242,7 +1300,7 @@ denoRuntime.serve(async (req) => {
 [생성 규칙]
 1. 총 ${missionCount}개의 서로 다른 미션을 만든다.
 2. 허용 카테고리는 다음뿐이다: ${categoryText}
-3. 카테고리가 여러 개라면 최소 4개 카테고리를 섞고, 같은 카테고리는 최대 2개까지만 사용한다.
+3. 허용 카테고리가 4개 이상이면 최소 4개 카테고리를 섞고 같은 카테고리는 최대 2개까지만 사용한다. 허용 카테고리가 3개 이하라면 가능한 카테고리를 고르게 섞는다.
 4. 특정 장소 미션은 아래 실제 장소 목록의 이름을 정확히 그대로 place_name에 넣고 requires_place를 true로 한다.
 4-1. 특정 장소 미션의 category는 장소 목록에 적힌 '앱 카테고리'와 반드시 정확히 같아야 한다. AI가 임의로 다른 카테고리를 선택하면 안 된다.
 4-2. 카카오 상세 카테고리가 미션 카테고리보다 우선한다. 장소가 영화관·공연장·전시장·미술관처럼 관람 대상이 있는 곳이면 '감상', 사찰·성당·교회·역사 유적·기념관이면 '배움'으로 작성한다.
@@ -1274,6 +1332,15 @@ denoRuntime.serve(async (req) => {
 23. durationText는 '15분', '30분', '1시간'처럼 쓴다.
 24. costText는 '무료' 또는 '약 6,000원'처럼 쓴다.
 25. 각 미션은 사용자가 마음만 먹으면 100% 수행할 수 있어야 한다.
+
+[개인화 적용 원칙]
+1. 이번 여정의 목표가 있으면 가장 강한 추천 기준으로 사용한다. 목표를 그대로 제목에 반복하지 말고 실제 행동으로 자연스럽게 풀어낸다.
+2. 최근 '또 해보고 싶어요'를 받은 카테고리와 미션의 공통 특징은 추천 비중을 높인다.
+3. 최근 '다음엔 피하고 싶어요'를 받은 카테고리와 미션의 유사 행동은 추천 비중을 낮춘다. 단, 사용자가 직접 선택한 허용 카테고리를 완전히 제거하지는 않는다.
+4. 최초 로그인 관심 카테고리는 기록이 적을 때의 기본 취향으로 사용한다.
+5. 중립 평가인 '괜찮았어요'는 가중치를 높이거나 낮추지 않는다.
+6. 개인화 정보가 없더라도 안전성, 수행 가능성, 카테고리 다양성 규칙은 그대로 지킨다.
+7. recommendationReason에는 내부 점수나 '싫어해서 제외했다'는 표현을 노출하지 말고, 목표와 취향에 맞는 긍정적 이유만 자연스럽게 쓴다.
 
 [어디서나 가능 미션 참고 예시]
 ${flexibleMissionExamplesPrompt}
@@ -1318,6 +1385,21 @@ ${flexibleMissionExamplesPrompt}
 - 장소 유형: ${body.locationType ?? "실제 장소, 내 방 또는 어디서나 가능"}
 - 지역: ${body.district ?? body.gu ?? "현재 위치 주변"}
 - 추천 반경: ${body.radiusKm ?? body.radius_km ?? "기본 반경"}km
+
+개인화 정보:
+- 이번 여정의 목표: ${journeyGoal || "없음"}
+- 최초 관심 카테고리: ${initialInterests.length > 0 ? initialInterests.join(", ") : "없음"}
+- 현재 우선 카테고리: ${preferredCategories.length > 0 ? preferredCategories.join(", ") : "없음"}
+- 최근 선호 카테고리: ${likedCategories.length > 0 ? likedCategories.join(", ") : "없음"}
+- 최근 비선호 카테고리: ${dislikedCategories.length > 0 ? dislikedCategories.join(", ") : "없음"}
+- 최근 좋아한 미션: ${likedMissionExamples.length > 0 ? likedMissionExamples.join(" | ") : "없음"}
+- 최근 피하고 싶은 미션: ${dislikedMissionExamples.length > 0 ? dislikedMissionExamples.join(" | ") : "없음"}
+
+개인화 적용 순서:
+1. 이번 여정의 목표
+2. 최근 미션 호불호
+3. 최초 관심 카테고리
+4. 새로운 경험을 위한 다양성
 
 직전 추천에서 제외할 제목:
 ${

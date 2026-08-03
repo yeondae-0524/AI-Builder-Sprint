@@ -108,6 +108,10 @@ type EmotionValue =
   | "new"
   | "uncomfortable"
   | "unsure";
+type MissionPreferenceValue =
+  | "like"
+  | "neutral"
+  | "dislike";
 type TimeFilter =
   | "any"
   | "under15"
@@ -263,6 +267,7 @@ type ActiveJourney = {
   id: string;
   startDate: string;
   endDate: string;
+  goal: string;
 };
 
 type StartedAttempt = {
@@ -284,6 +289,14 @@ type CompletedRecord = {
   photoUrls: string[];
   locationLat: number | null;
   locationLng: number | null;
+};
+
+type MissionFeedbackRow = {
+  preference: MissionPreferenceValue;
+  mission_title: string;
+  mission_category: string;
+  journey_id: string | null;
+  created_at: string;
 };
 
 type MissionListItem = {
@@ -391,6 +404,32 @@ const EMOTIONS: Array<{
   { label: "새로워요", value: "new", emoji: "✨" },
   { label: "불편해요", value: "uncomfortable", emoji: "😣" },
   { label: "잘 모르겠어요", value: "unsure", emoji: "🤔" },
+];
+
+const MISSION_PREFERENCES: Array<{
+  value: MissionPreferenceValue;
+  emoji: string;
+  label: string;
+  description: string;
+}> = [
+  {
+    value: "like",
+    emoji: "👍",
+    label: "또 해보고 싶어요",
+    description: "비슷한 미션을 더 추천해요.",
+  },
+  {
+    value: "neutral",
+    emoji: "😐",
+    label: "괜찮았어요",
+    description: "추천에 중립적으로 반영해요.",
+  },
+  {
+    value: "dislike",
+    emoji: "👎",
+    label: "다음엔 피하고 싶어요",
+    description: "비슷한 미션의 추천을 줄여요.",
+  },
 ];
 
 const TIME_OPTIONS: Array<{
@@ -3028,6 +3067,39 @@ function rankMissionsByInterests(
   return result;
 }
 
+function rankMissionsByPreferenceSignals(
+  missions: HomeMission[],
+  initialInterests: CategoryName[],
+  likedCategories: CategoryName[],
+  dislikedCategories: CategoryName[],
+) {
+  const initialSet = new Set(initialInterests);
+  const likedSet = new Set(likedCategories);
+  const dislikedSet = new Set(dislikedCategories);
+
+  return shuffle(missions)
+    .map((mission, index) => {
+      let score = 0;
+
+      if (initialSet.has(mission.cat)) {
+        score += 2;
+      }
+      if (likedSet.has(mission.cat)) {
+        score += 4;
+      }
+      if (dislikedSet.has(mission.cat)) {
+        score -= 4;
+      }
+
+      return { mission, score, index };
+    })
+    .sort(
+      (left, right) =>
+        right.score - left.score || left.index - right.index,
+    )
+    .map(({ mission }) => mission);
+}
+
 function applyLocationPresentation(
   mission: HomeMission,
   _locationMode: LocationMode,
@@ -3976,6 +4048,8 @@ export default function HomeScreen() {
   const [recordContent, setRecordContent] = useState("");
   const [recordEmotion, setRecordEmotion] =
     useState<EmotionValue | "">("");
+  const [recordPreference, setRecordPreference] =
+    useState<MissionPreferenceValue | "">("");
   const [recordVisibility, setRecordVisibility] =
     useState<RecordVisibility>("private");
   const [recordDate, setRecordDate] = useState(
@@ -4165,32 +4239,151 @@ export default function HomeScreen() {
         });
 
         let interests = profileInterests;
+        let journeyGoal = "";
+        let likedCategories: CategoryName[] = [];
+        let dislikedCategories: CategoryName[] = [];
+        let likedMissionExamples: string[] = [];
+        let dislikedMissionExamples: string[] = [];
 
-        if (filters.categories.length === 0 && interests.length === 0) {
-          const {
-            data: { user },
-          } = await retrySupabaseResultOnJwt(() => supabase.auth.getUser());
+        const {
+          data: { user },
+          error: personalizationUserError,
+        } = await retrySupabaseResultOnJwt(() =>
+          supabase.auth.getUser(),
+        );
 
-          if (user) {
-            const { data: profile } = await retrySupabaseResultOnJwt(() => supabase
-              .from("profiles")
-              .select("interests")
-              .eq("id", user.id)
-              .maybeSingle());
+        if (personalizationUserError) {
+          console.warn(
+            "추천 개인화 사용자 조회 실패:",
+            personalizationUserError,
+          );
+        }
 
-            const rawInterests = normalizeStringArray(
-              profile?.interests,
-            );
-            interests = Array.from(
-              new Set(
-                rawInterests.map((interest) =>
-                  normalizeCategory(interest, interest),
+        if (user) {
+          if (
+            filters.categories.length === 0 &&
+            interests.length === 0
+          ) {
+            const { data: profile, error: profileError } =
+              await retrySupabaseResultOnJwt(() =>
+                supabase
+                  .from("profiles")
+                  .select("interests")
+                  .eq("id", user.id)
+                  .maybeSingle(),
+              );
+
+            if (profileError) {
+              console.warn(
+                "초기 관심 카테고리 조회 실패:",
+                profileError,
+              );
+            } else {
+              const rawInterests = normalizeStringArray(
+                profile?.interests,
+              );
+              interests = Array.from(
+                new Set(
+                  rawInterests.map((interest) =>
+                    normalizeCategory(interest, interest),
+                  ),
                 ),
-              ),
+              );
+              setProfileInterests(interests);
+            }
+          }
+
+          const todayKey = toDateKey(new Date());
+          const { data: journeyPreferenceData, error: goalError } =
+            await retrySupabaseResultOnJwt(() =>
+              supabase
+                .from("journeys")
+                .select("id, goal")
+                .eq("user_id", user.id)
+                .eq("status", "active")
+                .lte("start_date", todayKey)
+                .order("created_at", { ascending: false })
+                .limit(1)
+                .maybeSingle(),
             );
-            setProfileInterests(interests);
+
+          if (goalError) {
+            console.warn("여정 목표 조회 실패:", goalError);
+          } else {
+            journeyGoal = String(
+              journeyPreferenceData?.goal ?? "",
+            ).trim();
+          }
+
+          const { data: feedbackData, error: feedbackError } =
+            await retrySupabaseResultOnJwt(() =>
+              supabase
+                .from("mission_feedback")
+                .select(
+                  "preference, mission_title, mission_category, journey_id, created_at",
+                )
+                .eq("user_id", user.id)
+                .order("created_at", { ascending: false })
+                .limit(30),
+            );
+
+          if (feedbackError) {
+            console.warn(
+              "최근 미션 호불호 조회 실패:",
+              feedbackError,
+            );
+          } else {
+            const feedbackRows =
+              (feedbackData ?? []) as MissionFeedbackRow[];
+            const latestCategoryPreference = new Map<
+              CategoryName,
+              MissionPreferenceValue
+            >();
+
+            for (const row of feedbackRows) {
+              const category = normalizeCategory(
+                row.mission_category,
+                row.mission_category,
+              );
+
+              if (!latestCategoryPreference.has(category)) {
+                latestCategoryPreference.set(
+                  category,
+                  row.preference,
+                );
+              }
+            }
+
+            likedCategories = Array.from(
+              latestCategoryPreference.entries(),
+            )
+              .filter(([, preference]) => preference === "like")
+              .map(([category]) => category);
+            dislikedCategories = Array.from(
+              latestCategoryPreference.entries(),
+            )
+              .filter(
+                ([, preference]) => preference === "dislike",
+              )
+              .map(([category]) => category);
+            likedMissionExamples = feedbackRows
+              .filter((row) => row.preference === "like")
+              .map((row) => String(row.mission_title).trim())
+              .filter(Boolean)
+              .slice(0, 6);
+            dislikedMissionExamples = feedbackRows
+              .filter((row) => row.preference === "dislike")
+              .map((row) => String(row.mission_title).trim())
+              .filter(Boolean)
+              .slice(0, 6);
           }
         }
+
+        const personalizedInterests = Array.from(
+          new Set([...likedCategories, ...interests]),
+        ).filter(
+          (category) => !dislikedCategories.includes(category),
+        );
 
         const excludedMissionIds = previousRecommendations
           .map((mission) => mission.id)
@@ -4216,12 +4409,15 @@ export default function HomeScreen() {
               : [...CATEGORIES],
           preferredCategories:
             filters.categories.length === 0
-              ? interests
+              ? personalizedInterests
               : filters.categories,
-          interests:
-            filters.categories.length === 0
-              ? interests
-              : filters.categories,
+          interests,
+          initialInterests: interests,
+          journeyGoal,
+          likedCategories,
+          dislikedCategories,
+          likedMissionExamples,
+          dislikedMissionExamples,
           time:
             timeOption?.backendValue ?? "상관없음",
           estimatedDuration:
@@ -4318,7 +4514,7 @@ export default function HomeScreen() {
           recommendationReasonInstruction:
             "각 미션마다 가장 핵심적인 추천 이유 하나만 recommendation_reason 필드에 가능하면 한 줄 분량의 짧은 한국어 한 문장으로 작성해주세요. 반드시 '~해요.', '~좋아요.', '~추천드려요.'처럼 높임말 완결형으로 끝내고, 말줄임표나 미완성 표현을 쓰지 마세요. 미션마다 서로 다른 이유를 쓰고 같은 문장을 반복하지 마세요.",
           generationInstruction:
-            `제목, 설명, 미션 안내, 추천 이유를 모두 자연스러운 한국어로 작성하세요. instructions는 반드시 정확히 두 문장으로 작성하세요. 첫 문장은 무엇을 할지 부드러운 높임말로 안내하고, 둘째 문장은 그 경험의 기대나 매력을 높임말로 설명하세요. 번호, 불릿, 단계 나열, 세 번째 문장은 절대 쓰지 마세요. 추천 이유는 가능하면 한 줄 분량으로 짧게 쓰되 반드시 높임말 완결형으로 끝내고 말줄임표를 사용하지 마세요. 카테고리를 상관없음으로 선택했을 때는 사용자의 초기 관심 카테고리를 약 60% 비중으로 우선하되, 관심사 밖의 카테고리도 반드시 섞으세요. 가능한 경우 최소 4개 이상의 서로 다른 카테고리를 포함하고 같은 카테고리는 최대 2개까지만 포함하세요. 장소 유형은 세 가지입니다. 특정 장소 미션은 availablePlaces에 포함된 실제 장소의 이름과 ID를 사용하고, 반드시 그 장소의 category와 실제 수행 행동을 일치시키세요. 카페 및 디저트 장소에서는 메뉴·음료·디저트·맛·공간 분위기 미션만 만들고 명상·요가·운동·낮잠 미션은 만들지 마세요. 음식 장소에서는 메뉴·식사·맛 미션만 만들고 독서·명상·운동 미션은 만들지 마세요. 산책 장소에서는 걷기·풍경 관찰·사진·자연 감상·가벼운 휴식 미션을 만드세요. 감상·배움 장소에서는 작품 관람·전시·공연·독서·학습처럼 해당 시설을 실제로 이용하는 미션을 만드세요. 장소 이름만 문장에 붙이고 무관한 행동을 시키는 조합은 절대 만들지 마세요. 집에서 하는 미션은 place_name을 정확히 '내 방'으로 쓰고 requires_place를 false로 설정하세요. 특정 장소가 필요 없는 미션은 place_name을 정확히 '어디서나 가능'으로 쓰고 requires_place를 false로 설정하세요. '자유 장소', '지역 내 어디서나', '현재 위치 주변의 편한 장소' 같은 다른 표현은 사용하지 마세요. 집 미션은 전체 10개 중 최대 2개만 포함하세요. 어디서나 가능 미션은 Solar가 이번 요청에서 새로 만든 미션으로 최소 2개, 최대 3개 포함하세요. 천장에 구름이 있다고 가정하거나 천장의 무늬를 구름처럼 관찰하게 하는 미션과 '천장 구름 관찰하기'는 절대 만들지 마세요. 반드시 데이터베이스에 저장된 UUID 미션만 반환하세요. ${
+            `제목, 설명, 미션 안내, 추천 이유를 모두 자연스러운 한국어로 작성하세요. instructions는 반드시 정확히 두 문장으로 작성하세요. 첫 문장은 무엇을 할지 부드러운 높임말로 안내하고, 둘째 문장은 그 경험의 기대나 매력을 높임말로 설명하세요. 번호, 불릿, 단계 나열, 세 번째 문장은 절대 쓰지 마세요. 추천 이유는 가능하면 한 줄 분량으로 짧게 쓰되 반드시 높임말 완결형으로 끝내고 말줄임표를 사용하지 마세요. 카테고리를 상관없음으로 선택했을 때는 이번 여정의 목표를 가장 우선하고, 최근 미션 호불호와 최초 관심 카테고리를 차례로 반영하세요. 다만 취향 밖의 카테고리도 일부 섞어 새로운 경험의 가능성을 남겨두세요. 가능한 경우 최소 4개 이상의 서로 다른 카테고리를 포함하고 같은 카테고리는 최대 2개까지만 포함하세요. 장소 유형은 세 가지입니다. 특정 장소 미션은 availablePlaces에 포함된 실제 장소의 이름과 ID를 사용하고, 반드시 그 장소의 category와 실제 수행 행동을 일치시키세요. 카페 및 디저트 장소에서는 메뉴·음료·디저트·맛·공간 분위기 미션만 만들고 명상·요가·운동·낮잠 미션은 만들지 마세요. 음식 장소에서는 메뉴·식사·맛 미션만 만들고 독서·명상·운동 미션은 만들지 마세요. 산책 장소에서는 걷기·풍경 관찰·사진·자연 감상·가벼운 휴식 미션을 만드세요. 감상·배움 장소에서는 작품 관람·전시·공연·독서·학습처럼 해당 시설을 실제로 이용하는 미션을 만드세요. 장소 이름만 문장에 붙이고 무관한 행동을 시키는 조합은 절대 만들지 마세요. 집에서 하는 미션은 place_name을 정확히 '내 방'으로 쓰고 requires_place를 false로 설정하세요. 특정 장소가 필요 없는 미션은 place_name을 정확히 '어디서나 가능'으로 쓰고 requires_place를 false로 설정하세요. '자유 장소', '지역 내 어디서나', '현재 위치 주변의 편한 장소' 같은 다른 표현은 사용하지 마세요. 집 미션은 전체 10개 중 최대 2개만 포함하세요. 어디서나 가능 미션은 Solar가 이번 요청에서 새로 만든 미션으로 최소 2개, 최대 3개 포함하세요. 천장에 구름이 있다고 가정하거나 천장의 무늬를 구름처럼 관찰하게 하는 미션과 '천장 구름 관찰하기'는 절대 만들지 마세요. 반드시 데이터베이스에 저장된 UUID 미션만 반환하세요. ${
               avoidCurrent
                 ? "직전 추천에 나온 미션과 장소는 가능한 한 제외하고 새로운 조합을 반환하세요."
                 : ""
@@ -4444,19 +4640,30 @@ export default function HomeScreen() {
           ),
         );
 
+        const categoryRankingInterests =
+          filters.categories.length === 0
+            ? personalizedInterests
+            : filters.categories;
+
         const freshFirst = prioritizeFreshRecommendations({
           candidates: filtered,
           previous: previousRecommendations,
-          interests,
-          useInterestRanking: filters.categories.length === 0,
+          interests: categoryRankingInterests,
+          useInterestRanking:
+            categoryRankingInterests.length > 0,
         });
 
+        const preferenceRanked =
+          rankMissionsByPreferenceSignals(
+            freshFirst,
+            interests,
+            likedCategories,
+            dislikedCategories,
+          );
+
         const balanced = selectDiverseRecommendations({
-          candidates: freshFirst,
-          interests:
-            filters.categories.length === 0
-              ? interests
-              : filters.categories,
+          candidates: preferenceRanked,
+          interests: categoryRankingInterests,
           locationMode,
           district,
           limit: 10,
@@ -4526,7 +4733,7 @@ export default function HomeScreen() {
         error: journeyError,
       } = await retrySupabaseResultOnJwt(() => supabase
         .from("journeys")
-        .select("id, start_date, end_date")
+        .select("id, start_date, end_date, goal")
         .eq("user_id", user.id)
         .eq("status", "active")
         .lte("start_date", todayKey)
@@ -4552,6 +4759,7 @@ export default function HomeScreen() {
         id: String(journeyData.id),
         startDate: String(journeyData.start_date),
         endDate: String(journeyData.end_date),
+        goal: String(journeyData.goal ?? "").trim(),
       };
       setActiveJourney(journey);
 
@@ -5345,16 +5553,7 @@ export default function HomeScreen() {
     }
   };
 
-  const handleMarkerAction = (markerId: string | number) => {
-    const missionId = String(markerId);
-    const item = currentItems.find(
-      (candidate) => candidate.mission.id === missionId,
-    );
-
-    if (!item) {
-      return;
-    }
-
+  const handleMissionItemAction = (item: MissionListItem) => {
     if (item.kind === "recommended") {
       void handleStartMission(item.mission);
       return;
@@ -5368,6 +5567,19 @@ export default function HomeScreen() {
     if (item.record) {
       setRecordDetail(item.record);
     }
+  };
+
+  const handleMarkerAction = (markerId: string | number) => {
+    const missionId = String(markerId);
+    const item = currentItems.find(
+      (candidate) => candidate.mission.id === missionId,
+    );
+
+    if (!item) {
+      return;
+    }
+
+    handleMissionItemAction(item);
   };
 
   const openConditionModal = (step = 0) => {
@@ -5654,6 +5866,7 @@ export default function HomeScreen() {
     setRecordMission(mission);
     setRecordContent("");
     setRecordEmotion("");
+    setRecordPreference("");
     setRecordVisibility("private");
     setRecordDate(latestDate);
     setRecordPhotos([]);
@@ -5674,6 +5887,7 @@ export default function HomeScreen() {
     setRecordMission(null);
     setRecordContent("");
     setRecordEmotion("");
+    setRecordPreference("");
     setRecordVisibility("private");
     setRecordDate(toDateKey(new Date()));
     setRecordPhotos([]);
@@ -5962,6 +6176,17 @@ export default function HomeScreen() {
       return;
     }
 
+    if (!recordPreference) {
+      Alert.alert(
+        "미션 만족도를 선택해주세요",
+        "이 미션을 다음에도 추천할지 알려주세요.",
+      );
+      return;
+    }
+
+    const selectedPreference =
+      recordPreference as MissionPreferenceValue;
+
     if (
       !recordDate ||
       !recordDateOptions.includes(recordDate)
@@ -6013,7 +6238,7 @@ export default function HomeScreen() {
         : null
       : attempt.placeId;
 
-    const selectedCoordinate: Coordinate | null =
+    let selectedCoordinate: Coordinate | null =
       recordMission.isLocationFlexible
         ? recordLocationKind === "place" && recordSelectedPlace
           ? {
@@ -6031,7 +6256,7 @@ export default function HomeScreen() {
             }
           : null;
 
-    const selectedPlaceName = recordMission.isLocationFlexible
+    let selectedPlaceName = recordMission.isLocationFlexible
       ? recordLocationKind === "place"
         ? recordSelectedPlace?.name ?? "선택한 장소"
         : recordLocationKind === "map"
@@ -6051,6 +6276,63 @@ export default function HomeScreen() {
       }
       if (!user) {
         throw new Error("로그인이 필요합니다.");
+      }
+
+      // 고정 장소 미션의 화면 스냅샷에 장소명이 빠져 있더라도
+      // mission_attempts.place_id에 연결된 실제 places 행을 사용한다.
+      const selectedPlaceNameKey = normalizeComparableText(
+        selectedPlaceName,
+      );
+      const needsFixedPlaceSnapshot =
+        !recordMission.isLocationFlexible &&
+        !recordMission.isAtHome &&
+        Boolean(attempt.placeId) &&
+        (
+          !selectedPlaceNameKey ||
+          selectedPlaceNameKey === "미션수행장소" ||
+          selectedPlaceNameKey === "장소정보없음" ||
+          !selectedCoordinate
+        );
+
+      if (needsFixedPlaceSnapshot) {
+        const { data: actualPlace, error: actualPlaceError } =
+          await retrySupabaseResultOnJwt(() =>
+            supabase
+              .from("places")
+              .select("name, latitude, longitude")
+              .eq("id", attempt.placeId!)
+              .maybeSingle(),
+          );
+
+        if (actualPlaceError) {
+          console.warn(
+            "미션 수행 장소 보완 실패:",
+            actualPlaceError,
+          );
+        } else if (actualPlace) {
+          const actualPlaceName = String(
+            actualPlace.name ?? "",
+          ).trim();
+          const actualPlaceLat = toFiniteNumber(
+            actualPlace.latitude,
+          );
+          const actualPlaceLng = toFiniteNumber(
+            actualPlace.longitude,
+          );
+
+          if (actualPlaceName) {
+            selectedPlaceName = actualPlaceName;
+          }
+          if (
+            actualPlaceLat !== null &&
+            actualPlaceLng !== null
+          ) {
+            selectedCoordinate = {
+              lat: actualPlaceLat,
+              lng: actualPlaceLng,
+            };
+          }
+        }
       }
 
       const {
@@ -6105,6 +6387,37 @@ export default function HomeScreen() {
         throw new Error(
           `수행 위치 정보를 저장하지 못했습니다: ${getErrorMessage(locationMetadataError, "알 수 없는 오류")}`,
         );
+      }
+
+      let feedbackWarning = "";
+      const { error: feedbackSaveError } =
+        await retrySupabaseResultOnJwt(() =>
+          supabase
+            .from("mission_feedback")
+            .upsert(
+              {
+                user_id: user.id,
+                journey_id: activeJourney?.id ?? null,
+                mission_id: recordMission.id,
+                record_id: String(createdRecordId),
+                preference: selectedPreference,
+                mission_title: recordMission.title,
+                mission_category: recordMission.cat,
+                mission_place_name:
+                  selectedPlaceName || recordMission.placeName || null,
+                updated_at: new Date().toISOString(),
+              },
+              { onConflict: "user_id,record_id" },
+            ),
+        );
+
+      if (feedbackSaveError) {
+        console.error(
+          "미션 호불호 저장 실패:",
+          feedbackSaveError,
+        );
+        feedbackWarning =
+          "\n\n기록은 저장됐지만 미션 만족도는 저장하지 못했어요.";
       }
 
       let photoWarning = "";
@@ -6175,7 +6488,7 @@ export default function HomeScreen() {
 
       Alert.alert(
         "기록 완료",
-        `${formatDateKeyKorean(recordDate)}의 경험이 여정에 저장됐어요.${photoWarning}${discoverWarning}`,
+        `${formatDateKeyKorean(recordDate)}의 경험이 여정에 저장됐어요.${feedbackWarning}${photoWarning}${discoverWarning}`,
       );
     } catch (error) {
       console.error("기록 저장 실패:", error);
@@ -6576,7 +6889,7 @@ export default function HomeScreen() {
 
                   <Pressable
                     onPress={() =>
-                      handleMarkerAction(homeItem.mission.id)
+                      handleMissionItemAction(homeItem)
                     }
                     disabled={
                       homeItem.kind === "recommended" &&
@@ -7715,6 +8028,50 @@ export default function HomeScreen() {
                       >
                         {emotion.emoji} {emotion.label}
                       </Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+
+              <Text style={styles.recordFieldLabel}>
+                이 미션은 어땠나요?
+              </Text>
+              <Text style={styles.preferenceHelpText}>
+                선택한 답변은 다음 미션 추천에 반영돼요.
+              </Text>
+              <View style={styles.preferenceWrap}>
+                {MISSION_PREFERENCES.map((preference) => {
+                  const selected =
+                    recordPreference === preference.value;
+
+                  return (
+                    <Pressable
+                      key={preference.value}
+                      onPress={() =>
+                        setRecordPreference(preference.value)
+                      }
+                      style={[
+                        styles.preferenceCard,
+                        selected && styles.preferenceCardSelected,
+                      ]}
+                    >
+                      <Text style={styles.preferenceEmoji}>
+                        {preference.emoji}
+                      </Text>
+                      <View style={styles.preferenceTextWrap}>
+                        <Text
+                          style={[
+                            styles.preferenceLabel,
+                            selected &&
+                              styles.preferenceLabelSelected,
+                          ]}
+                        >
+                          {preference.label}
+                        </Text>
+                        <Text style={styles.preferenceDescription}>
+                          {preference.description}
+                        </Text>
+                      </View>
                     </Pressable>
                   );
                 })}
@@ -9532,6 +9889,55 @@ const styles = StyleSheet.create({
   emotionChipTextSelected: {
     fontWeight: "700",
     color: PINK,
+  },
+  preferenceHelpText: {
+    marginTop: -3,
+    marginBottom: 10,
+    fontSize: 11,
+    lineHeight: 17,
+    color: T2,
+  },
+  preferenceWrap: {
+    marginBottom: 18,
+  },
+  preferenceCard: {
+    minHeight: 58,
+    marginBottom: 8,
+    paddingHorizontal: 13,
+    paddingVertical: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: BG,
+    borderWidth: 1,
+    borderColor: T3,
+    borderRadius: 14,
+  },
+  preferenceCardSelected: {
+    backgroundColor: BLL,
+    borderColor: BL,
+  },
+  preferenceEmoji: {
+    width: 30,
+    marginRight: 9,
+    fontSize: 20,
+    textAlign: "center",
+  },
+  preferenceTextWrap: {
+    flex: 1,
+  },
+  preferenceLabel: {
+    fontSize: 12,
+    fontWeight: "700",
+    color: T1,
+  },
+  preferenceLabelSelected: {
+    color: BL,
+  },
+  preferenceDescription: {
+    marginTop: 3,
+    fontSize: 10,
+    lineHeight: 15,
+    color: T2,
   },
   recordInput: {
     minHeight: 150,
