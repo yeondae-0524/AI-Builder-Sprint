@@ -82,6 +82,7 @@ const CATEGORIES = ["음식", "카페 및 디저트", "산책", "배움", "감�
 
 type EmotionValue = "comfortable" | "joyful" | "new" | "uncomfortable" | "unsure";
 type RecordVisibility = "private" | "nickname";
+type ExperiencePreferenceValue = "like" | "neutral" | "dislike";
 type RecordLocationKind = "place" | "map" | "home";
 type MapPickerMode = Exclude<RecordLocationKind, "home">;
 
@@ -156,6 +157,7 @@ type MyRecordItem = {
   id: string;
   source: "discover" | "mission";
   discoverPostId: string | null;
+  missionAttemptId: string | null;
   title: string;
   content: string;
   placeName: string;
@@ -177,6 +179,8 @@ type DiscoverPostPhoto = {
 type DiscoverBubble = {
   id: string;
   discoverPostId?: string | null;
+  missionRecordId?: string | null;
+  missionAttemptId?: string | null;
   canLike?: boolean;
   canDelete?: boolean;
   user_id: string | null;
@@ -194,8 +198,10 @@ type DiscoverBubble = {
   category: string;
   photo?: string;
   real?: boolean;
+  createdAt?: string;
   multi?: boolean;
   count?: number;
+  groupRecords?: DiscoverBubble[];
 };
 
 const EMOTIONS: Array<{ label: string; value: EmotionValue; emoji: string }> = [
@@ -204,6 +210,32 @@ const EMOTIONS: Array<{ label: string; value: EmotionValue; emoji: string }> = [
   { label: "새로워요", value: "new", emoji: "✨" },
   { label: "불편해요", value: "uncomfortable", emoji: "😣" },
   { label: "잘 모르겠어요", value: "unsure", emoji: "🤔" },
+];
+
+const EXPERIENCE_PREFERENCES: Array<{
+  value: ExperiencePreferenceValue;
+  emoji: string;
+  label: string;
+  description: string;
+}> = [
+  {
+    value: "like",
+    emoji: "👍",
+    label: "또 해보고 싶어요",
+    description: "비슷한 경험을 다음 추천에 더 반영해요.",
+  },
+  {
+    value: "neutral",
+    emoji: "😐",
+    label: "괜찮았어요",
+    description: "추천을 늘리거나 줄이지 않아요.",
+  },
+  {
+    value: "dislike",
+    emoji: "👎",
+    label: "다음엔 피하고 싶어요",
+    description: "비슷한 경험의 추천 비중을 줄여요.",
+  },
 ];
 
 const EMOTION_LABEL: Record<string, string> = {
@@ -405,9 +437,86 @@ async function buildBubbleList(posts: any[]): Promise<DiscoverBubble[]> {
         category: String(p.category ?? "기타"),
         photo: photoUrl,
         real: true,
+        createdAt: String(p.created_at ?? ""),
       };
     }),
   );
+}
+
+function normalizePlaceGroupText(value: string) {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "")
+    .replace(/[()\[\]{}.,·'"“”‘’_-]/g, "");
+}
+
+function getDiscoverPlaceGroupKey(bubble: DiscoverBubble) {
+  const normalizedPlace = normalizePlaceGroupText(bubble.place);
+  const isGenericMapLocation =
+    !normalizedPlace ||
+    normalizedPlace === "거리" ||
+    normalizedPlace === "길위야외" ||
+    normalizedPlace === "길위의기록" ||
+    normalizedPlace === "장소";
+
+  if (isGenericMapLocation) {
+    return `record:${bubble.id}`;
+  }
+
+  // 카카오 장소 좌표는 같은 장소라면 거의 같으므로 약 10m 단위로 묶는다.
+  return `place:${normalizedPlace}:${bubble.lat.toFixed(4)}:${bubble.lng.toFixed(4)}`;
+}
+
+function sortDiscoverRecords(records: DiscoverBubble[]) {
+  return [...records].sort((left, right) => {
+    const likesDifference = right.likes - left.likes;
+    if (likesDifference !== 0) {
+      return likesDifference;
+    }
+
+    return (
+      new Date(right.createdAt ?? 0).getTime() -
+      new Date(left.createdAt ?? 0).getTime()
+    );
+  });
+}
+
+function groupDiscoverBubblesByPlace(bubbles: DiscoverBubble[]) {
+  const groups = new Map<string, DiscoverBubble[]>();
+
+  for (const bubble of bubbles) {
+    const key = getDiscoverPlaceGroupKey(bubble);
+    const current = groups.get(key) ?? [];
+    current.push(bubble);
+    groups.set(key, current);
+  }
+
+  return [...groups.entries()].map(([key, records]) => {
+    const orderedRecords = sortDiscoverRecords(records);
+    const representative = orderedRecords[0];
+
+    if (orderedRecords.length === 1) {
+      return representative;
+    }
+
+    return {
+      ...representative,
+      id: `place-group:${key}`,
+      discoverPostId: null,
+      canLike: false,
+      canDelete: false,
+      mission: `${representative.place}의 기록 ${orderedRecords.length}개`,
+      note: "이 장소에 남겨진 기록을 모두 확인해보세요.",
+      likes: orderedRecords.reduce(
+        (sum, record) => sum + record.likes,
+        0,
+      ),
+      multi: true,
+      count: orderedRecords.length,
+      groupRecords: orderedRecords,
+    } satisfies DiscoverBubble;
+  });
 }
 
 function isFiniteNumber(value: unknown): value is number {
@@ -540,33 +649,107 @@ function normalizeRecordCategory(rawCategory: unknown, textForInference: string)
   return inferRecordCategory(`${category} ${textForInference}`);
 }
 
-type MissionRecordMetadata = { title: string; category: string; };
+type MissionRecordMetadata = {
+  title: string;
+  category: string;
+  placeName: string | null;
+  placeLat: number | null;
+  placeLng: number | null;
+};
+
+function isGenericMissionPlaceLabel(value: unknown) {
+  const normalized = String(value ?? "")
+    .replace(/\s+/g, "")
+    .toLowerCase();
+
+  return (
+    !normalized ||
+    normalized === "미션수행장소" ||
+    normalized === "미션장소" ||
+    normalized === "장소정보없음" ||
+    normalized === "장소지정됨"
+  );
+}
 
 async function getMissionMetadataByAttemptIds(attemptIds: string[]) {
   const result = new Map<string, MissionRecordMetadata>();
   const uniqueAttemptIds = Array.from(new Set(attemptIds.filter(Boolean)));
   if (uniqueAttemptIds.length === 0) return result;
 
-  const { data: attempts } = await supabase.from("mission_attempts").select("id, mission_id").in("id", uniqueAttemptIds);
-  const missionIds = Array.from(new Set((attempts ?? []).map((row) => String(row.mission_id)).filter(Boolean)));
+  const { data: attempts } = await supabase
+    .from("mission_attempts")
+    .select("id, mission_id, place_id")
+    .in("id", uniqueAttemptIds);
+
+  const missionIds = Array.from(
+    new Set((attempts ?? []).map((row) => String(row.mission_id)).filter(Boolean)),
+  );
+  const placeIds = Array.from(
+    new Set((attempts ?? []).map((row) => String(row.place_id ?? "")).filter(Boolean)),
+  );
+
   if (missionIds.length === 0) return result;
 
   let missionRows: any[] = [];
-  const extendedMissionResult = await supabase.from("missions").select("id, title, category_id").in("id", missionIds);
+  const extendedMissionResult = await supabase
+    .from("missions")
+    .select("id, title, category_id, place_name, place_lat, place_lng")
+    .in("id", missionIds);
+
   if (extendedMissionResult.error) {
-    const basicMissionResult = await supabase.from("missions").select("id, title").in("id", missionIds);
+    const basicMissionResult = await supabase
+      .from("missions")
+      .select("id, title, category_id")
+      .in("id", missionIds);
     missionRows = basicMissionResult.data ?? [];
   } else {
     missionRows = extendedMissionResult.data ?? [];
   }
 
-  const categoryIds = Array.from(new Set(missionRows.map((row) => String(row.category_id ?? "")).filter(Boolean)));
+  const categoryIds = Array.from(
+    new Set(missionRows.map((row) => String(row.category_id ?? "")).filter(Boolean)),
+  );
   const categoryNameById = new Map<string, string>();
 
   if (categoryIds.length > 0) {
-    const { data: categories } = await supabase.from("categories").select("id, name").in("id", categoryIds);
-    for (const category of categories ?? []) {
+    const missionCategoryResult = await supabase
+      .from("mission_categories")
+      .select("id, name")
+      .in("id", categoryIds);
+
+    const categoryRows = !missionCategoryResult.error
+      ? missionCategoryResult.data ?? []
+      : (
+          await supabase
+            .from("categories")
+            .select("id, name")
+            .in("id", categoryIds)
+        ).data ?? [];
+
+    for (const category of categoryRows) {
       categoryNameById.set(String(category.id), String(category.name ?? ""));
+    }
+  }
+
+  const placeById = new Map<
+    string,
+    { name: string | null; lat: number | null; lng: number | null }
+  >();
+
+  if (placeIds.length > 0) {
+    const { data: placeRows } = await supabase
+      .from("places")
+      .select("id, name, latitude, longitude")
+      .in("id", placeIds);
+
+    for (const place of placeRows ?? []) {
+      const latitude = place.latitude == null ? Number.NaN : Number(place.latitude);
+      const longitude = place.longitude == null ? Number.NaN : Number(place.longitude);
+      placeById.set(String(place.id), {
+        name: String(place.name ?? "").trim() || null,
+        lat: Number.isFinite(latitude) ? latitude : null,
+        lng: Number.isFinite(longitude) ? longitude : null,
+      });
     }
   }
 
@@ -574,12 +757,38 @@ async function getMissionMetadataByAttemptIds(attemptIds: string[]) {
   for (const mission of missionRows) {
     const title = String(mission.title ?? "미션 기록");
     const rawCategory = categoryNameById.get(String(mission.category_id ?? ""));
-    metadataByMissionId.set(String(mission.id), { title, category: normalizeRecordCategory(rawCategory, title) });
+    const missionLat = mission.place_lat == null
+      ? Number.NaN
+      : Number(mission.place_lat);
+    const missionLng = mission.place_lng == null
+      ? Number.NaN
+      : Number(mission.place_lng);
+    const missionPlaceName = String(mission.place_name ?? "").trim();
+
+    metadataByMissionId.set(String(mission.id), {
+      title,
+      category: normalizeRecordCategory(rawCategory, title),
+      placeName: isGenericMissionPlaceLabel(missionPlaceName)
+        ? null
+        : missionPlaceName || null,
+      placeLat: Number.isFinite(missionLat) ? missionLat : null,
+      placeLng: Number.isFinite(missionLng) ? missionLng : null,
+    });
   }
 
   for (const attempt of attempts ?? []) {
-    const metadata = metadataByMissionId.get(String(attempt.mission_id));
-    result.set(String(attempt.id), metadata ?? { title: "미션 기록", category: "기타" });
+    const missionMetadata = metadataByMissionId.get(String(attempt.mission_id));
+    const attemptPlace = attempt.place_id
+      ? placeById.get(String(attempt.place_id))
+      : null;
+
+    result.set(String(attempt.id), {
+      title: missionMetadata?.title ?? "미션 기록",
+      category: missionMetadata?.category ?? "기타",
+      placeName: attemptPlace?.name ?? missionMetadata?.placeName ?? null,
+      placeLat: attemptPlace?.lat ?? missionMetadata?.placeLat ?? null,
+      placeLng: attemptPlace?.lng ?? missionMetadata?.placeLng ?? null,
+    });
   }
 
   return result;
@@ -670,6 +879,7 @@ export default function DiscoverScreen() {
   const [myRecordVisibilityFilter, setMyRecordVisibilityFilter] = useState<MyRecordVisibilityFilter>("all");
   const [focusedMyRecordKey, setFocusedMyRecordKey] = useState<string | null>(null);
   const [selectedMapBubbleId, setSelectedMapBubbleId] = useState<string | null>(null);
+  const [fitMyRecordMarkers, setFitMyRecordMarkers] = useState(false);
 
   const [registerVisible, setRegisterVisible] = useState(false);
   const [recordTitle, setRecordTitle] = useState("");
@@ -677,9 +887,14 @@ export default function DiscoverScreen() {
   const [category, setCategory] = useState("");
   const [content, setContent] = useState("");
   const [emotion, setEmotion] = useState<EmotionValue | "">("");
+  const [experiencePreference, setExperiencePreference] =
+    useState<ExperiencePreferenceValue | "">("");
   const [visibility, setVisibility] = useState<RecordVisibility>("private");
   const [photos, setPhotos] = useState<ImagePicker.ImagePickerAsset[]>([]);
   const [saving, setSaving] = useState(false);
+  const [placeGroupName, setPlaceGroupName] = useState("");
+  const [placeGroupRecords, setPlaceGroupRecords] =
+    useState<DiscoverBubble[]>([]);
 
   const sheetTranslateY = useRef(new Animated.Value(SHEET_CLOSE_POSITION)).current;
   const dragStart = useRef(0);
@@ -831,6 +1046,7 @@ export default function DiscoverScreen() {
             id: String(row.id),
             source: "discover",
             discoverPostId: String(row.id),
+            missionAttemptId: null,
             title,
             content,
             placeName: String(row.place_name ?? "장소 정보 없음"),
@@ -852,21 +1068,40 @@ export default function DiscoverScreen() {
           const metadata = missionMetadataByAttemptId.get(attemptId);
           const content = String(row.content ?? "");
           const title = metadata?.title ?? "미션 기록";
+          const storedPlaceName = String(row.location_name ?? "").trim();
+          const isHomeRecord = row.location_type === "home";
+          const storedLat = row.location_latitude == null
+            ? Number.NaN
+            : Number(row.location_latitude);
+          const storedLng = row.location_longitude == null
+            ? Number.NaN
+            : Number(row.location_longitude);
+          const resolvedPlaceName = isHomeRecord
+            ? "내 방"
+            : !isGenericMissionPlaceLabel(storedPlaceName)
+              ? storedPlaceName
+              : metadata?.placeName ?? "장소 정보 없음";
+
           return {
             key: `mission-${row.id}`,
             id: String(row.id),
             source: "mission",
             discoverPostId: null,
+            missionAttemptId: attemptId || null,
             title,
             content,
-            placeName: String(row.location_name ?? "").trim() || (row.location_type === "home" ? "내 방" : "장소 정보 없음"),
+            placeName: resolvedPlaceName,
             emotion: EMOTION_LABEL[String(row.emotion ?? "")] ?? String(row.emotion ?? ""),
             category: metadata?.category ?? inferRecordCategory(`${title} ${content}`),
             visibility: normalizeRecordVisibility(row.visibility),
             createdAt: String(row.recorded_at ?? row.created_at ?? ""),
             likes: 0,
-            lat: Number.isFinite(Number(row.location_latitude)) ? Number(row.location_latitude) : null,
-            lng: Number.isFinite(Number(row.location_longitude)) ? Number(row.location_longitude) : null,
+            lat: Number.isFinite(storedLat)
+              ? storedLat
+              : metadata?.placeLat ?? null,
+            lng: Number.isFinite(storedLng)
+              ? storedLng
+              : metadata?.placeLng ?? null,
             photo: await resolveRecordCoverPhoto(row),
           };
         }),
@@ -1007,7 +1242,10 @@ export default function DiscoverScreen() {
 
   const closeSheet = () => {
     Animated.timing(sheetTranslateY, { toValue: SHEET_CLOSE_POSITION, duration: 220, useNativeDriver: true }).start(() => {
-      setActiveBubble(null); setSheetBubble(null);
+      setActiveBubble(null);
+      setSheetBubble(null);
+      setPlaceGroupName("");
+      setPlaceGroupRecords([]);
     });
   };
   const openSheet = () => { Animated.spring(sheetTranslateY, { toValue: 0, useNativeDriver: true, damping: 22, stiffness: 180 }).start(); };
@@ -1066,7 +1304,12 @@ export default function DiscoverScreen() {
     Animated.timing(mySheetTranslateY, { toValue: MY_SHEET_CLOSE_POSITION, duration: 220, useNativeDriver: true }).start(callback);
   };
 
-  useEffect(() => { if (activeFilter === "내 기록") openMyRecordsSheet(false); }, [activeFilter]);
+  useEffect(() => {
+    if (activeFilter === "내 기록") {
+      setFitMyRecordMarkers(true);
+      openMyRecordsSheet(false);
+    }
+  }, [activeFilter]);
 
   const mySheetPanResponder = useRef(
     PanResponder.create({
@@ -1094,6 +1337,9 @@ export default function DiscoverScreen() {
     setMapCenter(nextCenter);
 
     if (isArchiveFilter(activeFilterRef.current) || isPersonalMapFilter(activeFilterRef.current)) {
+      if (activeFilterRef.current === "내 기록") {
+        setFitMyRecordMarkers(false);
+      }
       setMapRefreshAvailable(false);
       return;
     }
@@ -1152,6 +1398,7 @@ export default function DiscoverScreen() {
       setMyRecordVisibilityFilter(nextFilter);
       setFocusedMyRecordKey(null);
       setSelectedMapBubbleId(null);
+      setFitMyRecordMarkers(true);
       myRecordsListRef.current?.scrollTo({ y: 0, animated: false });
       myRecordContentAnimation.setValue(0);
       Animated.timing(myRecordContentAnimation, { toValue: 1, duration: 180, useNativeDriver: true }).start();
@@ -1164,8 +1411,10 @@ export default function DiscoverScreen() {
     return [{
       id: discoverPostId ?? `mission-record-${record.id}`,
       discoverPostId,
+      missionRecordId: record.source === "mission" ? record.id : null,
+      missionAttemptId: record.missionAttemptId,
       canLike: Boolean(discoverPostId) && record.visibility === "nickname",
-      canDelete: Boolean(discoverPostId),
+      canDelete: true,
       user_id: currentUserId,
       place: record.placeName,
       lat: record.lat,
@@ -1193,6 +1442,7 @@ export default function DiscoverScreen() {
     const nextCenter = { lat: bubble.lat, lng: bubble.lng };
     mapCenterRef.current = nextCenter;
     setMapCenter(nextCenter);
+    setFitMyRecordMarkers(false);
     setFocusedMyRecordKey(record.key);
     setSelectedMapBubbleId(String(bubble.id));
     setActiveBubble(null);
@@ -1218,12 +1468,29 @@ export default function DiscoverScreen() {
     return bubbles;
   }, [activeFilter, bubbles, myInterests, myRecordBubbles]);
 
+  const groupedMapBubbles = useMemo(
+    () =>
+      activeFilter === "내 기록"
+        ? filteredBubbles
+        : groupDiscoverBubblesByPlace(filteredBubbles),
+    [activeFilter, filteredBubbles],
+  );
+
   const visibleHomeRecords = homeArchiveTab === "shared" ? sharedHomeRecords : myHomeRecords;
 
   const applyLikeResult = useCallback((postId: string, liked: boolean, likesCount: number) => {
     setLikedPostIds((current) => liked ? (current.includes(postId) ? current : [...current, postId]) : current.filter((id) => id !== postId));
     setBubbles((current) => current.map((item) => item.id === postId ? { ...item, likes: likesCount } : item));
     setSheetBubble((current) => current?.id === postId ? { ...current, likes: likesCount } : current);
+    setPlaceGroupRecords((current) =>
+      sortDiscoverRecords(
+        current.map((item) =>
+          item.discoverPostId === postId || item.id === postId
+            ? { ...item, likes: likesCount }
+            : item,
+        ),
+      ),
+    );
     setSharedHomeRecords((current) => current.map((item) => item.id === postId ? { ...item, likes: likesCount } : item));
     setMyHomeRecords((current) => current.map((item) => item.id === postId ? { ...item, likes: likesCount } : item));
     setMyRecords((current) => current.map((item) => item.discoverPostId === postId ? { ...item, likes: likesCount } : item));
@@ -1358,26 +1625,180 @@ export default function DiscoverScreen() {
     }
   };
 
-  const handleDeletePost = (targetBubble?: DiscoverBubble) => {
+  const deleteMissionRecord = async (
+    recordId: string,
+    missionAttemptId: string | null,
+  ) => {
+    if (!currentUserId) {
+      throw new Error("로그인이 필요합니다.");
+    }
+
+    const { data: photoRows, error: photoQueryError } = await supabase
+      .from("record_photos")
+      .select("storage_path")
+      .eq("record_id", recordId);
+
+    if (photoQueryError) {
+      throw photoQueryError;
+    }
+
+    const storagePaths = (photoRows ?? [])
+      .map((photo) => String(photo.storage_path ?? "").trim())
+      .filter(Boolean);
+
+    if (storagePaths.length > 0) {
+      const { error: storageError } = await supabase.storage
+        .from("record-photos")
+        .remove(storagePaths);
+
+      if (storageError) {
+        console.warn("기록 사진 파일 삭제 실패:", storageError);
+      }
+    }
+
+    // 개인 추천용 호불호가 있으면 기록과 함께 정리한다.
+    const { error: feedbackError } = await supabase
+      .from("mission_feedback")
+      .delete()
+      .eq("record_id", recordId)
+      .eq("user_id", currentUserId);
+
+    if (feedbackError) {
+      console.warn("기록 호불호 삭제 실패:", feedbackError);
+    }
+
+    const { error: recordError } = await supabase
+      .from("records")
+      .delete()
+      .eq("id", recordId)
+      .eq("user_id", currentUserId);
+
+    if (recordError) {
+      throw recordError;
+    }
+
+    // 기록을 지우면 완료됐던 미션을 다시 진행 중 상태로 돌려
+    // 사용자가 원할 때 새 기록을 작성할 수 있게 한다.
+    if (missionAttemptId) {
+      const { error: attemptError } = await supabase
+        .from("mission_attempts")
+        .update({
+          status: "selected",
+          completed_at: null,
+        })
+        .eq("id", missionAttemptId)
+        .eq("user_id", currentUserId);
+
+      if (attemptError) {
+        console.warn("미션 진행 상태 복원 실패:", attemptError);
+      }
+    }
+  };
+
+  const deleteRecordTarget = async (target: {
+    source: "discover" | "mission";
+    discoverPostId?: string | null;
+    missionRecordId?: string | null;
+    missionAttemptId?: string | null;
+  }) => {
+    if (target.source === "discover" && target.discoverPostId) {
+      await deleteDiscoverPost(target.discoverPostId);
+      return;
+    }
+
+    if (target.source === "mission" && target.missionRecordId) {
+      await deleteMissionRecord(
+        target.missionRecordId,
+        target.missionAttemptId ?? null,
+      );
+      return;
+    }
+
+    throw new Error("삭제할 기록 정보를 확인하지 못했습니다.");
+  };
+
+  const handleDeleteBubble = (targetBubble?: DiscoverBubble) => {
     const bubble = targetBubble ?? sheetBubble;
-    if (!bubble?.discoverPostId) return;
+    if (!bubble || bubble.multi) return;
+
+    const source = bubble.missionRecordId ? "mission" : "discover";
 
     Alert.alert("기록을 삭제할까요?", "삭제하면 되돌릴 수 없어요.", [
       { text: "취소", style: "cancel" },
       {
-        text: "삭제", style: "destructive",
+        text: "삭제",
+        style: "destructive",
         onPress: async () => {
           setDeleting(true);
           try {
-            await deleteDiscoverPost(bubble.discoverPostId!);
-            setSelectedMapBubbleId(null); closeSheet();
-            if (currentUserId) await loadMyRecords(currentUserId);
-            if (userLocation) {
-              const posts = await getNearbyDiscoverPosts(userLocation.lat, userLocation.lng, 5);
-              setBubbles(posts.length > 0 ? await buildBubbleList(posts) : []);
+            await deleteRecordTarget({
+              source,
+              discoverPostId: bubble.discoverPostId,
+              missionRecordId: bubble.missionRecordId,
+              missionAttemptId: bubble.missionAttemptId,
+            });
+
+            setSelectedMapBubbleId(null);
+            setFocusedMyRecordKey(null);
+            setFitMyRecordMarkers(false);
+            closeSheet();
+
+            if (currentUserId) {
+              await Promise.all([
+                loadMyRecords(currentUserId),
+                loadHomeRecords(currentUserId),
+              ]);
+            }
+
+            const currentCenter = mapCenterRef.current;
+            const posts = await getNearbyDiscoverPosts(
+              currentCenter.lat,
+              currentCenter.lng,
+              MAP_AUTO_SEARCH_RADIUS_KM,
+            );
+            setBubbles(posts.length > 0 ? await buildBubbleList(posts) : []);
+          } catch (error) {
+            Alert.alert(
+              "삭제 실패",
+              error instanceof Error ? error.message : "기록을 삭제하지 못했습니다.",
+            );
+          } finally {
+            setDeleting(false);
+          }
+        },
+      },
+    ]);
+  };
+
+  const handleDeleteMyRecord = (record: MyRecordItem) => {
+    Alert.alert("기록을 삭제할까요?", "삭제하면 되돌릴 수 없어요.", [
+      { text: "취소", style: "cancel" },
+      {
+        text: "삭제",
+        style: "destructive",
+        onPress: async () => {
+          setDeleting(true);
+          try {
+            await deleteRecordTarget({
+              source: record.source,
+              discoverPostId: record.discoverPostId,
+              missionRecordId: record.source === "mission" ? record.id : null,
+              missionAttemptId: record.missionAttemptId,
+            });
+            setSelectedMapBubbleId(null);
+            setFocusedMyRecordKey(null);
+            setFitMyRecordMarkers(false);
+            if (currentUserId) {
+              await Promise.all([
+                loadMyRecords(currentUserId),
+                loadHomeRecords(currentUserId),
+              ]);
             }
           } catch (error) {
-            Alert.alert("삭제 실패", error instanceof Error ? error.message : "");
+            Alert.alert(
+              "삭제 실패",
+              error instanceof Error ? error.message : "기록을 삭제하지 못했습니다.",
+            );
           } finally {
             setDeleting(false);
           }
@@ -1404,7 +1825,7 @@ export default function DiscoverScreen() {
     }
   };
 
-  const resetRecordForm = () => { setRecordTitle(""); setCategory(""); setContent(""); setEmotion(""); setVisibility("private"); setPhotos([]); };
+  const resetRecordForm = () => { setRecordTitle(""); setCategory(""); setContent(""); setEmotion(""); setExperiencePreference(""); setVisibility("private"); setPhotos([]); };
   const openLocationTypePicker = () => { setLocationTypeVisible(true); };
 
   const chooseLocationKind = (kind: RecordLocationKind) => {
@@ -1490,7 +1911,7 @@ export default function DiscoverScreen() {
   const removePhoto = (uri: string) => setPhotos((prev) => prev.filter((p) => p.uri !== uri));
 
   const handleSubmit = async () => {
-    if (!locationKind || (locationKind === "place" && !selectedPlace) || (locationKind !== "home" && !pickedLocation) || !recordTitle.trim() || !category || !content.trim() || !emotion) {
+    if (!locationKind || (locationKind === "place" && !selectedPlace) || (locationKind !== "home" && !pickedLocation) || !recordTitle.trim() || !category || !content.trim() || !emotion || !experiencePreference) {
       Alert.alert("입력 확인", "필수 항목들을 모두 입력하고 선택해주세요.");
       return;
     }
@@ -1502,7 +1923,7 @@ export default function DiscoverScreen() {
 
     setSaving(true);
     try {
-      await createDiscoverPost({
+      const createdPostId = await createDiscoverPost({
         placeName: effectivePlaceName, lat: effectiveCoordinate.lat, lng: effectiveCoordinate.lng,
         category, content: content.trim(), emotion, visibility: discoverStorageVisibility as any,
         photos: photos.map((photo) => ({ uri: photo.uri, mimeType: photo.mimeType })),
@@ -1513,6 +1934,37 @@ export default function DiscoverScreen() {
         p_source_kind: "independent", p_source_mission_id: null, p_share_mode: effectiveVisibility,
       });
       if (metadataError) throw new Error(`제목 저장 실패: ${metadataError.message}`);
+
+      const {
+        data: { user },
+        error: userError,
+      } = await supabase.auth.getUser();
+      if (userError) throw userError;
+      if (!user) throw new Error("로그인이 필요합니다.");
+
+      const { error: preferenceError } = await supabase
+        .from("mission_feedback")
+        .upsert(
+          {
+            user_id: user.id,
+            journey_id: null,
+            mission_id: null,
+            record_id: null,
+            discover_post_id: createdPostId,
+            source_kind: "independent",
+            preference: experiencePreference,
+            mission_title: recordTitle.trim(),
+            mission_category: category,
+            mission_place_name: effectivePlaceName,
+          },
+          { onConflict: "user_id,discover_post_id" },
+        );
+
+      if (preferenceError) {
+        throw new Error(
+          `경험 호불호 저장 실패: ${preferenceError.message}`,
+        );
+      }
 
       closeRegister(true);
 
@@ -1583,12 +2035,32 @@ export default function DiscoverScreen() {
   };
 
   const handleDiscoverMarkerPress = useCallback((id: string | number) => {
-    const bubble = filteredBubbles.find((item) => String(item.id) === String(id));
+    const bubble = groupedMapBubbles.find((item) => String(item.id) === String(id));
     if (!bubble) return;
     const nextCenter = { lat: bubble.lat, lng: bubble.lng };
-    mapCenterRef.current = nextCenter; setMapCenter(nextCenter);
+    mapCenterRef.current = nextCenter;
+    setMapCenter(nextCenter);
+    setFitMyRecordMarkers(false);
     setSelectedMapBubbleId(String(bubble.id));
-    setActiveBubble(null); setSheetBubble(null);
+    setActiveBubble(null);
+    setSheetBubble(null);
+
+    if (bubble.multi && bubble.groupRecords && bubble.groupRecords.length > 1) {
+      setPlaceGroupName(bubble.place);
+      setPlaceGroupRecords(sortDiscoverRecords(bubble.groupRecords));
+      sheetTranslateY.stopAnimation();
+      sheetTranslateY.setValue(SHEET_CLOSE_POSITION);
+      Animated.spring(sheetTranslateY, {
+        toValue: 0,
+        useNativeDriver: true,
+        damping: 22,
+        stiffness: 180,
+      }).start();
+      return;
+    }
+
+    setPlaceGroupName("");
+    setPlaceGroupRecords([]);
 
     if (activeFilter === "내 기록") {
       const matchingRecord = visibleMyRecords.find((record) => {
@@ -1601,23 +2073,29 @@ export default function DiscoverScreen() {
       }
       openMyRecordsSheet(false);
     }
-  }, [activeFilter, filteredBubbles, visibleMyRecords]);
+  }, [activeFilter, groupedMapBubbles, sheetTranslateY, visibleMyRecords]);
 
-  const handleDiscoverMarkerClose = useCallback(() => { setSelectedMapBubbleId(null); }, []);
+  const handleDiscoverMarkerClose = useCallback(() => {
+    // 선택 카드만 닫고 현재 지도 중심과 확대 수준은 그대로 유지한다.
+    setFitMyRecordMarkers(false);
+    setSelectedMapBubbleId(null);
+    setPlaceGroupName("");
+    setPlaceGroupRecords([]);
+  }, []);
   const handleDiscoverMarkerAction = useCallback((id: string | number) => {
-    const bubble = filteredBubbles.find((item) => String(item.id) === String(id));
-    if (bubble) void handleTryMission(bubble);
-  }, [filteredBubbles]);
+    const bubble = groupedMapBubbles.find((item) => String(item.id) === String(id));
+    if (bubble && !bubble.multi) void handleTryMission(bubble);
+  }, [groupedMapBubbles]);
 
   const handleDiscoverMarkerLike = useCallback((id: string | number) => {
-    const bubble = filteredBubbles.find((item) => String(item.id) === String(id));
-    if (bubble?.discoverPostId) void handleToggleLike(bubble.discoverPostId);
-  }, [filteredBubbles, handleToggleLike]);
+    const bubble = groupedMapBubbles.find((item) => String(item.id) === String(id));
+    if (!bubble?.multi && bubble?.discoverPostId) void handleToggleLike(bubble.discoverPostId);
+  }, [groupedMapBubbles, handleToggleLike]);
 
   const handleDiscoverMarkerDelete = useCallback((id: string | number) => {
-    const bubble = filteredBubbles.find((item) => String(item.id) === String(id));
-    if (bubble) handleDeletePost(bubble);
-  }, [filteredBubbles]);
+    const bubble = groupedMapBubbles.find((item) => String(item.id) === String(id));
+    if (bubble && !bubble.multi) handleDeleteBubble(bubble);
+  }, [groupedMapBubbles]);
 
   return (
     <View style={styles.container}>
@@ -1625,18 +2103,23 @@ export default function DiscoverScreen() {
         latitude={mapCenter.lat}
         longitude={mapCenter.lng}
         userLocation={userLocation}
-        fitAllMarkers={activeFilter === "내 기록" && !selectedMapBubbleId}
+        fitAllMarkers={activeFilter === "내 기록" && fitMyRecordMarkers}
         selectedMarkerId={selectedMapBubbleId}
-        markers={filteredBubbles.map((b) => ({
+        markers={groupedMapBubbles.map((b) => ({
           id: b.id, lat: b.lat, lng: b.lng, photo: b.photo, count: b.multi ? b.count : undefined,
           category: b.category, cardVariant: "record" as const, title: b.mission, description: b.note,
           placeName: b.place, recordTime: b.time, nickname: b.nick, emotion: b.emotion, likes: b.likes,
           liked: Boolean(b.discoverPostId && likedPostIds.includes(b.discoverPostId)),
-          canLike: Boolean(b.canLike !== false && b.discoverPostId),
-          canDelete: Boolean(b.canDelete !== false && b.discoverPostId && b.user_id === currentUserId),
+          canLike: Boolean(!b.multi && b.canLike !== false && b.discoverPostId),
+          canDelete: Boolean(
+            !b.multi &&
+              b.canDelete !== false &&
+              b.user_id === currentUserId &&
+              (b.discoverPostId || b.missionRecordId)
+          ),
           likeDisabled: Boolean(b.discoverPostId && likeUpdatingIds.includes(b.discoverPostId)),
           actionLabel:
-            b.sourceKind === "mission" && b.sourceMissionId
+            !b.multi && b.sourceKind === "mission" && b.sourceMissionId
               ? tryingMission
                 ? "미션 가져오는 중..."
                 : "나도 해볼래요"
@@ -1890,11 +2373,25 @@ export default function DiscoverScreen() {
                         <Text style={styles.myRecordCardDate}>{record.createdAt ? new Date(record.createdAt).toLocaleDateString("ko-KR") : "날짜 정보 없음"}</Text>
                         <Text style={styles.myRecordCardVisibility}>{record.visibility === "nickname" ? `${currentNickname} · 닉네임 공유` : "나만 보기"}</Text>
                       </View>
-                      {record.placeName !== "내 방" && record.lat !== null && record.lng !== null && Number.isFinite(record.lat) && Number.isFinite(record.lng) && !(record.lat === 0 && record.lng === 0) ? (
-                        <Pressable hitSlop={8} onPress={() => focusMyRecordOnMap(record)} style={({ pressed }) => [styles.myRecordCardOpen, focusedMyRecordKey === record.key && styles.myRecordCardOpenFocused, pressed && styles.pressed]}>
-                          <Ionicons name={focusedMyRecordKey === record.key ? "locate" : "locate-outline"} size={17} color={focusedMyRecordKey === record.key ? WH : BL} />
+                      <View style={styles.myRecordCardActions}>
+                        {record.placeName !== "내 방" && record.lat !== null && record.lng !== null && Number.isFinite(record.lat) && Number.isFinite(record.lng) && !(record.lat === 0 && record.lng === 0) ? (
+                          <Pressable hitSlop={8} onPress={() => focusMyRecordOnMap(record)} style={({ pressed }) => [styles.myRecordCardOpen, focusedMyRecordKey === record.key && styles.myRecordCardOpenFocused, pressed && styles.pressed]}>
+                            <Ionicons name={focusedMyRecordKey === record.key ? "locate" : "locate-outline"} size={17} color={focusedMyRecordKey === record.key ? WH : BL} />
+                          </Pressable>
+                        ) : null}
+                        <Pressable
+                          hitSlop={8}
+                          onPress={() => handleDeleteMyRecord(record)}
+                          disabled={deleting}
+                          style={({ pressed }) => [
+                            styles.myRecordCardDelete,
+                            deleting && styles.buttonDisabled,
+                            pressed && styles.pressed,
+                          ]}
+                        >
+                          <Ionicons name="trash-outline" size={16} color="#D43B30" />
                         </Pressable>
-                      ) : null}
+                      </View>
                     </View>
 
                     <Text style={styles.myRecordCardTitle}>{record.title}</Text>
@@ -1917,6 +2414,114 @@ export default function DiscoverScreen() {
               </ScrollView>
             )}
           </Animated.View>
+        </Animated.View>
+      )}
+
+      {placeGroupRecords.length > 1 && (
+        <Animated.View
+          style={[
+            styles.sheet,
+            styles.placeGroupSheet,
+            { transform: [{ translateY: sheetTranslateY }] },
+          ]}
+        >
+          <View style={[styles.dragArea, webDragStyle]} {...panResponder.panHandlers}>
+            <View style={styles.handle} />
+          </View>
+          <View style={styles.placeGroupHeader}>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.placeGroupCaption}>이 장소의 기록</Text>
+              <Text style={styles.placeGroupTitle}>{placeGroupName}</Text>
+              <Text style={styles.placeGroupCount}>
+                좋아요 많은 순 · 좋아요가 같으면 최신순 · {placeGroupRecords.length}개
+              </Text>
+            </View>
+            <Pressable onPress={closeSheet} hitSlop={10} style={styles.placeGroupClose}>
+              <Ionicons name="close" size={18} color={T1} />
+            </Pressable>
+          </View>
+
+          <ScrollView
+            showsVerticalScrollIndicator={false}
+            contentContainerStyle={styles.placeGroupList}
+          >
+            {placeGroupRecords.map((record, index) => (
+              <View key={record.id} style={styles.placeGroupRecordCard}>
+                <View style={styles.placeGroupRankBadge}>
+                  <Text style={styles.placeGroupRankText}>{index + 1}</Text>
+                </View>
+                {record.photo ? (
+                  <Image source={{ uri: record.photo }} style={styles.placeGroupRecordPhoto} />
+                ) : (
+                  <View style={styles.placeGroupRecordIcon}>
+                    <Text style={styles.placeGroupRecordIconText}>
+                      {getCategoryEmoji(record.category)}
+                    </Text>
+                  </View>
+                )}
+                <View style={styles.placeGroupRecordBody}>
+                  <View style={styles.placeGroupRecordHeader}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.placeGroupRecordTitle}>{record.mission}</Text>
+                      <Text style={styles.placeGroupRecordMeta}>
+                        {record.time} · {record.nick} · {record.emotion}
+                      </Text>
+                    </View>
+                    {record.canLike && record.discoverPostId ? (
+                      <Pressable
+                        onPress={() => void handleToggleLike(record.discoverPostId!)}
+                        disabled={likeUpdatingIds.includes(record.discoverPostId)}
+                        style={styles.placeGroupLikeButton}
+                      >
+                        <Ionicons
+                          name={
+                            likedPostIds.includes(record.discoverPostId)
+                              ? "heart"
+                              : "heart-outline"
+                          }
+                          size={18}
+                          color={PINK}
+                        />
+                        <Text style={styles.placeGroupLikeText}>{record.likes}</Text>
+                      </Pressable>
+                    ) : (
+                      <View style={styles.placeGroupLikeButton}>
+                        <Ionicons name="heart-outline" size={18} color={T2} />
+                        <Text style={styles.placeGroupLikeText}>{record.likes}</Text>
+                      </View>
+                    )}
+                  </View>
+
+                  <Text style={styles.placeGroupRecordNote}>{record.note}</Text>
+
+                  <View style={styles.placeGroupRecordActions}>
+                    {record.sourceKind === "mission" && record.sourceMissionId ? (
+                      <Pressable
+                        onPress={() => void handleTryMission(record)}
+                        disabled={tryingMission}
+                        style={styles.placeGroupMissionButton}
+                      >
+                        <Text style={styles.placeGroupMissionButtonText}>
+                          나도 해볼래요
+                        </Text>
+                      </Pressable>
+                    ) : null}
+                    {record.canDelete !== false &&
+                    (record.discoverPostId || record.missionRecordId) &&
+                    record.user_id === currentUserId ? (
+                      <Pressable
+                        onPress={() => handleDeleteBubble(record)}
+                        disabled={deleting}
+                        style={styles.placeGroupDeleteButton}
+                      >
+                        <Text style={styles.placeGroupDeleteButtonText}>삭제</Text>
+                      </Pressable>
+                    ) : null}
+                  </View>
+                </View>
+              </View>
+            ))}
+          </ScrollView>
         </Animated.View>
       )}
 
@@ -1970,8 +2575,8 @@ export default function DiscoverScreen() {
                   </Text>
                 </Pressable>
               ) : null}
-              {sheetBubble.canDelete !== false && sheetBubble.discoverPostId && sheetBubble.user_id === currentUserId ? (
-                <Pressable style={[styles.deleteBtn, deleting && { opacity: 0.6 }]} onPress={() => handleDeletePost()} disabled={deleting}>
+              {sheetBubble.canDelete !== false && (sheetBubble.discoverPostId || sheetBubble.missionRecordId) && sheetBubble.user_id === currentUserId ? (
+                <Pressable style={[styles.deleteBtn, deleting && { opacity: 0.6 }]} onPress={() => handleDeleteBubble()} disabled={deleting}>
                   <Text style={{ color: "#D43B30", fontSize: 13, fontWeight: "800" }}>
                     {deleting ? "삭제 중..." : "삭제"}
                   </Text>
@@ -2209,6 +2814,48 @@ export default function DiscoverScreen() {
               />
               <Text style={styles.characterCount}>{content.length}/1200</Text>
 
+              <Text style={styles.fieldLabel}>이 경험은 어땠나요?</Text>
+              <Text style={styles.preferenceGuide}>
+                이 선택은 공개되지 않고 다음 미션 추천에만 사용돼요.
+              </Text>
+              <View style={styles.preferenceList}>
+                {EXPERIENCE_PREFERENCES.map((preference) => {
+                  const selected = experiencePreference === preference.value;
+                  return (
+                    <Pressable
+                      key={preference.value}
+                      onPress={() => setExperiencePreference(preference.value)}
+                      style={[
+                        styles.preferenceOption,
+                        selected && styles.preferenceOptionSelected,
+                      ]}
+                    >
+                      <Text style={styles.preferenceOptionEmoji}>
+                        {preference.emoji}
+                      </Text>
+                      <View style={styles.preferenceOptionTextWrap}>
+                        <Text
+                          style={[
+                            styles.preferenceOptionTitle,
+                            selected && styles.preferenceOptionTitleSelected,
+                          ]}
+                        >
+                          {preference.label}
+                        </Text>
+                        <Text style={styles.preferenceOptionDescription}>
+                          {preference.description}
+                        </Text>
+                      </View>
+                      <Ionicons
+                        name={selected ? "checkmark-circle" : "ellipse-outline"}
+                        size={20}
+                        color={selected ? BL : T2}
+                      />
+                    </Pressable>
+                  );
+                })}
+              </View>
+
               <View style={styles.photoSectionHeader}>
                 <Text style={[styles.fieldLabel, { marginBottom: 0 }]}>사진 추가</Text>
                 <Text style={styles.photoCountText}>{photos.length}/{MAX_PHOTOS}</Text>
@@ -2315,6 +2962,42 @@ const styles = StyleSheet.create({
   primaryBtn: { flex: 1, backgroundColor: ACCENT, borderRadius: 14, paddingVertical: 13, alignItems: "center" },
   secondaryBtn: { backgroundColor: BLL, borderRadius: 14, paddingVertical: 13, paddingHorizontal: 16, alignItems: "center" },
   deleteBtn: { backgroundColor: "#FCE8E6", borderRadius: 14, paddingVertical: 13, paddingHorizontal: 16, alignItems: "center" },
+
+  placeGroupSheet: { maxHeight: "78%", overflow: "hidden" },
+  placeGroupHeader: { paddingHorizontal: 20, paddingBottom: 12, flexDirection: "row", alignItems: "flex-start" },
+  placeGroupCaption: { marginBottom: 3, fontSize: 11, fontWeight: "800", color: BL },
+  placeGroupTitle: { fontSize: 20, fontWeight: "800", color: T0 },
+  placeGroupCount: { marginTop: 4, fontSize: 11, lineHeight: 16, color: T1 },
+  placeGroupClose: { width: 34, height: 34, marginLeft: 10, alignItems: "center", justifyContent: "center", backgroundColor: BG, borderRadius: 17 },
+  placeGroupList: { paddingHorizontal: 16, paddingBottom: 118 },
+  placeGroupRecordCard: { position: "relative", marginBottom: 12, padding: 12, flexDirection: "row", backgroundColor: WH, borderWidth: 1, borderColor: T3, borderRadius: 18 },
+  placeGroupRankBadge: { position: "absolute", top: 7, left: 7, zIndex: 2, minWidth: 22, height: 22, paddingHorizontal: 5, alignItems: "center", justifyContent: "center", backgroundColor: BL, borderRadius: 11 },
+  placeGroupRankText: { fontSize: 10, fontWeight: "800", color: WH },
+  placeGroupRecordPhoto: { width: 82, height: 96, marginRight: 12, borderRadius: 13, backgroundColor: T3 },
+  placeGroupRecordIcon: { width: 82, height: 96, marginRight: 12, alignItems: "center", justifyContent: "center", backgroundColor: BLL, borderRadius: 13 },
+  placeGroupRecordIconText: { fontSize: 30 },
+  placeGroupRecordBody: { flex: 1, minWidth: 0 },
+  placeGroupRecordHeader: { flexDirection: "row", alignItems: "flex-start" },
+  placeGroupRecordTitle: { paddingRight: 6, fontSize: 14, lineHeight: 19, fontWeight: "800", color: T0 },
+  placeGroupRecordMeta: { marginTop: 3, fontSize: 10, color: T1 },
+  placeGroupLikeButton: { minWidth: 34, alignItems: "center", paddingLeft: 5 },
+  placeGroupLikeText: { marginTop: 1, fontSize: 10, fontWeight: "700", color: T1 },
+  placeGroupRecordNote: { marginTop: 8, fontSize: 12, lineHeight: 18, color: T0 },
+  placeGroupRecordActions: { marginTop: 10, flexDirection: "row", gap: 7 },
+  placeGroupMissionButton: { paddingHorizontal: 10, paddingVertical: 7, backgroundColor: ACCENT, borderRadius: 9 },
+  placeGroupMissionButtonText: { fontSize: 10, fontWeight: "800", color: T0 },
+  placeGroupDeleteButton: { paddingHorizontal: 10, paddingVertical: 7, backgroundColor: "#FCE8E6", borderRadius: 9 },
+  placeGroupDeleteButtonText: { fontSize: 10, fontWeight: "800", color: "#D43B30" },
+
+  preferenceGuide: { marginTop: -8, marginBottom: 10, fontSize: 11, lineHeight: 16, color: T1 },
+  preferenceList: { marginBottom: 18, gap: 8 },
+  preferenceOption: { minHeight: 64, paddingHorizontal: 13, paddingVertical: 10, flexDirection: "row", alignItems: "center", backgroundColor: WH, borderWidth: 1, borderColor: T3, borderRadius: 14 },
+  preferenceOptionSelected: { backgroundColor: BLL, borderColor: BL },
+  preferenceOptionEmoji: { width: 30, marginRight: 8, fontSize: 21, textAlign: "center" },
+  preferenceOptionTextWrap: { flex: 1, minWidth: 0 },
+  preferenceOptionTitle: { marginBottom: 2, fontSize: 13, fontWeight: "800", color: T0 },
+  preferenceOptionTitleSelected: { color: BL },
+  preferenceOptionDescription: { fontSize: 10, lineHeight: 15, color: T1 },
 
   fabWrap: { position: "absolute", right: 24, bottom: 100, width: 58, height: 58, alignItems: "center", justifyContent: "center", zIndex: 10 },
   fabGlow: { position: "absolute", width: 58, height: 58, borderRadius: 29, backgroundColor: BL },
@@ -2500,8 +3183,10 @@ const styles = StyleSheet.create({
   myRecordCardHeaderText: { flex: 1 },
   myRecordCardDate: { marginBottom: 2, fontSize: 11, color: T2 },
   myRecordCardVisibility: { fontSize: 12, fontWeight: "800", color: T0 },
+  myRecordCardActions: { flexDirection: "row", alignItems: "center", gap: 7 },
   myRecordCardOpen: { width: 34, height: 34, alignItems: "center", justifyContent: "center", backgroundColor: BLL, borderRadius: 17 },
   myRecordCardOpenFocused: { backgroundColor: BL },
+  myRecordCardDelete: { width: 34, height: 34, alignItems: "center", justifyContent: "center", backgroundColor: "#FCE8E6", borderRadius: 17 },
   myRecordCardTitle: { marginBottom: 4, fontSize: 16, lineHeight: 22, fontWeight: "800", color: T0 },
   myRecordCardPlace: { marginBottom: 10, fontSize: 11, color: T1 },
 });
