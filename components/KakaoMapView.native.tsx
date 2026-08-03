@@ -109,8 +109,8 @@ export function KakaoMapView({
       if (window.focusMapMarker) {
         window.focusMapMarker(
           ${JSON.stringify(selectedMarkerKey)},
-          ${latitude},
-          ${longitude},
+          ${initialMapCenterRef.current.lat},
+          ${initialMapCenterRef.current.lng},
           ${Number.isFinite(focusOffsetY) ? focusOffsetY : 0}
         );
       }
@@ -118,7 +118,7 @@ export function KakaoMapView({
     `;
 
     webViewRef.current?.injectJavaScript(script);
-  }, [selectedMarkerKey, latitude, longitude, focusOffsetY]);
+  }, [selectedMarkerKey, focusOffsetY,]);
 
   useEffect(() => {
     if (mapReadyRef.current) {
@@ -140,6 +140,11 @@ export function KakaoMapView({
       syncMarkerStates();
     }
   }, [syncMarkerStates]);
+
+  const initialMapCenterRef = useRef({
+  lat: latitude,
+  lng: longitude,
+});
 
   const html = useMemo(
     () => `
@@ -559,7 +564,7 @@ export function KakaoMapView({
             errorElement.textContent = '카카오 SDK 로드 실패';
           } else {
             kakao.maps.load(function () {
-              const position = new kakao.maps.LatLng(${latitude}, ${longitude});
+              const position = new kakao.maps.LatLng(${initialMapCenterRef.current.lat}, ${initialMapCenterRef.current.lng});
               const map = new kakao.maps.Map(document.getElementById('map'), {
                 center: position,
                 level: 5,
