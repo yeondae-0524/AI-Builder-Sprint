@@ -444,7 +444,9 @@ const styles = StyleSheet.create({
 
 missionPopup: {
   position: "absolute",
-  top: 68,
+  // 발견 탭의 검색창과 필터 아래에 카드가 나타나도록
+  // 기존 68px보다 아래로 내린다.
+  top: 160,
   width: "92%",
   maxWidth: 360,
   padding: 16,
