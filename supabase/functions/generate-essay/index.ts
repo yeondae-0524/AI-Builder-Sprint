@@ -780,6 +780,7 @@ function buildEssayPrompt(body: NormalizedEssayAiRequest) {
 - 한국어로만 작성하세요.
 - content와 verdict에 같은 문장을 반복하지 마세요.
 - aiRecommendation에는 행동 하나만 넣으세요.
+- title은 단어나 문장을 중간에서 억지로 자르지 말고, 처음부터 공백과 문장부호를 포함해 11자 이내의 자연스럽고 완결된 제목으로 작성하세요.
 - ${getLengthInstruction(body.records.length, body.persona)}
 - content는 짧은 소제목과 여러 문단으로 나누고, 문단 사이에는 반드시 빈 줄을 한 줄 넣으세요.
 - 한 문단은 2~4문장 정도로 유지하고 하나의 긴 문단으로 몰아쓰지 마세요.
@@ -794,7 +795,8 @@ ${getPersonaInstruction(body.persona)}
 5. 선택한 역할의 구조가 다른 역할과 분명히 구분되는가?
 6. content와 verdict가 중복되지 않는가?
 7. aiRecommendation이 행동 하나인가?
-${isComic ? "8. comic.panels가 정확히 4개이고 모든 선택값이 허용 목록에 있는가?" : "8. comic 값이 null인가?"}
+8. title이 공백과 문장부호를 포함해 11자 이내이며, 단어나 문장이 어색하게 끊기지 않았는가?
+${isComic ? "9. comic.panels가 정확히 4개이고 모든 선택값이 허용 목록에 있는가?" : "9. comic 값이 null인가?"}
 하나라도 어기면 출력 전에 수정하세요.
 
 출력 규칙:
@@ -803,6 +805,7 @@ ${isComic ? "8. comic.panels가 정확히 4개이고 모든 선택값이 허용 
 - 문자열 안의 줄바꿈은 \n을 사용하세요.
 - 이스케이프되지 않은 실제 줄바꿈, 탭, 제어문자를 JSON 문자열에 넣지 마세요.
 - title, content, summary, verdict, aiRecommendation은 빈 문자열이면 안 됩니다.
+- title은 공백과 문장부호를 포함해 11자 이내여야 하며, 말이 중간에서 잘린 형태가 아니라 자연스럽게 완결되어야 합니다.
 - insights는 정확히 3개 작성하세요.
 - persona는 반드시 "${body.persona}" 그대로 반환하세요.
 
@@ -833,6 +836,7 @@ ${body.persona === "emotion_interpreter"
 - 미션 목표와 실제 행동을 비교하세요.
 - 선택한 역할의 고정 구조와 접두어를 정확히 지키세요.
 - 다른 역할의 말투와 형식을 섞지 마세요.
+- 에세이 제목 title은 처음부터 공백과 문장부호를 포함해 11자 이내의 자연스럽고 완결된 표현으로 작성하세요. 길이를 맞추기 위해 단어나 문장을 중간에서 자르지 마세요.
 ${isComic
     ? "- 하나의 에피소드가 되도록 1~3개 기록을 연결하고, 4컷의 기승전결과 기록 근거를 명확히 하세요."
     : "- 서로 다른 기록을 최소 두 개 연결해 감정, 행동 또는 패턴을 설명하세요."}
