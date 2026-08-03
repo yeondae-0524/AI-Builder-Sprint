@@ -204,7 +204,11 @@ type DiscoverBubble = {
   groupRecords?: DiscoverBubble[];
 };
 
-const EMOTIONS: Array<{ label: string; value: EmotionValue; emoji: string }> = [
+const EMOTIONS: {
+  label: string;
+  value: EmotionValue;
+  emoji: string;
+}[] = [
   { label: "편안해요", value: "comfortable", emoji: "😌" },
   { label: "즐거워요", value: "joyful", emoji: "😊" },
   { label: "새로워요", value: "new", emoji: "✨" },
@@ -212,12 +216,12 @@ const EMOTIONS: Array<{ label: string; value: EmotionValue; emoji: string }> = [
   { label: "잘 모르겠어요", value: "unsure", emoji: "🤔" },
 ];
 
-const EXPERIENCE_PREFERENCES: Array<{
+const EXPERIENCE_PREFERENCES: {
   value: ExperiencePreferenceValue;
   emoji: string;
   label: string;
   description: string;
-}> = [
+}[] = [
   {
     value: "like",
     emoji: "👍",
@@ -594,15 +598,36 @@ function RecordLocationPickerMap({ center, pickedLocation, guideText, onSelect }
 </body>
 </html>`, [center.lat, center.lng, escapedGuideText]);
 
-  const syncPickedLocation = useCallback((shouldPan: boolean) => {
-    if (!mapReadyRef.current || !pickedLocation) return;
+  const pickedLatitude = pickedLocation?.lat;
+const pickedLongitude = pickedLocation?.lng;
+
+const syncPickedLocation = useCallback(
+  (shouldPan: boolean) => {
+    if (
+      !mapReadyRef.current ||
+      pickedLatitude == null ||
+      pickedLongitude == null
+    ) {
+      return;
+    }
+
     webViewRef.current?.injectJavaScript(`
       if (window.setPickedLocation) {
-        window.setPickedLocation(${pickedLocation.lat}, ${pickedLocation.lng}, ${shouldPan ? "true" : "false"});
+        window.setPickedLocation(
+          ${pickedLatitude},
+          ${pickedLongitude},
+          ${shouldPan ? "true" : "false"}
+        );
       }
       true;
     `);
-  }, [pickedLocation?.lat, pickedLocation?.lng]);
+  },
+  [pickedLatitude, pickedLongitude],
+);
+
+useEffect(() => {
+  syncPickedLocation(true);
+}, [syncPickedLocation]);
 
   useEffect(() => { syncPickedLocation(true); }, [syncPickedLocation]);
 
@@ -795,27 +820,56 @@ async function getMissionMetadataByAttemptIds(attemptIds: string[]) {
 }
 
 async function resolveDiscoverCoverPhoto(row: any) {
-  const photos: Array<DiscoverPostPhoto & { sort_order?: number | null }> = Array.isArray(row?.photos) ? row.photos : [];
+  const photos: (DiscoverPostPhoto & {
+    sort_order?: number | null;
+  })[] = Array.isArray(row?.photos) ? row.photos : [];
+
   const sorted = [...photos].sort((left, right) => {
-    if (Boolean(left.is_cover) !== Boolean(right.is_cover)) return left.is_cover ? -1 : 1;
+    if (Boolean(left.is_cover) !== Boolean(right.is_cover)) {
+      return left.is_cover ? -1 : 1;
+    }
+
     return Number(left.sort_order ?? 0) - Number(right.sort_order ?? 0);
   });
+
   const storagePath = String(sorted[0]?.storage_path ?? "").trim();
   if (!storagePath) return undefined;
-  try { return await getDiscoverPhotoUrl(storagePath); } catch { return undefined; }
+
+  try {
+    return await getDiscoverPhotoUrl(storagePath);
+  } catch {
+    return undefined;
+  }
 }
 
-async function resolveRecordCoverPhoto(row: any) {
-  const photos: Array<DiscoverPostPhoto & { sort_order?: number | null }> = Array.isArray(row?.record_photos) ? row.record_photos : [];
+async function resolveRecordCoverPhoto(
+  row: any,
+): Promise<string | undefined> {
+  const photos: (DiscoverPostPhoto & {
+    sort_order?: number | null;
+  })[] = Array.isArray(row?.record_photos)
+    ? row.record_photos
+    : [];
+
   const sorted = [...photos].sort((left, right) => {
-    if (Boolean(left.is_cover) !== Boolean(right.is_cover)) return left.is_cover ? -1 : 1;
+    if (Boolean(left.is_cover) !== Boolean(right.is_cover)) {
+      return left.is_cover ? -1 : 1;
+    }
+
     return Number(left.sort_order ?? 0) - Number(right.sort_order ?? 0);
   });
+
   const storagePath = String(sorted[0]?.storage_path ?? "").trim();
-  if (!storagePath) return undefined;
-  const { data, error } = await supabase.storage.from("record-photos").createSignedUrl(storagePath, 3600);
-  if (error) return undefined;
-  return data.signedUrl;
+
+  if (!storagePath) {
+    return undefined;
+  }
+
+  try {
+    return await getDiscoverPhotoUrl(storagePath);
+  } catch {
+    return undefined;
+  }
 }
 
 function normalizeInterests(value: unknown): string[] {
@@ -917,16 +971,30 @@ export default function DiscoverScreen() {
   useEffect(() => { activeFilterRef.current = activeFilter; }, [activeFilter]);
 
   const glowAnim = useRef(new Animated.Value(0)).current;
-  useEffect(() => {
-    const loop = Animated.loop(
-      Animated.sequence([
-        Animated.timing(glowAnim, { toValue: 1, duration: 1100, useNativeDriver: true }),
-        Animated.timing(glowAnim, { toValue: 0, duration: 1100, useNativeDriver: true }),
-      ])
-    );
-    loop.start();
-    return () => loop.stop();
-  }, []);
+
+useEffect(() => {
+  const loop = Animated.loop(
+    Animated.sequence([
+      Animated.timing(glowAnim, {
+        toValue: 1,
+        duration: 1100,
+        useNativeDriver: true,
+      }),
+      Animated.timing(glowAnim, {
+        toValue: 0,
+        duration: 1100,
+        useNativeDriver: true,
+      }),
+    ]),
+  );
+
+  loop.start();
+
+  return () => {
+    loop.stop();
+  };
+}, [glowAnim]);
+
   const glowScale = glowAnim.interpolate({ inputRange: [0, 1], outputRange: [1, 1.35] });
   const glowOpacity = glowAnim.interpolate({ inputRange: [0, 1], outputRange: [0.55, 0] });
   const btnScale = glowAnim.interpolate({ inputRange: [0, 1], outputRange: [1, 1.08] });
@@ -1234,20 +1302,31 @@ export default function DiscoverScreen() {
   }, [pickerPlaceQuery, pickerVisible, pickerMode, pickerCenter, pickedLocation]);
 
   useEffect(() => {
-    if (activeBubble) {
-      setSheetBubble(activeBubble);
-      Animated.spring(sheetTranslateY, { toValue: 0, useNativeDriver: true, damping: 22, stiffness: 180 }).start();
-    }
-  }, [activeBubble]);
+  if (activeBubble) {
+    setSheetBubble(activeBubble);
 
-  const closeSheet = () => {
-    Animated.timing(sheetTranslateY, { toValue: SHEET_CLOSE_POSITION, duration: 220, useNativeDriver: true }).start(() => {
-      setActiveBubble(null);
-      setSheetBubble(null);
-      setPlaceGroupName("");
-      setPlaceGroupRecords([]);
-    });
-  };
+    Animated.spring(sheetTranslateY, {
+      toValue: 0,
+      useNativeDriver: true,
+      damping: 22,
+      stiffness: 180,
+    }).start();
+  }
+}, [activeBubble, sheetTranslateY]);
+
+  const closeSheet = useCallback(() => {
+  Animated.timing(sheetTranslateY, {
+    toValue: SHEET_CLOSE_POSITION,
+    duration: 220,
+    useNativeDriver: true,
+  }).start(() => {
+    setActiveBubble(null);
+    setSheetBubble(null);
+    setPlaceGroupName("");
+    setPlaceGroupRecords([]);
+  });
+}, [sheetTranslateY]);
+
   const openSheet = () => { Animated.spring(sheetTranslateY, { toValue: 0, useNativeDriver: true, damping: 22, stiffness: 180 }).start(); };
 
   const panResponder = useRef(
@@ -1265,10 +1344,16 @@ export default function DiscoverScreen() {
     })
   ).current;
 
-  const openHomeSheet = () => {
-    homeSheetTranslateY.stopAnimation();
-    Animated.spring(homeSheetTranslateY, { toValue: 0, useNativeDriver: true, damping: 22, stiffness: 180 }).start();
-  };
+  const openHomeSheet = useCallback(() => {
+  homeSheetTranslateY.stopAnimation();
+
+  Animated.spring(homeSheetTranslateY, {
+    toValue: 0,
+    useNativeDriver: true,
+    damping: 22,
+    stiffness: 180,
+  }).start();
+}, [homeSheetTranslateY]);
 
   const closeHomeSheet = (nextFilter = "가까운 기록") => {
     homeSheetTranslateY.stopAnimation();
@@ -1277,7 +1362,11 @@ export default function DiscoverScreen() {
     });
   };
 
-  useEffect(() => { if (activeFilter === "방 안 기록") openHomeSheet(); }, [activeFilter]);
+  useEffect(() => {
+  if (activeFilter === "방 안 기록") {
+    openHomeSheet();
+  }
+}, [activeFilter, openHomeSheet]);
 
   const homePanResponder = useRef(
     PanResponder.create({
@@ -1294,10 +1383,19 @@ export default function DiscoverScreen() {
     })
   ).current;
 
-  const openMyRecordsSheet = (expanded = false) => {
+  const openMyRecordsSheet = useCallback(
+  (expanded = false) => {
     mySheetTranslateY.stopAnimation();
-    Animated.spring(mySheetTranslateY, { toValue: expanded ? 0 : MY_SHEET_COLLAPSED_POSITION, useNativeDriver: true, damping: 22, stiffness: 180 }).start();
-  };
+
+    Animated.spring(mySheetTranslateY, {
+      toValue: expanded ? 0 : MY_SHEET_COLLAPSED_POSITION,
+      useNativeDriver: true,
+      damping: 22,
+      stiffness: 180,
+    }).start();
+  },
+  [mySheetTranslateY],
+);
 
   const closeMyRecordsSheet = (callback?: () => void) => {
     mySheetTranslateY.stopAnimation();
@@ -1305,11 +1403,11 @@ export default function DiscoverScreen() {
   };
 
   useEffect(() => {
-    if (activeFilter === "내 기록") {
-      setFitMyRecordMarkers(true);
-      openMyRecordsSheet(false);
-    }
-  }, [activeFilter]);
+  if (activeFilter === "내 기록") {
+    setFitMyRecordMarkers(true);
+    openMyRecordsSheet(false);
+  }
+}, [activeFilter, openMyRecordsSheet]);
 
   const mySheetPanResponder = useRef(
     PanResponder.create({
@@ -1527,7 +1625,8 @@ export default function DiscoverScreen() {
     }
   }, [applyLikeResult, bubbles, currentUserId, likedPostIds, likeUpdatingIds]);
 
-  const handleTryMission = async (targetBubble?: DiscoverBubble) => {
+  const handleTryMission = useCallback(
+  async (targetBubble?: DiscoverBubble) => {
     const bubble = targetBubble ?? sheetBubble;
     if (!bubble) return;
 
@@ -1545,6 +1644,7 @@ export default function DiscoverScreen() {
     }
 
     setTryingMission(true);
+
     try {
       const mission = await getOriginalMissionFromDiscoverPost(
         bubble.discoverPostId,
@@ -1555,6 +1655,7 @@ export default function DiscoverScreen() {
       )
         .replace(/\s+/g, "")
         .toLowerCase();
+
       const isAtHome = normalizedPlaceName === "내방";
       const isLocationFlexible =
         !isAtHome &&
@@ -1563,14 +1664,21 @@ export default function DiscoverScreen() {
             !mission.place_name &&
             mission.place_lat == null &&
             mission.place_lng == null));
+
       const fixedPlaceName =
         mission.place_name ?? bubble.place;
+
       const placeLat =
         mission.place_lat ??
-        (!isAtHome && !isLocationFlexible ? bubble.lat : null);
+        (!isAtHome && !isLocationFlexible
+          ? bubble.lat
+          : null);
+
       const placeLng =
         mission.place_lng ??
-        (!isAtHome && !isLocationFlexible ? bubble.lng : null);
+        (!isAtHome && !isLocationFlexible
+          ? bubble.lng
+          : null);
 
       shareMissionToHome({
         id: mission.id,
@@ -1592,7 +1700,10 @@ export default function DiscoverScreen() {
           mission.estimated_cost === 0
             ? "무료"
             : "유료",
-        cat: mission.category?.name ?? bubble.category ?? "기타",
+        cat:
+          mission.category?.name ??
+          bubble.category ??
+          "기타",
         requiredItems: mission.required_items ?? [],
         placeId: mission.place_id ?? undefined,
         placeLat:
@@ -1604,8 +1715,10 @@ export default function DiscoverScreen() {
           : isLocationFlexible
             ? "어디서나 가능"
             : fixedPlaceName,
-        placeAddress: mission.place_address ?? undefined,
-        requiresPlace: mission.requires_place ?? undefined,
+        placeAddress:
+          mission.place_address ?? undefined,
+        requiresPlace:
+          mission.requires_place ?? undefined,
         isAtHome,
         isLocationFlexible,
       });
@@ -1623,9 +1736,17 @@ export default function DiscoverScreen() {
     } finally {
       setTryingMission(false);
     }
-  };
+  },
+  [
+    closeSheet,
+    router,
+    shareMissionToHome,
+    sheetBubble,
+  ],
+);
 
-  const deleteMissionRecord = async (
+  const deleteMissionRecord = useCallback(
+  async (
     recordId: string,
     missionAttemptId: string | null,
   ) => {
@@ -1633,30 +1754,36 @@ export default function DiscoverScreen() {
       throw new Error("로그인이 필요합니다.");
     }
 
-    const { data: photoRows, error: photoQueryError } = await supabase
-      .from("record_photos")
-      .select("storage_path")
-      .eq("record_id", recordId);
+    const { data: photoRows, error: photoQueryError } =
+      await supabase
+        .from("record_photos")
+        .select("storage_path")
+        .eq("record_id", recordId);
 
     if (photoQueryError) {
       throw photoQueryError;
     }
 
     const storagePaths = (photoRows ?? [])
-      .map((photo) => String(photo.storage_path ?? "").trim())
+      .map((photo) =>
+        String(photo.storage_path ?? "").trim(),
+      )
       .filter(Boolean);
 
     if (storagePaths.length > 0) {
-      const { error: storageError } = await supabase.storage
-        .from("record-photos")
-        .remove(storagePaths);
+      const { error: storageError } =
+        await supabase.storage
+          .from("record-photos")
+          .remove(storagePaths);
 
       if (storageError) {
-        console.warn("기록 사진 파일 삭제 실패:", storageError);
+        console.warn(
+          "기록 사진 파일 삭제 실패:",
+          storageError,
+        );
       }
     }
 
-    // 개인 추천용 호불호가 있으면 기록과 함께 정리한다.
     const { error: feedbackError } = await supabase
       .from("mission_feedback")
       .delete()
@@ -1664,7 +1791,10 @@ export default function DiscoverScreen() {
       .eq("user_id", currentUserId);
 
     if (feedbackError) {
-      console.warn("기록 호불호 삭제 실패:", feedbackError);
+      console.warn(
+        "기록 호불호 삭제 실패:",
+        feedbackError,
+      );
     }
 
     const { error: recordError } = await supabase
@@ -1677,8 +1807,6 @@ export default function DiscoverScreen() {
       throw recordError;
     }
 
-    // 기록을 지우면 완료됐던 미션을 다시 진행 중 상태로 돌려
-    // 사용자가 원할 때 새 기록을 작성할 수 있게 한다.
     if (missionAttemptId) {
       const { error: attemptError } = await supabase
         .from("mission_attempts")
@@ -1690,23 +1818,35 @@ export default function DiscoverScreen() {
         .eq("user_id", currentUserId);
 
       if (attemptError) {
-        console.warn("미션 진행 상태 복원 실패:", attemptError);
+        console.warn(
+          "미션 진행 상태 복원 실패:",
+          attemptError,
+        );
       }
     }
-  };
+  },
+  [currentUserId],
+);
 
-  const deleteRecordTarget = async (target: {
+  const deleteRecordTarget = useCallback(
+  async (target: {
     source: "discover" | "mission";
     discoverPostId?: string | null;
     missionRecordId?: string | null;
     missionAttemptId?: string | null;
   }) => {
-    if (target.source === "discover" && target.discoverPostId) {
+    if (
+      target.source === "discover" &&
+      target.discoverPostId
+    ) {
       await deleteDiscoverPost(target.discoverPostId);
       return;
     }
 
-    if (target.source === "mission" && target.missionRecordId) {
+    if (
+      target.source === "mission" &&
+      target.missionRecordId
+    ) {
       await deleteMissionRecord(
         target.missionRecordId,
         target.missionAttemptId ?? null,
@@ -1714,61 +1854,89 @@ export default function DiscoverScreen() {
       return;
     }
 
-    throw new Error("삭제할 기록 정보를 확인하지 못했습니다.");
-  };
+    throw new Error(
+      "삭제할 기록 정보를 확인하지 못했습니다.",
+    );
+  },
+  [deleteMissionRecord],
+);
 
-  const handleDeleteBubble = (targetBubble?: DiscoverBubble) => {
+  const handleDeleteBubble = useCallback(
+  (targetBubble?: DiscoverBubble) => {
     const bubble = targetBubble ?? sheetBubble;
     if (!bubble || bubble.multi) return;
 
-    const source = bubble.missionRecordId ? "mission" : "discover";
+    const source = bubble.missionRecordId
+      ? "mission"
+      : "discover";
 
-    Alert.alert("기록을 삭제할까요?", "삭제하면 되돌릴 수 없어요.", [
-      { text: "취소", style: "cancel" },
-      {
-        text: "삭제",
-        style: "destructive",
-        onPress: async () => {
-          setDeleting(true);
-          try {
-            await deleteRecordTarget({
-              source,
-              discoverPostId: bubble.discoverPostId,
-              missionRecordId: bubble.missionRecordId,
-              missionAttemptId: bubble.missionAttemptId,
-            });
+    Alert.alert(
+      "기록을 삭제할까요?",
+      "삭제하면 되돌릴 수 없어요.",
+      [
+        { text: "취소", style: "cancel" },
+        {
+          text: "삭제",
+          style: "destructive",
+          onPress: async () => {
+            setDeleting(true);
 
-            setSelectedMapBubbleId(null);
-            setFocusedMyRecordKey(null);
-            setFitMyRecordMarkers(false);
-            closeSheet();
+            try {
+              await deleteRecordTarget({
+                source,
+                discoverPostId: bubble.discoverPostId,
+                missionRecordId: bubble.missionRecordId,
+                missionAttemptId: bubble.missionAttemptId,
+              });
 
-            if (currentUserId) {
-              await Promise.all([
-                loadMyRecords(currentUserId),
-                loadHomeRecords(currentUserId),
-              ]);
+              setSelectedMapBubbleId(null);
+              setFocusedMyRecordKey(null);
+              setFitMyRecordMarkers(false);
+              closeSheet();
+
+              if (currentUserId) {
+                await Promise.all([
+                  loadMyRecords(currentUserId),
+                  loadHomeRecords(currentUserId),
+                ]);
+              }
+
+              const currentCenter = mapCenterRef.current;
+              const posts = await getNearbyDiscoverPosts(
+                currentCenter.lat,
+                currentCenter.lng,
+                MAP_AUTO_SEARCH_RADIUS_KM,
+              );
+
+              setBubbles(
+                posts.length > 0
+                  ? await buildBubbleList(posts)
+                  : [],
+              );
+            } catch (error) {
+              Alert.alert(
+                "삭제 실패",
+                error instanceof Error
+                  ? error.message
+                  : "기록을 삭제하지 못했습니다.",
+              );
+            } finally {
+              setDeleting(false);
             }
-
-            const currentCenter = mapCenterRef.current;
-            const posts = await getNearbyDiscoverPosts(
-              currentCenter.lat,
-              currentCenter.lng,
-              MAP_AUTO_SEARCH_RADIUS_KM,
-            );
-            setBubbles(posts.length > 0 ? await buildBubbleList(posts) : []);
-          } catch (error) {
-            Alert.alert(
-              "삭제 실패",
-              error instanceof Error ? error.message : "기록을 삭제하지 못했습니다.",
-            );
-          } finally {
-            setDeleting(false);
-          }
+          },
         },
-      },
-    ]);
-  };
+      ],
+    );
+  },
+  [
+  closeSheet,
+  currentUserId,
+  deleteRecordTarget,
+  loadHomeRecords,
+  loadMyRecords,
+  sheetBubble,
+],
+);
 
   const handleDeleteMyRecord = (record: MyRecordItem) => {
     Alert.alert("기록을 삭제할까요?", "삭제하면 되돌릴 수 없어요.", [
@@ -2073,7 +2241,13 @@ export default function DiscoverScreen() {
       }
       openMyRecordsSheet(false);
     }
-  }, [activeFilter, groupedMapBubbles, sheetTranslateY, visibleMyRecords]);
+  }, [
+  activeFilter,
+  groupedMapBubbles,
+  openMyRecordsSheet,
+  sheetTranslateY,
+  visibleMyRecords,
+]);
 
   const handleDiscoverMarkerClose = useCallback(() => {
     // 선택 카드만 닫고 현재 지도 중심과 확대 수준은 그대로 유지한다.
@@ -2082,20 +2256,44 @@ export default function DiscoverScreen() {
     setPlaceGroupName("");
     setPlaceGroupRecords([]);
   }, []);
-  const handleDiscoverMarkerAction = useCallback((id: string | number) => {
-    const bubble = groupedMapBubbles.find((item) => String(item.id) === String(id));
-    if (bubble && !bubble.multi) void handleTryMission(bubble);
-  }, [groupedMapBubbles]);
+  const handleDiscoverMarkerAction = useCallback(
+  (id: string | number) => {
+    const bubble = groupedMapBubbles.find(
+      (item) => String(item.id) === String(id),
+    );
 
-  const handleDiscoverMarkerLike = useCallback((id: string | number) => {
-    const bubble = groupedMapBubbles.find((item) => String(item.id) === String(id));
-    if (!bubble?.multi && bubble?.discoverPostId) void handleToggleLike(bubble.discoverPostId);
-  }, [groupedMapBubbles, handleToggleLike]);
+    if (bubble && !bubble.multi) {
+      void handleTryMission(bubble);
+    }
+  },
+  [groupedMapBubbles, handleTryMission],
+);
 
-  const handleDiscoverMarkerDelete = useCallback((id: string | number) => {
-    const bubble = groupedMapBubbles.find((item) => String(item.id) === String(id));
-    if (bubble && !bubble.multi) handleDeleteBubble(bubble);
-  }, [groupedMapBubbles]);
+const handleDiscoverMarkerLike = useCallback(
+  (id: string | number) => {
+    const bubble = groupedMapBubbles.find(
+      (item) => String(item.id) === String(id),
+    );
+
+    if (!bubble?.multi && bubble?.discoverPostId) {
+      void handleToggleLike(bubble.discoverPostId);
+    }
+  },
+  [groupedMapBubbles, handleToggleLike],
+);
+
+const handleDiscoverMarkerDelete = useCallback(
+  (id: string | number) => {
+    const bubble = groupedMapBubbles.find(
+      (item) => String(item.id) === String(id),
+    );
+
+    if (bubble && !bubble.multi) {
+      handleDeleteBubble(bubble);
+    }
+  },
+  [groupedMapBubbles, handleDeleteBubble],
+);
 
   return (
     <View style={styles.container}>

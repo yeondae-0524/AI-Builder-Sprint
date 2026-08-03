@@ -145,7 +145,9 @@ function getRecordDateKey(recordedAt: string | null | undefined) {
   return recordedAt.slice(0, 10);
 }
 
-function getCompletedDayCount(records: Array<{ recorded_at?: string | null }>) {
+function getCompletedDayCount(
+  records: { recorded_at?: string | null }[],
+) {
   return new Set(
     records.map((record) => getRecordDateKey(record.recorded_at)).filter(Boolean),
   ).size;
@@ -235,6 +237,9 @@ export default function CalendarScreen() {
   const nextMonthStart = new Date(visibleYear, visibleMonthIndex + 1, 1);
   const monthStartKey = toDateKey(monthStart);
   const nextMonthStartKey = toDateKey(nextMonthStart);
+  const monthStartIso = monthStart.toISOString();
+  const nextMonthStartIso = nextMonthStart.toISOString();
+  
 
   const journeyStartPickerYear = journeyStartMonth.getFullYear();
   const journeyStartPickerMonthIndex = journeyStartMonth.getMonth();
@@ -327,8 +332,8 @@ export default function CalendarScreen() {
             .eq("user_id", user.id)
             .not("started_at", "is", null)
             .is("completed_at", null)
-            .gte("started_at", monthStart.toISOString())
-            .lt("started_at", nextMonthStart.toISOString()),
+            .gte("started_at", monthStartIso)
+            .lt("started_at", nextMonthStartIso),
         ]);
 
         if (!isMounted) return;
@@ -476,7 +481,12 @@ export default function CalendarScreen() {
       return () => {
         isMounted = false;
       };
-    }, [monthStartKey, nextMonthStartKey, todayKey]),
+    }, [
+      monthStartKey,
+      nextMonthStartKey,
+      monthStartIso,
+      nextMonthStartIso,
+    ]),
   );
 
   useEffect(() => {

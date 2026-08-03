@@ -1012,7 +1012,14 @@ export function KakaoMapView({
       </body>
     </html>
   `,
-    [markersJson, userLocationJson, pickedLocationJson, fitAllMarkers],
+    [
+      markersJson,
+      userLocationJson,
+      pickedLocationJson,
+      fitAllMarkers,
+      latitude,
+      longitude,
+    ],
   );
 
   const webViewSource = useMemo(() => ({ html }), [html]);

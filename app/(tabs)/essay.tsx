@@ -703,7 +703,7 @@ export default function EssayScreen() {
   const [draftEssay, setDraftEssay] = useState<DraftEssay | null>(null);
   const [essays, setEssays] = useState<CompletedEssay[]>([]);
   const [essayJourneyIds, setEssayJourneyIds] = useState<Set<string>>(new Set());
-  const [loading, setLoading] = useState(true);
+  const [, setLoading] = useState(true);
   const [generating, setGenerating] = useState(false);
   const [savingCover, setSavingCover] = useState(false);
   const [finishing, setFinishing] = useState(false);

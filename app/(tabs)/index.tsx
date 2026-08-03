@@ -394,11 +394,11 @@ async function retrySupabaseResultOnJwt<
   return result;
 }
 
-const EMOTIONS: Array<{
+const EMOTIONS: {
   label: string;
   value: EmotionValue;
   emoji: string;
-}> = [
+}[] = [
   { label: "편안해요", value: "comfortable", emoji: "😌" },
   { label: "즐거워요", value: "joyful", emoji: "😊" },
   { label: "새로워요", value: "new", emoji: "✨" },
@@ -406,12 +406,12 @@ const EMOTIONS: Array<{
   { label: "잘 모르겠어요", value: "unsure", emoji: "🤔" },
 ];
 
-const MISSION_PREFERENCES: Array<{
+const MISSION_PREFERENCES: {
   value: MissionPreferenceValue;
   emoji: string;
   label: string;
   description: string;
-}> = [
+}[] = [
   {
     value: "like",
     emoji: "👍",
@@ -432,11 +432,11 @@ const MISSION_PREFERENCES: Array<{
   },
 ];
 
-const TIME_OPTIONS: Array<{
+const TIME_OPTIONS: {
   value: TimeFilter;
   label: string;
   backendValue: string;
-}> = [
+}[] = [
   { value: "any", label: "상관없음", backendValue: "상관없음" },
   { value: "under15", label: "15분 이내", backendValue: "15분 이내" },
   { value: "under30", label: "30분 이내", backendValue: "30분 이내" },
@@ -444,11 +444,11 @@ const TIME_OPTIONS: Array<{
   { value: "over60", label: "1시간 이상", backendValue: "1시간 이상" },
 ];
 
-const COST_OPTIONS: Array<{
+const COST_OPTIONS: {
   value: CostFilter;
   label: string;
   backendValue: string;
-}> = [
+}[] = [
   { value: "any", label: "상관없음", backendValue: "무료/유료" },
   { value: "free", label: "무료", backendValue: "무료" },
   { value: "paid", label: "유료", backendValue: "유료" },
@@ -516,10 +516,10 @@ const BUSAN_DISTRICT_CENTERS: Record<BusanDistrict, Coordinate> = {
   해운대구: { lat: 35.1631, lng: 129.1635 },
 };
 
-const SECTION_LABELS: Array<{
+const SECTION_LABELS: {
   key: SheetSection;
   label: string;
-}> = [
+}[] = [
   { key: "active", label: "현재 진행중" },
   { key: "recommended", label: "추천 미션" },
   { key: "records", label: "내가 쓴 기록" },
@@ -542,68 +542,6 @@ const BLOCKED_MISSION_TEXT_PATTERNS = [
   /구름.*천장/u,
 ] as const;
 
-const FALLBACK_MISSIONS: HomeMission[] = [
-  {
-    id: "fallback-cafe-reading",
-    title: "조용한 카페에서 30분 독서",
-    desc: "일상 속 작은 고요함을 찾아봐요.",
-    instructions:
-      "가까운 카페의 편안한 자리를 골라 30분 동안 책 한 권을 천천히 읽어보세요.",
-    recommendationReason:
-      "조용한 공간에서 혼자 집중하는 경험을 선호할 가능성이 높아 추천했어요.",
-    durationMinutes: 30,
-    time: "30분",
-    dist: "0.3km",
-    cost: "유료",
-    cat: "배움",
-    requiredItems: ["책 한 권"],
-    placeLat: 35.13656,
-    placeLng: 129.05952,
-    placeName: "가까운 카페",
-    isAtHome: false,
-    isFallback: true,
-  },
-  {
-    id: "fallback-park-photo",
-    title: "공원 산책하며 계절 사진 찍기",
-    desc: "지금 계절의 색을 카메라에 담아봐요.",
-    instructions:
-      "가까운 공원을 천천히 걸으며 지금 가장 눈에 들어오는 풍경을 사진으로 남겨보세요.",
-    recommendationReason:
-      "가벼운 이동과 관찰을 함께 할 수 있어 부담 없이 시작하기 좋아요.",
-    durationMinutes: 20,
-    time: "20분",
-    dist: "0.5km",
-    cost: "무료",
-    cat: "산책",
-    requiredItems: ["휴대폰"],
-    placeLat: 35.16862,
-    placeLng: 129.05748,
-    placeName: "부산시민공원",
-    isAtHome: false,
-    isFallback: true,
-  },
-  {
-    id: "fallback-bakery",
-    title: "처음 가는 빵집에서 새로운 빵 먹기",
-    desc: "익숙하지 않은 맛을 하나 골라봐요.",
-    instructions:
-      "지나가며 궁금했던 빵집에 들어가 평소 고르지 않던 빵 하나를 선택해 맛을 천천히 느껴보세요.",
-    recommendationReason:
-      "짧은 시간 안에 새로운 감각을 경험할 수 있어 추천했어요.",
-    durationMinutes: 15,
-    time: "15분",
-    dist: "0.7km",
-    cost: "유료",
-    cat: "카페 및 디저트",
-    requiredItems: [],
-    placeLat: 35.1517,
-    placeLng: 129.0612,
-    placeName: "근처 빵집",
-    isAtHome: false,
-    isFallback: true,
-  },
-];
 
 function relationArray<T>(
   value: T | T[] | null | undefined,
@@ -1484,55 +1422,6 @@ function isUsableRecommendation(mission: HomeMission) {
     containsHangul(mission.title) &&
     mission.title.trim().length > 0
   );
-}
-
-function balanceHomeMissions(
-  missions: HomeMission[],
-  limit = 10,
-  maxHomeCount = 2,
-) {
-  const outsideMissions = missions.filter(
-    (mission) => !mission.isAtHome,
-  );
-  const homeMissions = missions
-    .filter((mission) => mission.isAtHome)
-    .slice(0, maxHomeCount);
-
-  const balanced: HomeMission[] = [];
-  let outsideIndex = 0;
-  let homeIndex = 0;
-
-  while (balanced.length < limit) {
-    for (
-      let count = 0;
-      count < 3 && outsideIndex < outsideMissions.length;
-      count += 1
-    ) {
-      balanced.push(outsideMissions[outsideIndex]);
-      outsideIndex += 1;
-
-      if (balanced.length >= limit) {
-        break;
-      }
-    }
-
-    if (
-      balanced.length < limit &&
-      homeIndex < homeMissions.length
-    ) {
-      balanced.push(homeMissions[homeIndex]);
-      homeIndex += 1;
-    }
-
-    if (
-      outsideIndex >= outsideMissions.length &&
-      homeIndex >= homeMissions.length
-    ) {
-      break;
-    }
-  }
-
-  return balanced.slice(0, limit);
 }
 
 function normalizeComparableText(value: string | null | undefined) {
@@ -3781,11 +3670,10 @@ function RecordLocationPickerMap({
 </html>
 `,
     [
-      center.lat,
-      center.lng,
-      pickedLocation?.lat,
-      pickedLocation?.lng,
-    ],
+  center.lat,
+  center.lng,
+  pickedLocation,
+],
   );
 
   const parseLocationMessage = useCallback(
@@ -3898,7 +3786,7 @@ type ActualPlaceSearchRequest = {
   nonce: number;
 };
 
-function ActualPlacePickerMap({
+export function ActualPlacePickerMap({
   center,
   selectedPlace,
   searchRequest,
@@ -4052,25 +3940,36 @@ function ActualPlacePickerMap({
   );
 
   useEffect(() => {
-    if (!searchRequest) return;
-    webViewRef.current?.injectJavaScript(`
-      if (window.focusActualPlaceMap) {
-        window.focusActualPlaceMap(${searchRequest.coordinate.lat}, ${searchRequest.coordinate.lng});
-      }
-      true;
-    `);
-  }, [searchRequest?.nonce]);
+  if (!searchRequest) return;
+
+  webViewRef.current?.injectJavaScript(`
+    if (window.focusActualPlaceMap) {
+      window.focusActualPlaceMap(
+        ${searchRequest.coordinate.lat},
+        ${searchRequest.coordinate.lng}
+      );
+    }
+    true;
+  `);
+}, [searchRequest]);
 
   useEffect(() => {
-    if (!selectedPlace) return;
-    const serialized = JSON.stringify(selectedPlace).replace(/</g, "\\u003c");
-    webViewRef.current?.injectJavaScript(`
-      if (window.showSelectedActualPlace) {
-        window.showSelectedActualPlace(${JSON.stringify(serialized)});
-      }
-      true;
-    `);
-  }, [selectedPlace?.id, selectedPlace?.latitude, selectedPlace?.longitude]);
+  if (!selectedPlace) return;
+
+  const serialized = JSON.stringify(selectedPlace).replace(
+    /</g,
+    "\\u003c",
+  );
+
+  webViewRef.current?.injectJavaScript(`
+    if (window.showSelectedActualPlace) {
+      window.showSelectedActualPlace(
+        ${JSON.stringify(serialized)}
+      );
+    }
+    true;
+  `);
+}, [selectedPlace]);
 
   return (
     <WebView
@@ -4221,8 +4120,8 @@ export default function HomeScreen() {
     useState("");
   const [recordPlacesLoading, setRecordPlacesLoading] =
     useState(false);
-  const [recordExternalPlaceSearch, setRecordExternalPlaceSearch] =
-    useState<ActualPlaceSearchRequest | null>(null);
+  const [, setRecordExternalPlaceSearch] =
+  useState<ActualPlaceSearchRequest | null>(null);
   const recordPlaceSearchSequenceRef = useRef(0);
   const [recordSaving, setRecordSaving] =
     useState(false);
@@ -5733,7 +5632,8 @@ export default function HomeScreen() {
     handleMissionItemAction(item);
   };
 
-  const openConditionModal = (step = 0) => {
+  const openConditionModal = useCallback(
+  (step = 0) => {
     setDraftCategories(appliedFilters.categories);
     setDraftTime(appliedFilters.time);
     setDraftCost(appliedFilters.cost);
@@ -5743,15 +5643,23 @@ export default function HomeScreen() {
     setDraftDistrict(recommendationDistrict);
     setConditionStep(step);
     setConditionVisible(true);
-  };
+  },
+  [
+    appliedFilters,
+    recommendationCenter,
+    recommendationDistrict,
+    recommendationLocationMode,
+    recommendationRadiusKm,
+  ],
+);
 
   const params = useLocalSearchParams<{ openCondition?: string }>();
 
   useEffect(() => {
-    if (params.openCondition === "1") {
-      openConditionModal(0);
-    }
-  }, [params.openCondition]);
+  if (params.openCondition === "1") {
+    openConditionModal(0);
+  }
+}, [params.openCondition, openConditionModal]);
 
   const applyConditions = async () => {
     if (

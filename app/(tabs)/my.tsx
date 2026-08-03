@@ -350,7 +350,9 @@ export default function MyScreen() {
 
   const [friendModalVisible, setFriendModalVisible] = useState(false);
   const [friendTab, setFriendTab] = useState<"list" | "search" | "requests">("list");
-  const [friendList, setFriendList] = useState<Array<FriendProfile & { relationId: string }>>([]);
+  const [friendList, setFriendList] = useState<
+  (FriendProfile & { relationId: string })[]
+>([]);
   const [incomingRequests, setIncomingRequests] = useState<any[]>([]);
   const [friendSearchQuery, setFriendSearchQuery] = useState("");
   const [friendSearchResults, setFriendSearchResults] = useState<FriendProfile[]>([]);
