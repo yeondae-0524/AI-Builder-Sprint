@@ -1,19 +1,79 @@
-# Expo HAS CHANGED
+# Expo SDK 54 Guidelines
 
-Read the exact versioned documentation at:
+Expo 관련 코드를 작성하거나 수정하기 전에 반드시 Expo SDK 54 공식 문서를 확인합니다.
 
-https://docs.expo.dev/versions/v54.0.0/
+공식 문서:
 
-Before writing or modifying Expo-related code, verify that the implementation is compatible with Expo SDK 54.
+`https://docs.expo.dev/versions/v54.0.0/`
 
-Do not rely on documentation for another Expo SDK version.
+## Expo 개발 규칙
+
+* 프로젝트는 **Expo SDK 54**를 기준으로 개발합니다.
+* 다른 Expo SDK 버전의 문서를 근거로 코드를 작성하지 않습니다.
+* Expo 관련 API, 설정, 패키지 사용법은 SDK 54 문서와의 호환성을 먼저 확인합니다.
+* Expo 관련 패키지는 가능한 경우 다음 명령으로 설치합니다.
+
+```bash
+npx expo install <package-name>
+```
+
+* 패키지를 직접 `npm install`로 추가하기 전에 Expo SDK 54와 호환되는 버전인지 확인합니다.
+* 기존 `app.json`, `package.json`, Metro, Babel 설정을 임의로 전체 교체하지 않습니다.
+* Expo SDK 업그레이드나 React Native 버전 변경은 별도 요청 없이 진행하지 않습니다.
 
 # Repository Guidelines
 
-* PR, 이슈, 커밋은 원본 레포지토리가 아닌 팀에서 포크한 레포지토리에 생성한다.
-* 작업 기준 브랜치는 `develop`이다.
-* 기능 개발과 수정은 별도의 `feature/*` 브랜치에서 진행한다.
-* 환경변수와 API 키가 포함된 `.env` 파일은 커밋하지 않는다.
-* Expo 관련 패키지는 가능하면 `npx expo install`로 설치한다.
-* 코드 수정 후 `npx tsc --noEmit`을 실행하여 TypeScript 오류를 확인한다.
-* 제출 전 앱을 실행하고 주요 기능이 정상적으로 동작하는지 확인한다.
+## 저장소 및 브랜치
+
+* PR, 이슈, 커밋은 원본 저장소가 아닌 팀에서 포크한 저장소에 생성합니다.
+* 작업 기준 브랜치는 `develop`입니다.
+* 기능 개발과 소스코드 수정은 별도의 `feature/*` 브랜치에서 진행합니다.
+* 별도 지시 없이 `main` 또는 원본 저장소에 직접 푸시하지 않습니다.
+* 팀원이 작성한 기존 변경 사항을 임의로 되돌리거나 삭제하지 않습니다.
+* 충돌이 발생했을 때 강제 푸시하지 않습니다.
+
+## 환경변수 및 보안
+
+* 환경변수와 API Key가 포함된 `.env` 파일은 커밋하지 않습니다.
+* Service Role Key, Secret Key, Upstage API Key 등 서버 비밀값을 클라이언트 코드에 작성하지 않습니다.
+* `.env.example`에는 실제 비밀값이 아닌 예시 값만 작성합니다.
+* 커밋 전에 `git status`를 확인해 민감정보나 의도하지 않은 파일이 포함되지 않았는지 점검합니다.
+
+## 코드 수정 원칙
+
+* 기존 프로젝트 구조와 네이밍 규칙을 유지합니다.
+* 필요한 범위만 최소한으로 수정합니다.
+* 사용자 또는 팀원이 작성한 코드를 충분한 근거 없이 전체 교체하지 않습니다.
+* TypeScript 타입 오류를 임시 우회하기 위해 불필요한 `any`를 추가하지 않습니다.
+* 사용하지 않는 변수, import 및 중복 코드는 정리합니다.
+* AI가 사용자가 기록하지 않은 사건, 장소 또는 감정을 임의로 생성하지 않도록 기존 검증 규칙을 유지합니다.
+
+## 검증 절차
+
+코드 수정 후 다음 명령을 실행합니다.
+
+```bash
+npx tsc --noEmit
+npm run lint
+```
+
+Expo 또는 화면 관련 코드를 수정했다면 앱을 직접 실행합니다.
+
+```bash
+npm run web
+```
+
+필요한 경우 Expo 개발 서버도 확인합니다.
+
+```bash
+npm run start
+```
+
+제출 또는 병합 전에는 다음 사항을 확인합니다.
+
+* TypeScript 오류가 없는지 확인합니다.
+* ESLint 오류와 경고의 원인을 확인합니다.
+* 웹 또는 Expo 환경에서 주요 기능을 직접 실행합니다.
+* 로그인, 미션 추천, 기록 저장, AI 에세이 생성 등 핵심 사용자 흐름을 점검합니다.
+* `git status`에서 의도한 파일만 변경되었는지 확인합니다.
+* API Key와 사용자 계정 정보가 커밋에 포함되지 않았는지 확인합니다.
