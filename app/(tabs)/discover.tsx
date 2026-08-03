@@ -2165,7 +2165,9 @@ export default function DiscoverScreen() {
                 </Pressable>
               ))
             ) : (
-              <Text style={styles.searchEmptyText}>"{searchQuery}"에 대한 검색 결과가 없어요</Text>
+            <Text style={styles.searchEmptyText}>
+              “{searchQuery}”에 대한 검색 결과가 없어요
+              </Text>
             )}
           </View>
         )}

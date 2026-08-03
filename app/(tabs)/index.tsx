@@ -3642,48 +3642,111 @@ function RecordLocationPickerMap({
 <html lang="ko">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no"
+  />
+
   <style>
-    html, body, #map { width: 100%; height: 100%; margin: 0; padding: 0; }
+    html,
+    body,
+    #map {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+    }
+
     #loading {
-      position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
-      background: #f7f8fa; color: #5c5f6a; font-family: sans-serif; font-size: 13px; z-index: 10;
+      position: fixed;
+      inset: 0;
+      z-index: 10;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #f7f8fa;
+      color: #5c5f6a;
+      font-family: sans-serif;
+      font-size: 13px;
     }
   </style>
 </head>
+
 <body>
   <div id="loading">지도를 불러오는 중이에요</div>
   <div id="map"></div>
-  <script src="https://dapi.kakao.com/v2/maps/sdk.js?appkey=${KAKAO_JS_KEY}&autoload=false"></script>
+
+  <script>
+    /*
+     * iOS WebView에서는 원래 ReactNativeWebView가 존재한다.
+     * 웹 iframe에서는 부모 React 화면으로 메시지를 전달하도록 직접 만든다.
+     */
+    window.ReactNativeWebView =
+      window.ReactNativeWebView || {
+        postMessage: function (message) {
+          window.parent.postMessage(
+            {
+              source: "record-location-picker",
+              payload: message
+            },
+            "*"
+          );
+        }
+      };
+  </script>
+
+  <script
+    src="https://dapi.kakao.com/v2/maps/sdk.js?appkey=${KAKAO_JS_KEY}&autoload=false"
+  ></script>
+
   <script>
     kakao.maps.load(function () {
-      document.getElementById('loading').style.display = 'none';
+      document.getElementById("loading").style.display =
+        "none";
 
-      const initial = new kakao.maps.LatLng(${center.lat}, ${center.lng});
-      const map = new kakao.maps.Map(document.getElementById('map'), {
-        center: initial,
-        level: 4,
-      });
+      const initial = new kakao.maps.LatLng(
+        ${center.lat},
+        ${center.lng}
+      );
+
+      const map = new kakao.maps.Map(
+        document.getElementById("map"),
+        {
+          center: initial,
+          level: 4
+        }
+      );
 
       let marker = null;
-      const initialPicked = ${JSON.stringify(pickedLocation)};
+      const initialPicked =
+        ${JSON.stringify(pickedLocation)};
 
-      const makeMarker = (latLng) => {
+      const sendLocation = function (latLng) {
+        window.ReactNativeWebView.postMessage(
+          JSON.stringify({
+            type: "recordLocation",
+            lat: latLng.getLat(),
+            lng: latLng.getLng()
+          })
+        );
+      };
+
+      const makeMarker = function (latLng) {
         if (!marker) {
           marker = new kakao.maps.Marker({
-            map,
+            map: map,
             position: latLng,
-            draggable: true,
+            draggable: true
           });
 
-          kakao.maps.event.addListener(marker, 'dragend', function () {
-            const position = marker.getPosition();
-            window.ReactNativeWebView.postMessage(JSON.stringify({
-              type: 'recordLocation',
-              lat: position.getLat(),
-              lng: position.getLng(),
-            }));
-          });
+          kakao.maps.event.addListener(
+            marker,
+            "dragend",
+            function () {
+              sendLocation(marker.getPosition());
+            }
+          );
         } else {
           marker.setPosition(latLng);
         }
@@ -3691,51 +3754,139 @@ function RecordLocationPickerMap({
         map.panTo(latLng);
       };
 
-      if (initialPicked && Number.isFinite(initialPicked.lat) && Number.isFinite(initialPicked.lng)) {
-        makeMarker(new kakao.maps.LatLng(initialPicked.lat, initialPicked.lng));
+      if (
+        initialPicked &&
+        Number.isFinite(initialPicked.lat) &&
+        Number.isFinite(initialPicked.lng)
+      ) {
+        makeMarker(
+          new kakao.maps.LatLng(
+            initialPicked.lat,
+            initialPicked.lng
+          )
+        );
       }
 
-      kakao.maps.event.addListener(map, 'click', function (mouseEvent) {
-        makeMarker(mouseEvent.latLng);
-        window.ReactNativeWebView.postMessage(JSON.stringify({
-          type: 'recordLocation',
-          lat: mouseEvent.latLng.getLat(),
-          lng: mouseEvent.latLng.getLng(),
-        }));
-      });
+      kakao.maps.event.addListener(
+        map,
+        "click",
+        function (mouseEvent) {
+          makeMarker(mouseEvent.latLng);
+          sendLocation(mouseEvent.latLng);
+        }
+      );
     });
   </script>
 </body>
-</html>`,
-    [center.lat, center.lng, pickedLocation?.lat, pickedLocation?.lng],
+</html>
+`,
+    [
+      center.lat,
+      center.lng,
+      pickedLocation?.lat,
+      pickedLocation?.lng,
+    ],
   );
+
+  const parseLocationMessage = useCallback(
+    (rawMessage: string) => {
+      try {
+        const message = JSON.parse(rawMessage) as {
+          type?: string;
+          lat?: number;
+          lng?: number;
+        };
+
+        if (
+          message.type === "recordLocation" &&
+          isFiniteNumber(message.lat) &&
+          isFiniteNumber(message.lng)
+        ) {
+          onSelect({
+            lat: message.lat,
+            lng: message.lng,
+          });
+        }
+      } catch {
+        // 지도에서 전달된 다른 메시지는 무시한다.
+      }
+    },
+    [onSelect],
+  );
+
+  useEffect(() => {
+    if (Platform.OS !== "web") {
+      return;
+    }
+
+    const handleWebMessage = (event: MessageEvent) => {
+      const data = event.data as
+        | {
+            source?: string;
+            payload?: unknown;
+          }
+        | undefined;
+
+      if (
+        data?.source !== "record-location-picker" ||
+        typeof data.payload !== "string"
+      ) {
+        return;
+      }
+
+      parseLocationMessage(data.payload);
+    };
+
+    window.addEventListener(
+      "message",
+      handleWebMessage,
+    );
+
+    return () => {
+      window.removeEventListener(
+        "message",
+        handleWebMessage,
+      );
+    };
+  }, [parseLocationMessage]);
+
+  const mapKey =
+    `${center.lat.toFixed(5)}-` +
+    `${center.lng.toFixed(5)}-` +
+    `${pickedLocation?.lat?.toFixed(5) ?? "none"}-` +
+    `${pickedLocation?.lng?.toFixed(5) ?? "none"}`;
+
+  if (Platform.OS === "web") {
+    return (
+      <View style={styles.recordLocationPickerMap}>
+        <iframe
+          key={mapKey}
+          title="미션 수행 위치 선택 지도"
+          srcDoc={html}
+          style={{
+            width: "100%",
+            height: "100%",
+            border: 0,
+            display: "block",
+          }}
+          allow="geolocation"
+        />
+      </View>
+    );
+  }
 
   return (
     <WebView
-      key={`${center.lat.toFixed(5)}-${center.lng.toFixed(5)}-${pickedLocation?.lat?.toFixed(5) ?? "none"}-${pickedLocation?.lng?.toFixed(5) ?? "none"}`}
+      key={mapKey}
       originWhitelist={["*"]}
       source={{ html }}
       javaScriptEnabled
       domStorageEnabled
       mixedContentMode="always"
       onMessage={(event) => {
-        try {
-          const message = JSON.parse(event.nativeEvent.data) as {
-            type?: string;
-            lat?: number;
-            lng?: number;
-          };
-
-          if (
-            message.type === "recordLocation" &&
-            isFiniteNumber(message.lat) &&
-            isFiniteNumber(message.lng)
-          ) {
-            onSelect({ lat: message.lat, lng: message.lng });
-          }
-        } catch {
-          // 지도 내부의 다른 메시지는 무시합니다.
-        }
+        parseLocationMessage(
+          event.nativeEvent.data,
+        );
       }}
       style={styles.recordLocationPickerMap}
     />
