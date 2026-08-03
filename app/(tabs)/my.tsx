@@ -179,12 +179,28 @@ const TIER_LABEL_KO: Record<Exclude<BadgeLevel, "prism" | "locked">, string> = {
 
 const TIER_ORDER: Exclude<BadgeLevel, "locked">[] = ["bronze", "silver", "gold", "prism"];
 
-const TIER_NEXT_POINTS: Record<Exclude<BadgeLevel, "locked">, number> = {
+const TIER_REQUIRED_POINTS: Record<Exclude<BadgeLevel, "locked">, number> = {
   bronze: 3,
   silver: 7,
   gold: 15,
   prism: 30,
 };
+
+function getNextTierRequiredPoints(level: BadgeLevel) {
+  switch (level) {
+    case "locked":
+      return TIER_REQUIRED_POINTS.bronze;
+    case "bronze":
+      return TIER_REQUIRED_POINTS.silver;
+    case "silver":
+      return TIER_REQUIRED_POINTS.gold;
+    case "gold":
+      return TIER_REQUIRED_POINTS.prism;
+    case "prism":
+    default:
+      return 0;
+  }
+}
 
 function normalizeBadgeLevel(value: unknown): Exclude<BadgeLevel, "locked"> {
   const level = String(value ?? "bronze").toLowerCase();
@@ -492,7 +508,7 @@ export default function MyScreen() {
                 category: row.badge_id,
                 level: "locked" as const,
                 count: row.points,
-                nextAt: TIER_NEXT_POINTS.bronze,
+                nextAt: getNextTierRequiredPoints("locked"),
                 emoji: row.badge.icon,
                 color: palette.color,
                 backgroundColor: palette.backgroundColor,
@@ -510,7 +526,7 @@ export default function MyScreen() {
               category: row.badge_id,
               level,
               count: row.points,
-              nextAt: level === "prism" ? 0 : TIER_NEXT_POINTS[level],
+              nextAt: getNextTierRequiredPoints(level),
               emoji: row.badge.icon,
               color: palette.color,
               backgroundColor: palette.backgroundColor,
@@ -859,11 +875,13 @@ export default function MyScreen() {
             <Text style={[styles.badgeDetailName, isLocked && { color: COLORS.textMuted }]}>
               {selectedBadge.name}
             </Text>
-            <LevelTag
-              text={LEVEL_LABEL[selectedBadge.level]}
-              color={isLocked ? COLORS.textMuted : selectedBadge.color}
-              backgroundColor={isLocked ? COLORS.background : selectedBadge.backgroundColor}
-            />
+            <View style={styles.badgeDetailLevelWrap}>
+              <LevelTag
+                text={LEVEL_LABEL[selectedBadge.level]}
+                color={isLocked ? COLORS.textMuted : selectedBadge.color}
+                backgroundColor={isLocked ? COLORS.background : selectedBadge.backgroundColor}
+              />
+            </View>
             {selectedBadge.title && (
               <View style={styles.titleEarnedRow}>
                 <Ionicons name="sparkles" size={15} color={COLORS.primary} />
@@ -1929,6 +1947,9 @@ const styles = StyleSheet.create({
     fontSize: 20,
     fontWeight: "800",
     color: COLORS.textMain,
+  },
+  badgeDetailLevelWrap: {
+    alignSelf: "center",
   },
   titleEarnedRow: {
     flexDirection: "row",
