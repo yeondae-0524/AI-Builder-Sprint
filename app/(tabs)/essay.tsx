@@ -1,13 +1,15 @@
 import Ionicons from "@expo/vector-icons/Ionicons";
 import * as ImagePicker from "expo-image-picker";
 import { useFocusEffect, useRouter } from "expo-router";
-import { useCallback, useMemo, useState } from "react";
+import * as Sharing from "expo-sharing";
+import { useCallback, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
   Dimensions,
   Image,
   Modal,
+  Platform,
   Pressable,
   ScrollView,
   Share,
@@ -17,6 +19,7 @@ import {
   View
 } from "react-native";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
+import { captureRef } from "react-native-view-shot";
 import { supabase } from "../../lib/supabase";
 
 // 🌿 파스텔 & 우드 감성 컬러 팔레트
@@ -88,10 +91,80 @@ type JourneyRecordItem = {
   photoPaths: string[];
 };
 
+type ComicBackground =
+  | "street"
+  | "restaurant"
+  | "exhibition"
+  | "bookstore"
+  | "workshop"
+  | "home"
+  | "cafe"
+  | "park"
+  | "transit"
+  | "generic";
+
+type ComicExpression =
+  | "determined"
+  | "nervous"
+  | "flustered"
+  | "blank"
+  | "relieved"
+  | "proud"
+  | "shocked"
+  | "thinking";
+
+
+const BEGINI_EXPRESSION_IMAGES: Record<ComicExpression, number> = {
+  determined: require("../../assets/begini/expressions/begini_determined.png"),
+  nervous: require("../../assets/begini/expressions/begini_nervous.png"),
+  flustered: require("../../assets/begini/expressions/begini_flustered.png"),
+  blank: require("../../assets/begini/expressions/begini_blank.png"),
+  relieved: require("../../assets/begini/expressions/begini_relieved.png"),
+  proud: require("../../assets/begini/expressions/begini_proud.png"),
+  shocked: require("../../assets/begini/expressions/begini_shocked.png"),
+  thinking: require("../../assets/begini/expressions/begini_thinking.png"),
+};
+
+type ComicPose =
+  | "standing"
+  | "walking"
+  | "sitting"
+  | "holding"
+  | "pointing"
+  | "hiding"
+  | "celebrating"
+  | "frozen";
+
+type ComicEffect =
+  | "none"
+  | "sweat"
+  | "shock"
+  | "zoom"
+  | "silence"
+  | "black_and_white"
+  | "sparkle"
+  | "question_marks"
+  | "speed_lines";
+
 type ComicPanel = {
   panelNumber: number;
+  background: ComicBackground;
+  expression: ComicExpression;
+  pose: ComicPose;
+  effect: ComicEffect;
   dialogue: string;
   caption: string;
+  recordIndexes: number[];
+  characterImageUrl?: string | null;
+  backgroundImageUrl?: string | null;
+};
+
+type EntertainmentComic = {
+  episodeTitle: string;
+  comedyStyle?: string;
+  panels: ComicPanel[];
+  highlightCaption?: string;
+  nextEpisode?: string;
 };
 
 type EssayInsight = {
@@ -112,7 +185,7 @@ type DraftEssay = {
   verdict: string;
   insights: EssayInsight[];
   aiRecommendation: string;
-  comic: { episodeTitle: string; panels: ComicPanel[] } | null;
+  comic: EntertainmentComic | null;
   persona: PersonaType;
   records: JourneyRecordItem[];
 };
@@ -287,6 +360,339 @@ async function getFreshAccessToken() {
   return refreshed.session.access_token;
 }
 
+
+const COMIC_BACKGROUNDS: ComicBackground[] = [
+  "street",
+  "restaurant",
+  "exhibition",
+  "bookstore",
+  "workshop",
+  "home",
+  "cafe",
+  "park",
+  "transit",
+  "generic",
+];
+
+const COMIC_EXPRESSIONS: ComicExpression[] = [
+  "determined",
+  "nervous",
+  "flustered",
+  "blank",
+  "relieved",
+  "proud",
+  "shocked",
+  "thinking",
+];
+
+const COMIC_POSES: ComicPose[] = [
+  "standing",
+  "walking",
+  "sitting",
+  "holding",
+  "pointing",
+  "hiding",
+  "celebrating",
+  "frozen",
+];
+
+const COMIC_EFFECTS: ComicEffect[] = [
+  "none",
+  "sweat",
+  "shock",
+  "zoom",
+  "silence",
+  "black_and_white",
+  "sparkle",
+  "question_marks",
+  "speed_lines",
+];
+
+function normalizeComicEnum<T extends string>(
+  value: unknown,
+  allowed: readonly T[],
+  fallback: T,
+): T {
+  const normalized = String(value ?? "").trim() as T;
+  return allowed.includes(normalized) ? normalized : fallback;
+}
+
+function normalizeComicPanel(
+  value: unknown,
+  index: number,
+): ComicPanel | null {
+  if (!value || typeof value !== "object") return null;
+
+  const raw = value as Record<string, unknown>;
+  const dialogue = String(raw.dialogue ?? "").trim();
+  const caption = String(raw.caption ?? "").trim();
+
+  if (!dialogue || !caption) return null;
+
+  return {
+    panelNumber: Number(raw.panelNumber ?? index + 1),
+    background: normalizeComicEnum(
+      raw.background,
+      COMIC_BACKGROUNDS,
+      "generic",
+    ),
+    expression: normalizeComicEnum(
+      raw.expression,
+      COMIC_EXPRESSIONS,
+      "thinking",
+    ),
+    pose: normalizeComicEnum(
+      raw.pose,
+      COMIC_POSES,
+      "standing",
+    ),
+    effect: normalizeComicEnum(
+      raw.effect,
+      COMIC_EFFECTS,
+      "none",
+    ),
+    dialogue,
+    caption,
+    recordIndexes: Array.isArray(raw.recordIndexes)
+      ? raw.recordIndexes
+          .map(Number)
+          .filter((item) => Number.isInteger(item) && item >= 0)
+      : [],
+    characterImageUrl:
+      typeof raw.characterImageUrl === "string"
+        ? raw.characterImageUrl
+        : null,
+    backgroundImageUrl:
+      typeof raw.backgroundImageUrl === "string"
+        ? raw.backgroundImageUrl
+        : null,
+  };
+}
+
+function normalizeEntertainmentComic(
+  value: unknown,
+): EntertainmentComic | null {
+  if (!value || typeof value !== "object") return null;
+
+  const raw = value as Record<string, unknown>;
+  const panels = (Array.isArray(raw.panels) ? raw.panels : [])
+    .map(normalizeComicPanel)
+    .filter((item): item is ComicPanel => item !== null)
+    .slice(0, 4);
+
+  if (panels.length !== 4) return null;
+
+  return {
+    episodeTitle:
+      String(raw.episodeTitle ?? "오늘의 4컷").trim() ||
+      "오늘의 4컷",
+    comedyStyle:
+      typeof raw.comedyStyle === "string"
+        ? raw.comedyStyle
+        : undefined,
+    panels,
+    highlightCaption:
+      typeof raw.highlightCaption === "string"
+        ? raw.highlightCaption
+        : undefined,
+    nextEpisode:
+      typeof raw.nextEpisode === "string"
+        ? raw.nextEpisode
+        : undefined,
+  };
+}
+
+const COMIC_BACKGROUND_META: Record<
+  ComicBackground,
+  { color: string; emoji: string; label: string }
+> = {
+  street: { color: "#DCEAF1", emoji: "🏙️", label: "거리" },
+  restaurant: { color: "#F6E2CF", emoji: "🍽️", label: "식당" },
+  exhibition: { color: "#EEE8F7", emoji: "🖼️", label: "전시" },
+  bookstore: { color: "#E9E1D4", emoji: "📚", label: "서점" },
+  workshop: { color: "#F2E3CF", emoji: "🧶", label: "공방" },
+  home: { color: "#F1E8DA", emoji: "🏠", label: "집" },
+  cafe: { color: "#E8D8C8", emoji: "☕", label: "카페" },
+  park: { color: "#DCECD7", emoji: "🌳", label: "공원" },
+  transit: { color: "#DFE5EC", emoji: "🚌", label: "이동 중" },
+  generic: { color: "#E8EEE9", emoji: "✨", label: "일상" },
+};
+
+const COMIC_EFFECT_TEXT: Record<ComicEffect, string> = {
+  none: "",
+  sweat: "💦",
+  shock: "‼",
+  zoom: "🔍",
+  silence: "……",
+  black_and_white: "흑백",
+  sparkle: "✨",
+  question_marks: "???",
+  speed_lines: "슝—",
+};
+
+function getPoseTransform(pose: ComicPose) {
+  switch (pose) {
+    case "walking":
+      return [{ rotate: "-5deg" as const }, { translateX: -4 }];
+    case "sitting":
+      return [{ translateY: 12 }, { scaleY: 0.9 }];
+    case "pointing":
+      return [{ rotate: "4deg" as const }, { translateX: 4 }];
+    case "hiding":
+      return [{ translateX: 24 }, { scale: 0.92 }];
+    case "celebrating":
+      return [{ translateY: -7 }, { scale: 1.05 }];
+    case "frozen":
+      return [{ scale: 0.96 }];
+    case "holding":
+      return [{ rotate: "-2deg" as const }];
+    case "standing":
+    default:
+      return [];
+  }
+}
+
+function BiginiCharacter({
+  expression,
+  pose,
+  imageUrl,
+  panelNumber,
+}: {
+  expression: ComicExpression;
+  pose: ComicPose;
+  imageUrl?: string | null;
+  panelNumber?: number;
+}) {
+  const source = imageUrl
+    ? { uri: imageUrl }
+    : BEGINI_EXPRESSION_IMAGES[expression] ??
+      BEGINI_EXPRESSION_IMAGES.thinking;
+
+  return (
+    <View
+      style={[
+        styles.comicCharacterPositioner,
+        panelNumber === 3 && styles.comicCharacterPositionerThird,
+      ]}
+    >
+      <Image
+        source={source}
+        resizeMode="contain"
+        style={[
+          styles.comicCharacterImage,
+          { transform: getPoseTransform(pose) },
+        ]}
+      />
+    </View>
+  );
+}
+
+function ComicStrip({
+  comic,
+  compact = false,
+}: {
+  comic: EntertainmentComic;
+  compact?: boolean;
+}) {
+  // flexWrap에 맡기지 않고 두 줄로 직접 나눠서,
+  // 화면과 이미지 캡처 모두 항상 2 × 2 배열을 유지한다.
+  const panelRows = [
+    comic.panels.slice(0, 2),
+    comic.panels.slice(2, 4),
+  ];
+
+  return (
+    <View
+      style={[
+        styles.comicStrip,
+        compact && styles.comicStripCompact,
+      ]}
+    >
+      <View style={styles.comicStripHeader}>
+        <Text numberOfLines={2} style={styles.comicStripTitle}>
+          {comic.episodeTitle}
+        </Text>
+      </View>
+
+      <View style={styles.comicGrid}>
+        {panelRows.map((row, rowIndex) => (
+          <View key={`comic-row-${rowIndex}`} style={styles.comicRow}>
+            {row.map((panel) => {
+              const background =
+                COMIC_BACKGROUND_META[panel.background] ??
+                COMIC_BACKGROUND_META.generic;
+              const effectText = COMIC_EFFECT_TEXT[panel.effect];
+
+              return (
+                <View
+                  key={`${panel.panelNumber}-${panel.caption}`}
+                  style={[
+                    styles.comicPanel,
+                    { backgroundColor: background.color },
+                  ]}
+                >
+                  {panel.backgroundImageUrl ? (
+                    <Image
+                      source={{ uri: panel.backgroundImageUrl }}
+                      resizeMode="cover"
+                      style={styles.comicPanelBackgroundImage}
+                    />
+                  ) : null}
+
+                  <View style={styles.comicPanelTopRow}>
+                    <View style={styles.comicPanelNumber}>
+                      <Text style={styles.comicPanelNumberText}>
+                        {panel.panelNumber}
+                      </Text>
+                    </View>
+                    <Text style={styles.comicPanelScene}>
+                      {background.emoji} {background.label}
+                    </Text>
+                  </View>
+
+                  <View style={styles.comicDialogueBubble}>
+                    <Text
+                      numberOfLines={3}
+                      style={styles.comicDialogueText}
+                    >
+                      {panel.dialogue}
+                    </Text>
+                    <View style={styles.comicDialogueTail} />
+                  </View>
+
+                  <View style={styles.comicScene}>
+                    {effectText ? (
+                      <Text style={styles.comicEffectText}>
+                        {effectText}
+                      </Text>
+                    ) : null}
+
+                    <BiginiCharacter
+                      expression={panel.expression}
+                      pose={panel.pose}
+                      imageUrl={panel.characterImageUrl}
+                      panelNumber={panel.panelNumber}
+                    />
+                  </View>
+
+                  <View style={styles.comicCaptionBar}>
+                    <Text
+                      numberOfLines={2}
+                      style={styles.comicCaptionText}
+                    >
+                      {panel.caption}
+                    </Text>
+                  </View>
+                </View>
+              );
+            })}
+          </View>
+        ))}
+      </View>
+    </View>
+  );
+}
+
 export default function EssayScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
@@ -301,6 +707,8 @@ export default function EssayScreen() {
   const [generating, setGenerating] = useState(false);
   const [savingCover, setSavingCover] = useState(false);
   const [finishing, setFinishing] = useState(false);
+  const [sharingEssayId, setSharingEssayId] = useState<string | null>(null);
+  const sharedComicRef = useRef<View | null>(null);
 
   const [writerModalVisible, setPersonaWriterModalVisible] = useState(false);
   const [personaPickerVisible, setPersonaPickerVisible] = useState(false);
@@ -498,9 +906,7 @@ export default function EssayScreen() {
             : [];
 
           const parsedComic =
-            payload.comic && typeof payload.comic === "object"
-              ? (payload.comic as DraftEssay["comic"])
-              : null;
+            normalizeEntertainmentComic(payload.comic);
 
           return {
             id: String(row.id),
@@ -693,24 +1099,8 @@ export default function EssayScreen() {
             })
             .filter((item): item is EssayInsight => item !== null)
         : [];
-      const rawComic =
-        result.comic && typeof result.comic === "object"
-          ? (result.comic as Record<string, unknown>)
-          : null;
-      const rawPanels = Array.isArray(rawComic?.panels)
-        ? rawComic.panels
-        : [];
-      const panels: ComicPanel[] = rawPanels
-        .map((item, index) => {
-          if (!item || typeof item !== "object") return null;
-          const raw = item as Record<string, unknown>;
-          return {
-            panelNumber: Number(raw.panelNumber ?? index + 1),
-            dialogue: String(raw.dialogue ?? "").trim(),
-            caption: String(raw.caption ?? "").trim(),
-          };
-        })
-        .filter((item): item is ComicPanel => item !== null);
+      const normalizedComic =
+        normalizeEntertainmentComic(result.comic);
 
       setDraftEssay((previous) =>
         previous
@@ -725,14 +1115,7 @@ export default function EssayScreen() {
               aiRecommendation: String(
                 result.aiRecommendation ?? "",
               ).trim(),
-              comic: rawComic
-                ? {
-                    episodeTitle: String(
-                      rawComic.episodeTitle ?? "오늘의 4컷",
-                    ).trim(),
-                    panels,
-                  }
-                : null,
+              comic: normalizedComic,
             }
           : previous,
       );
@@ -999,14 +1382,68 @@ export default function EssayScreen() {
     );
   };
 
+  const shareEssayAsText = async (essay: CompletedEssay) => {
+    await Share.share({
+      title: essay.title,
+      message: `📖 [오롯이 에세이] ${essay.title}\n🎯 목표: ${essay.journeyGoal ?? "목표 달성"}\n🗓️ 기간: ${essay.dateRangeText}\n\n${essay.content}\n\n- 오롯이(Orosi) 서재에서 작성됨`,
+    });
+  };
+
   const handleShareEssay = async (essay: CompletedEssay) => {
+    if (sharingEssayId) return;
+
+    setSharingEssayId(essay.id);
+
     try {
-      await Share.share({
-        title: essay.title,
-        message: `📖 [오롯이 에세이] ${essay.title}\n🎯 목표: ${essay.journeyGoal ?? "목표 달성"}\n🗓️ 기간: ${essay.dateRangeText}\n\n${essay.content}\n\n- 오롯이(Orosi) 서재에서 작성됨`,
+      // 4컷이 없는 일반 에세이는 기존처럼 텍스트로 공유한다.
+      if (!essay.comic) {
+        await shareEssayAsText(essay);
+        return;
+      }
+
+      // 웹에서는 로컬 임시 이미지 파일 공유가 제한되므로 텍스트 공유로 대체한다.
+      if (Platform.OS === "web") {
+        await shareEssayAsText(essay);
+        return;
+      }
+
+      if (!sharedComicRef.current) {
+        throw new Error("공유할 4컷 만화 화면을 찾지 못했습니다.");
+      }
+
+      const sharingAvailable = await Sharing.isAvailableAsync();
+      if (!sharingAvailable) {
+        await shareEssayAsText(essay);
+        return;
+      }
+
+      // 글꼴과 로컬 캐릭터 이미지가 화면에 완전히 반영된 뒤 캡처한다.
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, 80);
+      });
+
+      const imageUri = await captureRef(sharedComicRef.current, {
+        format: "png",
+        quality: 1,
+        result: "tmpfile",
+      });
+
+      await Sharing.shareAsync(imageUri, {
+        dialogTitle: `${essay.title} 4컷 만화 공유`,
+        mimeType: "image/png",
+        UTI: "public.png",
       });
     } catch (error) {
-      Alert.alert("공유 실패", "에세이를 공유하는 중 오류가 발생했습니다.");
+      console.error("4컷 만화 이미지 공유 실패:", error);
+      Alert.alert(
+        "공유 실패",
+        getErrorMessage(
+          error,
+          "4컷 만화를 이미지로 만드는 중 오류가 발생했습니다.",
+        ),
+      );
+    } finally {
+      setSharingEssayId(null);
     }
   };
 
@@ -1399,20 +1836,9 @@ export default function EssayScreen() {
                       style={styles.editorBodyInput}
                     />
 
-                    {draftEssay.comic && (
-                      <View style={styles.aiInsightBox}>
-                        <Text style={styles.aiInsightTitle}>{draftEssay.comic.episodeTitle}</Text>
-                        {draftEssay.comic.panels.map((panel) => (
-                          <View key={panel.panelNumber} style={styles.insightCardItem}>
-                            <Text style={styles.insightCardTitle}>{panel.panelNumber}컷</Text>
-                            <Text style={styles.insightCardDesc}>{panel.dialogue}</Text>
-                            <Text style={[styles.insightCardDesc, { fontWeight: "700", marginTop: 3 }]}>
-                              자막: {panel.caption}
-                            </Text>
-                          </View>
-                        ))}
-                      </View>
-                    )}
+                    {draftEssay.comic ? (
+                      <ComicStrip comic={draftEssay.comic} />
+                    ) : null}
 
                     {draftEssay.insights.length > 0 && (
                       <View style={styles.aiInsightBox}>
@@ -1557,6 +1983,17 @@ export default function EssayScreen() {
 
                 <View style={styles.divider} />
 
+                {selectedEssay.comic ? (
+                  <View
+                    ref={sharedComicRef}
+                    collapsable={false}
+                    renderToHardwareTextureAndroid
+                    style={styles.comicShareCapture}
+                  >
+                    <ComicStrip comic={selectedEssay.comic} compact />
+                  </View>
+                ) : null}
+
                 <Text style={styles.bookOpenBody}>{selectedEssay.content}</Text>
 
                 <View style={styles.saveShareActionRow}>
@@ -1568,10 +2005,22 @@ export default function EssayScreen() {
                   </Pressable>
 
                   <Pressable
-                    style={styles.publishBtn}
-                    onPress={() => handleShareEssay(selectedEssay)}
+                    style={[
+                      styles.publishBtn,
+                      sharingEssayId === selectedEssay.id &&
+                        styles.shareButtonDisabled,
+                    ]}
+                    onPress={() => void handleShareEssay(selectedEssay)}
+                    disabled={sharingEssayId === selectedEssay.id}
                   >
-                    <Text style={styles.publishBtnText}>공유하기</Text>
+                    {sharingEssayId === selectedEssay.id ? (
+                      <View style={styles.shareButtonLoadingContent}>
+                        <ActivityIndicator size="small" color={COLORS.white} />
+                        <Text style={styles.publishBtnText}>이미지 만드는 중</Text>
+                      </View>
+                    ) : (
+                      <Text style={styles.publishBtnText}>공유하기</Text>
+                    )}
                   </Pressable>
                 </View>
 
@@ -2070,6 +2519,170 @@ const styles = StyleSheet.create({
     lineHeight: 16,
   },
 
+  comicStrip: {
+    width: "100%",
+    aspectRatio: 4 / 5,
+    marginBottom: 18,
+    padding: 10,
+    overflow: "hidden",
+    borderWidth: 1.5,
+    borderColor: "#D8D0C2",
+    borderRadius: 16,
+    backgroundColor: "#FFFDF8",
+  },
+  comicStripCompact: {
+    marginTop: 0,
+    marginBottom: 0,
+    padding: 10,
+  },
+  comicStripHeader: {
+    minHeight: 38,
+    marginBottom: 7,
+    paddingHorizontal: 3,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  comicStripTitle: {
+    color: COLORS.textMain,
+    fontSize: 15,
+    lineHeight: 19,
+    fontWeight: "900",
+    textAlign: "center",
+  },
+  comicGrid: {
+    flex: 1,
+    minHeight: 0,
+    flexDirection: "column",
+    gap: 6,
+  },
+  comicRow: {
+    flex: 1,
+    minHeight: 0,
+    flexDirection: "row",
+    gap: 6,
+  },
+  comicPanel: {
+    position: "relative",
+    flex: 1,
+    minWidth: 0,
+    minHeight: 0,
+    overflow: "hidden",
+    borderWidth: 1.5,
+    borderColor: "#26372E",
+    borderRadius: 8,
+  },
+  comicPanelBackgroundImage: {
+    ...StyleSheet.absoluteFillObject,
+    width: "100%",
+    height: "100%",
+    opacity: 0.42,
+  },
+  comicPanelTopRow: {
+    zIndex: 2,
+    paddingHorizontal: 5,
+    paddingTop: 4,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  comicPanelNumber: {
+    width: 18,
+    height: 18,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: 9,
+    backgroundColor: "#26372E",
+  },
+  comicPanelNumberText: {
+    color: "#FFFFFF",
+    fontSize: 9,
+    fontWeight: "900",
+  },
+  comicPanelScene: {
+    color: "#26372E",
+    fontSize: 7.5,
+    fontWeight: "800",
+  },
+  comicDialogueBubble: {
+    position: "absolute",
+    top: 23,
+    left: 7,
+    right: 7,
+    zIndex: 6,
+    minHeight: 24,
+    maxHeight: 35,
+    paddingHorizontal: 5,
+    paddingVertical: 2,
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: 1.1,
+    borderColor: "#26372E",
+    borderRadius: 8,
+    backgroundColor: "#FFFFFF",
+  },
+  comicDialogueText: {
+    color: "#26372E",
+    fontSize: 7.4,
+    lineHeight: 9.3,
+    fontWeight: "800",
+    textAlign: "center",
+  },
+  comicDialogueTail: {
+    position: "absolute",
+    left: "47%",
+    bottom: -4,
+    width: 7,
+    height: 7,
+    borderRightWidth: 1.1,
+    borderBottomWidth: 1.1,
+    borderColor: "#26372E",
+    backgroundColor: "#FFFFFF",
+    transform: [{ rotate: "45deg" }],
+  },
+  comicScene: {
+    zIndex: 2,
+    flex: 1,
+    minHeight: 0,
+    alignItems: "center",
+    justifyContent: "flex-end",
+    paddingTop: 0,
+  },
+  comicEffectText: {
+    position: "absolute",
+    right: 6,
+    top: 7,
+    zIndex: 5,
+    color: "#E07A5F",
+    fontSize: 12,
+    fontWeight: "900",
+  },
+  comicCharacterPositioner: {
+    transform: [{ translateY: 10 }],
+  },
+  comicCharacterPositionerThird: {
+    transform: [{ translateY: -4 }],
+  },
+  comicCharacterImage: {
+    width: 82,
+    height: 88,
+  },
+  comicCaptionBar: {
+    zIndex: 3,
+    minHeight: 24,
+    paddingHorizontal: 5,
+    paddingVertical: 3,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#26372E",
+  },
+  comicCaptionText: {
+    color: "#FFFFFF",
+    fontSize: 8,
+    lineHeight: 10,
+    fontWeight: "900",
+    textAlign: "center",
+  },
+
   recordsFoldHeader: {
     flexDirection: "row",
     justifyContent: "space-between",
@@ -2282,6 +2895,22 @@ const styles = StyleSheet.create({
     lineHeight: 28,
     color: COLORS.textMain,
     marginBottom: 24,
+  },
+
+  comicShareCapture: {
+    width: "100%",
+    aspectRatio: 4 / 5,
+    marginBottom: 14,
+    backgroundColor: "#FFFDF8",
+  },
+  shareButtonDisabled: {
+    opacity: 0.68,
+  },
+  shareButtonLoadingContent: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 7,
   },
 
   saveShareActionRow: {
